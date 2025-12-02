@@ -1,0 +1,15 @@
+FROM gradle:8.5-jdk17
+
+WORKDIR /app
+
+# Copy only Gradle files first for caching
+COPY build.gradle.kts settings.gradle.kts ./
+
+# Download dependencies
+RUN gradle dependencies --no-daemon || true
+
+# Copy source code (will be overridden by volume mount)
+COPY . .
+
+# Default command - continuous build and run
+CMD gradle run --continuous --quiet

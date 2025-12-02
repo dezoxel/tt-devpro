@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew build:*)",
+      "Bash(gradle wrapper:*)",
+      "Bash(docker build:*)",
+      "Bash(docker run:*)",
+      "Bash(./dev.sh start:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

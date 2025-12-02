@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      # Mount source code for hot reload
+      - ./src:/app/src:ro
+      - ./build.gradle.kts:/app/build.gradle.kts:ro
+      - ./settings.gradle.kts:/app/settings.gradle.kts:ro
+      # Cache Gradle dependencies
+      - gradle-cache:/home/gradle/.gradle
+    environment:
+      - GRADLE_OPTS=-Dorg.gradle.daemon=false
+    stdin_open: true
+    tty: true
+
+volumes:
+  gradle-cache:
