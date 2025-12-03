@@ -85,3 +85,33 @@ data class CurrentUser(
     val fullName: String,
     val email: String
 )
+
+// Chrono models
+
+@Serializable
+data class ChronoAspect(
+    val id: Long,
+    val name: String,
+    val color: String
+)
+
+@Serializable
+data class ChronoProject(
+    val id: Long,
+    val name: String,
+    val color: String,
+    val aspect: ChronoAspect? = null
+)
+
+@Serializable
+data class ChronoTimeEntry(
+    val id: Long,
+    val description: String? = null,
+    @kotlinx.serialization.SerialName("start_time")
+    val startTime: String,
+    @kotlinx.serialization.SerialName("end_time")
+    val endTime: String? = null,
+    val duration: Long? = null,  // seconds
+    val project: ChronoProject? = null,
+    val aspect: ChronoAspect? = null
+)

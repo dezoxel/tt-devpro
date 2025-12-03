@@ -29,6 +29,7 @@ fun getToken(): String {
 fun main(args: Array<String>) {
     TtCli()
         .subcommands(
+            FillCommand(),
             ListCommand(),
             ProjectsCommand(),
             CreateCommand(),

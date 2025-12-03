@@ -24,6 +24,9 @@ dependencies {
     // JSON
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
 
+    // YAML
+    implementation("com.charleskorn.kaml:kaml:0.57.0")
+
     // Testing
     testImplementation(kotlin("test"))
 }

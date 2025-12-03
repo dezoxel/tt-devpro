@@ -5,7 +5,10 @@
       "Bash(gradle wrapper:*)",
       "Bash(docker build:*)",
       "Bash(docker run:*)",
-      "Bash(./dev.sh start:*)"
+      "Bash(./dev.sh start:*)",
+      "Bash(sqlite3:*)",
+      "Bash(docker logs:*)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []
