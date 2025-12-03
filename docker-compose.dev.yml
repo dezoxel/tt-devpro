@@ -8,6 +8,9 @@ services:
       - ./src:/app/src:ro
       - ./build.gradle.kts:/app/build.gradle.kts:ro
       - ./settings.gradle.kts:/app/settings.gradle.kts:ro
+      # Config files (use ${HOME} for proper expansion)
+      - ${HOME}/.tt-token:/root/.tt-token:ro
+      - ${HOME}/.tt-config.yaml:/root/.tt-config.yaml:ro
       # Cache Gradle dependencies
       - gradle-cache:/home/gradle/.gradle
     environment:

@@ -57,8 +57,19 @@ $activitiesText"""
 
         when (response.status.value) {
             in 200..299 -> {
-                val result: OllamaResponse = response.body()
-                return result.response.trim().take(50)
+                val body = response.bodyAsText()
+                // Ollama returns ndjson (multiple JSON lines), collect all response parts
+                val fullResponse = body.lines()
+                    .filter { it.isNotBlank() }
+                    .mapNotNull { line ->
+                        try {
+                            json.decodeFromString<OllamaResponse>(line).response
+                        } catch (e: Exception) {
+                            null
+                        }
+                    }
+                    .joinToString("")
+                return fullResponse.trim().take(50)
             }
             else -> {
                 val body = response.bodyAsText()

@@ -19,9 +19,10 @@ object Aggregator {
     fun aggregate(entries: List<ChronoTimeEntry>, config: Config): List<DayProjectAggregate> {
         val mappingByChronoProject = config.mappings.associateBy { it.chronoProject }
 
-        // Group by date and project
+        // Group by date and project (only Work projects)
         val grouped = entries
             .filter { it.project != null && it.duration != null && it.duration > 0 }
+            .filter { it.project!!.name.endsWith("DevPro - Work") }
             .groupBy { entry ->
                 val date = LocalDate.parse(entry.startTime.substring(0, 10))
                 val projectName = entry.project!!.name
