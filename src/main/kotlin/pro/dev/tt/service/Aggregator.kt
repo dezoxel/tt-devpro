@@ -19,18 +19,20 @@ object Aggregator {
     fun aggregate(entries: List<ChronoTimeEntry>, config: Config): List<DayProjectAggregate> {
         val mappingByChronoProject = config.mappings.associateBy { it.chronoProject }
 
-        // Group by date and project (only Work projects)
+        // Group by date, project, AND description (only Work projects)
+        // Only entries with same description are grouped together
         val grouped = entries
             .filter { it.project != null && it.duration != null && it.duration > 0 }
             .filter { it.project!!.name.endsWith("DevPro - Work") }
             .groupBy { entry ->
                 val date = LocalDate.parse(entry.startTime.substring(0, 10))
                 val projectName = entry.project!!.name
-                date to projectName
+                val description = entry.description?.trim() ?: ""
+                Triple(date, projectName, description)
             }
 
         return grouped.map { (key, entriesGroup) ->
-            val (date, chronoProject) = key
+            val (date, chronoProject, description) = key
 
             val mapping = mappingByChronoProject[chronoProject]
                 ?: error(buildUnmappedProjectError(chronoProject, config))
@@ -38,15 +40,11 @@ object Aggregator {
             val totalSeconds = entriesGroup.sumOf { it.duration ?: 0 }
             val totalHours = totalSeconds / 3600.0
 
-            val descriptions = entriesGroup
-                .mapNotNull { it.description }
-                .filter { it.isNotBlank() }
-
             DayProjectAggregate(
                 date = date,
                 chronoProject = chronoProject,
                 totalHours = totalHours,
-                descriptions = descriptions,
+                descriptions = if (description.isNotBlank()) listOf(description) else emptyList(),
                 devproProjectName = mapping.devproProject,
                 billability = mapping.billability
             )

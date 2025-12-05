@@ -94,10 +94,21 @@ class FillCommand : CliktCommand(
                     day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
                 }
 
-            // 6. Generate task titles via Ollama
+            // 6. Generate task titles (Operations = direct from description, others = Ollama)
             echo("Generating task titles...")
+            val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
+
             val actions = aggregates.map { agg ->
-                val taskTitle = ollamaClient.generateTaskTitle(agg.descriptions)
+                val isOperations = agg.chronoProject.startsWith("Operations -")
+                val projectSuffix = " - ${agg.chronoProject}"
+                val taskTitle = if (isOperations && agg.descriptions.isNotEmpty()) {
+                    // For Operations: use description directly, strip project suffix and date
+                    agg.descriptions.first()
+                        .removeSuffix(projectSuffix)
+                        .replace(datePattern, "")
+                } else {
+                    ollamaClient.generateTaskTitle(agg.descriptions)
+                }
                 val devproProjectId = projectIdMap[agg.devproProjectName]!!
 
                 val existing = findExisting(agg.date, devproProjectId, existingWorklogs)
@@ -152,20 +163,67 @@ class FillCommand : CliktCommand(
     }
 
     private fun showDraftTable(actions: List<FillAction>) {
-        val header = String.format("%-12s | %-15s | %6s | %-30s | %s",
-            "Date", "Project", "Hours", "Task Title", "Action")
+        // Prepare data with Chrono entries as comma-separated list
+        data class Row(
+            val date: String,
+            val chronoProject: String,
+            val chronoEntries: String,
+            val devproProject: String,
+            val taskTitle: String,
+            val hours: Double,
+            val action: String
+        )
+
+        val rows = actions.map { action ->
+            // Strip project name suffix from descriptions (e.g., " - Operations - Artory - DevPro - Work")
+            val projectSuffix = " - ${action.aggregate.chronoProject}"
+            val cleanDescriptions = action.aggregate.descriptions.map { desc ->
+                if (desc.endsWith(projectSuffix)) desc.dropLast(projectSuffix.length) else desc
+            }
+            Row(
+                date = action.aggregate.date.toString(),
+                chronoProject = action.aggregate.chronoProject,
+                chronoEntries = cleanDescriptions.joinToString("; "),
+                devproProject = action.aggregate.devproProjectName,
+                taskTitle = action.taskTitle,
+                hours = action.aggregate.totalHours,
+                action = action.action.name
+            )
+        }
+
+        // Calculate dynamic column widths (with min/max constraints)
+        val dateW = 10
+        val chronoProjW = maxOf(14, rows.maxOfOrNull { it.chronoProject.length } ?: 14)
+        val chronoEntriesW = minOf(50, maxOf(14, rows.maxOfOrNull { it.chronoEntries.length } ?: 14))
+        val devproProjW = maxOf(12, rows.maxOfOrNull { it.devproProject.length } ?: 12)
+        val taskTitleW = minOf(40, maxOf(10, rows.maxOfOrNull { it.taskTitle.length } ?: 10))
+        val hoursW = 6
+        val actionW = 6
+
+        // Header
+        val header = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %${hoursW}s | %s",
+            "Date", "Chrono Project", "Chrono Entries", "DevPro", "Task Title", "Hours", "Action")
         val separator = "-".repeat(header.length)
 
         echo(header)
         echo(separator)
 
-        actions.forEach { action ->
-            val line = String.format("%-12s | %-15s | %6.2f | %-30s | %s",
-                action.aggregate.date,
-                action.aggregate.devproProjectName.take(15),
-                action.aggregate.totalHours,
-                action.taskTitle.take(30),
-                action.action.name
+        rows.forEach { row ->
+            val entries = if (row.chronoEntries.length > chronoEntriesW)
+                row.chronoEntries.take(chronoEntriesW - 1) + "…"
+                else row.chronoEntries
+            val task = if (row.taskTitle.length > taskTitleW)
+                row.taskTitle.take(taskTitleW - 1) + "…"
+                else row.taskTitle
+
+            val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %${hoursW}.2f | %s",
+                row.date,
+                row.chronoProject,
+                entries,
+                row.devproProject,
+                task,
+                row.hours,
+                row.action
             )
             echo(line)
         }
