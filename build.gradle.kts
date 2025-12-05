@@ -27,6 +27,9 @@ dependencies {
     // YAML
     implementation("com.charleskorn.kaml:kaml:0.57.0")
 
+    // Playwright (for browser-based authentication)
+    implementation("com.microsoft.playwright:playwright:1.40.0")
+
     // Testing
     testImplementation(kotlin("test"))
 }

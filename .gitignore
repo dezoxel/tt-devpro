@@ -1,0 +1,14 @@
+# Node.js (for auth script)
+node_modules/
+package-lock.json
+
+# IDE
+.idea/
+
+# Build
+build/
+.gradle/
+
+# Local settings
+.claude/settings.local.json
+.dez/
