@@ -11,6 +11,8 @@ services:
       # Config files (use ${HOME} for proper expansion)
       - ${HOME}/.tt-token:/root/.tt-token:ro
       - ${HOME}/.tt-config.yaml:/root/.tt-config.yaml:ro
+      # Knowledge base for meeting detection
+      - ${HOME}/knowledge-base:/Users/iurii.buchchenko/knowledge-base:ro
       # Cache Gradle dependencies
       - gradle-cache:/home/gradle/.gradle
     environment:

@@ -17,6 +17,7 @@ import pro.dev.tt.model.UpdateWorklogRequest
 import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
 import pro.dev.tt.service.DayProjectAggregate
+import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
@@ -94,15 +95,28 @@ class FillCommand : CliktCommand(
                     day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
                 }
 
-            // 6. Generate task titles (Operations = direct from description, others = Ollama)
+            // 6. Generate task titles (Operations/Meetings = direct, others = Ollama)
             echo("Generating task titles...")
             val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
+            val knowledgeBase = "/Users/iurii.buchchenko/knowledge-base"
 
             val actions = aggregates.map { agg ->
                 val isOperations = agg.chronoProject.startsWith("Operations -")
                 val projectSuffix = " - ${agg.chronoProject}"
+
+                // Check if this is a meeting by reading Obsidian note
+                val isMeeting = if (agg.descriptions.isNotEmpty()) {
+                    val noteFile = File("$knowledgeBase/${agg.descriptions.first()}.md")
+                    noteFile.exists() && noteFile.readText().contains("The task represents the calendar event")
+                } else false
+
                 val taskTitle = if (isOperations && agg.descriptions.isNotEmpty()) {
                     // For Operations: use description directly, strip project suffix and date
+                    agg.descriptions.first()
+                        .removeSuffix(projectSuffix)
+                        .replace(datePattern, "")
+                } else if (isMeeting && agg.descriptions.isNotEmpty()) {
+                    // For Meetings: use task name (description without project suffix and date)
                     agg.descriptions.first()
                         .removeSuffix(projectSuffix)
                         .replace(datePattern, "")
@@ -196,7 +210,7 @@ class FillCommand : CliktCommand(
         val chronoProjW = maxOf(14, rows.maxOfOrNull { it.chronoProject.length } ?: 14)
         val chronoEntriesW = minOf(50, maxOf(14, rows.maxOfOrNull { it.chronoEntries.length } ?: 14))
         val devproProjW = maxOf(12, rows.maxOfOrNull { it.devproProject.length } ?: 12)
-        val taskTitleW = minOf(40, maxOf(10, rows.maxOfOrNull { it.taskTitle.length } ?: 10))
+        val taskTitleW = maxOf(10, rows.maxOfOrNull { it.taskTitle.length } ?: 10)
         val hoursW = 6
         val actionW = 6
 
@@ -212,9 +226,7 @@ class FillCommand : CliktCommand(
             val entries = if (row.chronoEntries.length > chronoEntriesW)
                 row.chronoEntries.take(chronoEntriesW - 1) + "…"
                 else row.chronoEntries
-            val task = if (row.taskTitle.length > taskTitleW)
-                row.taskTitle.take(taskTitleW - 1) + "…"
-                else row.taskTitle
+            val task = row.taskTitle
 
             val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %${hoursW}.2f | %s",
                 row.date,

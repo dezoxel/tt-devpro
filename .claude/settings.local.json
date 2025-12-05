@@ -8,7 +8,10 @@
       "Bash(./dev.sh start:*)",
       "Bash(sqlite3:*)",
       "Bash(docker logs:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(docker exec:*)",
+      "Bash(./dev.sh restart:*)",
+      "Bash(./dev.sh stop:*)"
     ],
     "deny": [],
     "ask": []
