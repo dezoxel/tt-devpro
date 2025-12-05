@@ -3,7 +3,6 @@ package pro.dev.tt.commands
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.parameters.options.convert
 import com.github.ajalt.clikt.parameters.options.default
-import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import kotlinx.coroutines.runBlocking
 import pro.dev.tt.api.ApiException
@@ -42,9 +41,6 @@ class FillCommand : CliktCommand(
     private val to by option("--to", help = "End date (YYYY-MM-DD), defaults to today")
         .convert { LocalDate.parse(it) }
         .default(LocalDate.now())
-
-    private val dryRun by option("--dry-run", help = "Preview without applying changes")
-        .flag()
 
     override fun run() { runBlocking {
         val config = try {
@@ -140,18 +136,13 @@ class FillCommand : CliktCommand(
             echo()
             showDraftTable(actions)
 
-            if (dryRun) {
-                echo("\n[DRY-RUN] No changes applied.")
-                return@runBlocking
-            }
-
-            // 8. Interactive review
-            echo("\n[A]pply all | [Q]uit")
+            // 8. Interactive approval
+            echo("\n[A]pprove / [C]ancel: ")
             val input = readLine()?.trim()?.lowercase()
 
             when (input) {
                 "a" -> applyAll(actions, ttClient)
-                "q", null -> echo("Cancelled.")
+                "c", null -> echo("Cancelled.")
                 else -> echo("Unknown option. Cancelled.")
             }
 
