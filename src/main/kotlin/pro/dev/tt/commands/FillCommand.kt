@@ -14,6 +14,7 @@ import pro.dev.tt.model.UpdateWorklogRequest
 import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
 import pro.dev.tt.service.DayProjectAggregate
+import pro.dev.tt.service.FillerService
 import pro.dev.tt.service.TimeNormalizer
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -25,6 +26,7 @@ data class FillAction(
     val aggregate: DayProjectAggregate,
     val normalizedHours: Double,
     val isMeeting: Boolean,
+    val isFiller: Boolean,
     val taskTitle: String,
     val devproProjectId: String,
     val action: ActionType,
@@ -229,14 +231,23 @@ class FillCommand : CliktCommand(
         // 3. Normalize to 8h per day
         val normalized = TimeNormalizer.normalize(rawAggregates)
 
+        // 3.5. Generate fillers for meeting-only days
+        val fillerEntries = FillerService.generateFillers(normalized, config.fillers)
+
         // 4. Get DevPro user and projects
         val user = ttClient.getCurrentUser()
         val projectsResponse = ttClient.getAssignedProjects(user.uniqueId, from.toString())
         val devproProjects = projectsResponse.projects
 
-        // 5. Resolve project IDs
+        // 5. Resolve project IDs (include filler projects)
         val aggregates = normalized.map { it.original }
-        val projectIdMap = Aggregator.resolveProjectIds(aggregates, devproProjects)
+        val fillerProjectNames = fillerEntries.map { it.devproProjectName }.distinct()
+        val allProjectNames = (aggregates.map { it.devproProjectName } + fillerProjectNames).distinct()
+        val projectByName = devproProjects.associateBy { it.shortName.lowercase() }
+        val projectIdMap = allProjectNames.associateWith { name ->
+            projectByName[name.lowercase()]?.uniqueId
+                ?: error("DevPro project '$name' not found")
+        }
 
         // 6. Get existing worklogs from DevPro
         val period = from.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
@@ -250,7 +261,7 @@ class FillCommand : CliktCommand(
         // 7. Generate task titles from Chrono descriptions
         val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
 
-        return normalized.map { norm ->
+        val normalActions = normalized.map { norm ->
             val agg = norm.original
             val projectSuffix = " - ${agg.chronoProject}"
 
@@ -270,12 +281,43 @@ class FillCommand : CliktCommand(
                 aggregate = agg,
                 normalizedHours = norm.normalizedHours,
                 isMeeting = norm.isMeeting,
+                isFiller = false,
                 taskTitle = taskTitle,
                 devproProjectId = devproProjectId,
                 action = if (existing != null) ActionType.UPDATE else ActionType.CREATE,
                 existingWorklogId = existing?.uniqueId
             )
         }
+
+        // 8. Create FillActions for fillers
+        val fillerActions = fillerEntries.map { filler ->
+            val devproProjectId = projectIdMap[filler.devproProjectName]!!
+            val existing = findExisting(filler.date, devproProjectId, existingWorklogs)
+
+            // Create a synthetic aggregate for the filler
+            val syntheticAggregate = DayProjectAggregate(
+                date = filler.date,
+                chronoProject = "[FILLER]",
+                totalHours = filler.hours,
+                descriptions = listOf(filler.taskTitle),
+                devproProjectName = filler.devproProjectName,
+                billability = filler.billability
+            )
+
+            FillAction(
+                aggregate = syntheticAggregate,
+                normalizedHours = filler.hours,
+                isMeeting = false,
+                isFiller = true,
+                taskTitle = filler.taskTitle,
+                devproProjectId = devproProjectId,
+                action = if (existing != null) ActionType.UPDATE else ActionType.CREATE,
+                existingWorklogId = existing?.uniqueId
+            )
+        }
+
+        return (normalActions + fillerActions)
+            .sortedWith(compareBy({ it.aggregate.date }, { it.aggregate.devproProjectName }))
     }
 
     private fun findExisting(
@@ -299,6 +341,7 @@ class FillCommand : CliktCommand(
             val originalHours: Double,
             val normalizedHours: Double,
             val isMeeting: Boolean,
+            val isFiller: Boolean,
             val action: String
         )
 
@@ -317,6 +360,7 @@ class FillCommand : CliktCommand(
                 originalHours = action.aggregate.totalHours,
                 normalizedHours = action.normalizedHours,
                 isMeeting = action.isMeeting,
+                isFiller = action.isFiller,
                 action = action.action.name
             )
         }
@@ -352,6 +396,9 @@ class FillCommand : CliktCommand(
                 String.format("%5.2f→%5.2f%s", row.originalHours, row.normalizedHours, marker)
             }
 
+            // Add filler marker to action
+            val actionStr = if (row.isFiller) "${row.action}+" else row.action
+
             val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
                 row.date,
                 row.chronoProject,
@@ -359,19 +406,24 @@ class FillCommand : CliktCommand(
                 row.devproProject,
                 task,
                 hoursStr,
-                row.action
+                actionStr
             )
             echo(line)
         }
 
         val originalTotal = actions.sumOf { it.aggregate.totalHours }
         val normalizedTotal = actions.sumOf { it.normalizedHours }
+        val fillerCount = actions.count { it.isFiller }
         echo(separator)
-        if (kotlin.math.abs(originalTotal - normalizedTotal) < 0.01) {
-            echo("Total: %.2f hours, %d entries".format(normalizedTotal, actions.size))
-        } else {
-            echo("Total: %.2f → %.2f hours, %d entries (* = meeting, not scaled)".format(originalTotal, normalizedTotal, actions.size))
+        val legend = mutableListOf<String>()
+        if (kotlin.math.abs(originalTotal - normalizedTotal) >= 0.01) {
+            legend.add("* = meeting, not scaled")
         }
+        if (fillerCount > 0) {
+            legend.add("+ = auto-filler")
+        }
+        val legendStr = if (legend.isNotEmpty()) " (${legend.joinToString(", ")})" else ""
+        echo("Total: %.2f → %.2f hours, %d entries%s".format(originalTotal, normalizedTotal, actions.size, legendStr))
     }
 
     private suspend fun applyAll(actions: List<FillAction>, client: TtApiClient) {
