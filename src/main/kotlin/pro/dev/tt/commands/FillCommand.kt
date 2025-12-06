@@ -15,7 +15,7 @@ import pro.dev.tt.model.UpdateWorklogRequest
 import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
 import pro.dev.tt.service.DayProjectAggregate
-import java.io.File
+import pro.dev.tt.service.TimeNormalizer
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.Month
@@ -24,6 +24,8 @@ import java.time.temporal.TemporalAdjusters
 
 data class FillAction(
     val aggregate: DayProjectAggregate,
+    val normalizedHours: Double,
+    val isMeeting: Boolean,
     val taskTitle: String,
     val devproProjectId: String,
     val action: ActionType,
@@ -222,23 +224,27 @@ class FillCommand : CliktCommand(
             return emptyList()
         }
 
-        // 2. Aggregate by date+project
-        val aggregates = Aggregator.aggregate(entries, config)
+        // 2. Aggregate by date+project (with date filtering)
+        val rawAggregates = Aggregator.aggregate(entries, config, from, to)
 
-        if (aggregates.isEmpty()) {
+        if (rawAggregates.isEmpty()) {
             echo("No work entries to process (entries without project or duration are skipped).")
             return emptyList()
         }
 
-        // 3. Get DevPro user and projects
+        // 3. Normalize to 8h per day
+        val normalized = TimeNormalizer.normalize(rawAggregates)
+
+        // 4. Get DevPro user and projects
         val user = ttClient.getCurrentUser()
         val projectsResponse = ttClient.getAssignedProjects(user.uniqueId, from.toString())
         val devproProjects = projectsResponse.projects
 
-        // 4. Resolve project IDs
+        // 5. Resolve project IDs
+        val aggregates = normalized.map { it.original }
         val projectIdMap = Aggregator.resolveProjectIds(aggregates, devproProjects)
 
-        // 5. Get existing worklogs from DevPro
+        // 6. Get existing worklogs from DevPro
         val period = from.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
         val normalView = ttClient.getNormalView(period)
         val existingWorklogs = normalView.pageList
@@ -247,28 +253,16 @@ class FillCommand : CliktCommand(
                 day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
             }
 
-        // 6. Generate task titles (Operations/Meetings = direct, others = Ollama)
+        // 7. Generate task titles (Meetings = direct, others = Ollama)
         echo("Generating task titles...")
         val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
-        val knowledgeBase = "/Users/iurii.buchchenko/knowledge-base"
 
-        return aggregates.map { agg ->
-            val isOperations = agg.chronoProject.startsWith("Operations -")
+        return normalized.map { norm ->
+            val agg = norm.original
             val projectSuffix = " - ${agg.chronoProject}"
 
-            // Check if this is a meeting by reading Obsidian note
-            val isMeeting = if (agg.descriptions.isNotEmpty()) {
-                val noteFile = File("$knowledgeBase/${agg.descriptions.first()}.md")
-                noteFile.exists() && noteFile.readText().contains("The task represents the calendar event")
-            } else false
-
-            val taskTitle = if (isOperations && agg.descriptions.isNotEmpty()) {
-                // For Operations: use description directly, strip project suffix and date
-                agg.descriptions.first()
-                    .removeSuffix(projectSuffix)
-                    .replace(datePattern, "")
-            } else if (isMeeting && agg.descriptions.isNotEmpty()) {
-                // For Meetings: use task name (description without project suffix and date)
+            val taskTitle = if (norm.isMeeting && agg.descriptions.isNotEmpty()) {
+                // For Meetings/Operations: use description directly, strip project suffix and date
                 agg.descriptions.first()
                     .removeSuffix(projectSuffix)
                     .replace(datePattern, "")
@@ -281,6 +275,8 @@ class FillCommand : CliktCommand(
 
             FillAction(
                 aggregate = agg,
+                normalizedHours = norm.normalizedHours,
+                isMeeting = norm.isMeeting,
                 taskTitle = taskTitle,
                 devproProjectId = devproProjectId,
                 action = if (existing != null) ActionType.UPDATE else ActionType.CREATE,
@@ -307,7 +303,9 @@ class FillCommand : CliktCommand(
             val chronoEntries: String,
             val devproProject: String,
             val taskTitle: String,
-            val hours: Double,
+            val originalHours: Double,
+            val normalizedHours: Double,
+            val isMeeting: Boolean,
             val action: String
         )
 
@@ -323,7 +321,9 @@ class FillCommand : CliktCommand(
                 chronoEntries = cleanDescriptions.joinToString("; "),
                 devproProject = action.aggregate.devproProjectName,
                 taskTitle = action.taskTitle,
-                hours = action.aggregate.totalHours,
+                originalHours = action.aggregate.totalHours,
+                normalizedHours = action.normalizedHours,
+                isMeeting = action.isMeeting,
                 action = action.action.name
             )
         }
@@ -334,11 +334,11 @@ class FillCommand : CliktCommand(
         val chronoEntriesW = minOf(50, maxOf(14, rows.maxOfOrNull { it.chronoEntries.length } ?: 14))
         val devproProjW = maxOf(12, rows.maxOfOrNull { it.devproProject.length } ?: 12)
         val taskTitleW = maxOf(10, rows.maxOfOrNull { it.taskTitle.length } ?: 10)
-        val hoursW = 6
+        val hoursW = 13  // "5.50 → 6.00" format
         val actionW = 6
 
         // Header
-        val header = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %${hoursW}s | %s",
+        val header = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
             "Date", "Chrono Project", "Chrono Entries", "DevPro", "Task Title", "Hours", "Action")
         val separator = "-".repeat(header.length)
 
@@ -351,21 +351,34 @@ class FillCommand : CliktCommand(
                 else row.chronoEntries
             val task = row.taskTitle
 
-            val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %${hoursW}.2f | %s",
+            // Show hours as "original → normalized" if different, or just normalized if same
+            val hoursStr = if (kotlin.math.abs(row.originalHours - row.normalizedHours) < 0.01) {
+                String.format("%5.2f", row.normalizedHours)
+            } else {
+                val marker = if (row.isMeeting) "*" else ""
+                String.format("%5.2f→%5.2f%s", row.originalHours, row.normalizedHours, marker)
+            }
+
+            val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
                 row.date,
                 row.chronoProject,
                 entries,
                 row.devproProject,
                 task,
-                row.hours,
+                hoursStr,
                 row.action
             )
             echo(line)
         }
 
-        val totalHours = actions.sumOf { it.aggregate.totalHours }
+        val originalTotal = actions.sumOf { it.aggregate.totalHours }
+        val normalizedTotal = actions.sumOf { it.normalizedHours }
         echo(separator)
-        echo("Total: %.2f hours, %d entries".format(totalHours, actions.size))
+        if (kotlin.math.abs(originalTotal - normalizedTotal) < 0.01) {
+            echo("Total: %.2f hours, %d entries".format(normalizedTotal, actions.size))
+        } else {
+            echo("Total: %.2f → %.2f hours, %d entries (* = meeting, not scaled)".format(originalTotal, normalizedTotal, actions.size))
+        }
     }
 
     private suspend fun applyAll(actions: List<FillAction>, client: TtApiClient) {
@@ -382,10 +395,10 @@ class FillCommand : CliktCommand(
                             projectUniqueId = action.devproProjectId,
                             taskTitle = action.taskTitle,
                             billability = action.aggregate.billability,
-                            duration = action.aggregate.totalHours
+                            duration = action.normalizedHours
                         ))
                         created++
-                        echo("✓ Created: ${action.aggregate.date} ${action.aggregate.devproProjectName}")
+                        echo("✓ Created: ${action.aggregate.date} ${action.aggregate.devproProjectName} (${action.normalizedHours}h)")
                     }
                     ActionType.UPDATE -> {
                         client.updateWorklog(UpdateWorklogRequest(
@@ -394,10 +407,10 @@ class FillCommand : CliktCommand(
                             projectUniqueId = action.devproProjectId,
                             taskTitle = action.taskTitle,
                             billability = action.aggregate.billability,
-                            duration = action.aggregate.totalHours
+                            duration = action.normalizedHours
                         ))
                         updated++
-                        echo("✓ Updated: ${action.aggregate.date} ${action.aggregate.devproProjectName}")
+                        echo("✓ Updated: ${action.aggregate.date} ${action.aggregate.devproProjectName} (${action.normalizedHours}h)")
                     }
                     ActionType.SKIP -> {}
                 }

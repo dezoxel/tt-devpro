@@ -16,7 +16,12 @@ data class DayProjectAggregate(
 
 object Aggregator {
 
-    fun aggregate(entries: List<ChronoTimeEntry>, config: Config): List<DayProjectAggregate> {
+    fun aggregate(
+        entries: List<ChronoTimeEntry>,
+        config: Config,
+        dateFrom: LocalDate? = null,
+        dateTo: LocalDate? = null
+    ): List<DayProjectAggregate> {
         val mappingByChronoProject = config.mappings.associateBy { it.chronoProject }
 
         // Group by date, project, AND description (only Work projects)
@@ -24,6 +29,10 @@ object Aggregator {
         val grouped = entries
             .filter { it.project != null && it.duration != null && it.duration > 0 }
             .filter { it.project!!.name.endsWith("DevPro - Work") }
+            .filter { entry ->
+                val date = LocalDate.parse(entry.startTime.substring(0, 10))
+                (dateFrom == null || date >= dateFrom) && (dateTo == null || date <= dateTo)
+            }
             .groupBy { entry ->
                 val date = LocalDate.parse(entry.startTime.substring(0, 10))
                 val projectName = entry.project!!.name
