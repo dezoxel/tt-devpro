@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-tt-devpro is a Kotlin CLI tool for synchronizing time entries from Chrono (local time tracking) to DevPro Time Tracking Portal. It uses Ollama LLM to generate task titles from work descriptions.
+tt-devpro is a Kotlin CLI tool for synchronizing time entries from Chrono (local time tracking) to DevPro Time Tracking Portal.
 
 ## Build & Run Commands
 
@@ -43,16 +43,17 @@ tt-devpro is a Kotlin CLI tool for synchronizing time entries from Chrono (local
 ### Data Flow (fill command)
 1. Fetch time entries from Chrono API
 2. Aggregate entries by date+project using config mappings
-3. Generate task titles via Ollama LLM (bypassed for Operations/Meetings)
-4. Match with existing DevPro worklogs (create or update)
-5. Interactive review and apply
+3. Normalize hours to 8h/day (proportional scaling, meetings preserved)
+4. Generate task titles from Chrono descriptions
+5. Match with existing DevPro worklogs (create or update)
+6. Interactive review and apply
 
 ### Key Components
 
-- **API Clients** (`api/`): TtApiClient (DevPro), ChronoClient, OllamaClient
+- **API Clients** (`api/`): TtApiClient (DevPro), ChronoClient
 - **Config** (`config/`): YAML config loader for `~/.tt-config.yaml`
 - **Commands** (`commands/`): Clikt-based CLI commands
-- **Aggregator** (`service/`): Groups Chrono entries by date+project, resolves project mappings
+- **Services** (`service/`): Aggregator (groups entries by date+project), TimeNormalizer (8h/day normalization)
 
 ### Configuration
 
@@ -61,8 +62,6 @@ Authentication: `~/.tt-token` or `TT_TOKEN` env var
 Config file `~/.tt-config.yaml`:
 ```yaml
 chrono_api: "http://localhost:9247"
-ollama_api: "http://localhost:11434"
-ollama_model: "llama3.2"
 
 mappings:
   - chrono_project: "Your Chrono Project"

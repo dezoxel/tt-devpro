@@ -14,8 +14,6 @@ object ConfigLoader {
                 Create ~/.tt-config.yaml with:
 
                 chrono_api: "http://localhost:9247"
-                ollama_api: "http://localhost:11434"
-                ollama_model: "llama3.2"
 
                 mappings:
                   - chrono_project: "Your Chrono Project"

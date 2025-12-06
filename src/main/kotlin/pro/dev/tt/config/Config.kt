@@ -7,10 +7,6 @@ import kotlinx.serialization.Serializable
 data class Config(
     @SerialName("chrono_api")
     val chronoApi: String,
-    @SerialName("ollama_api")
-    val ollamaApi: String,
-    @SerialName("ollama_model")
-    val ollamaModel: String,
     val mappings: List<ProjectMapping>
 )
 

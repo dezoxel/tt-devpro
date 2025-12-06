@@ -6,7 +6,6 @@ import com.github.ajalt.clikt.parameters.options.option
 import kotlinx.coroutines.runBlocking
 import pro.dev.tt.api.ApiException
 import pro.dev.tt.api.ChronoClient
-import pro.dev.tt.api.OllamaClient
 import pro.dev.tt.api.TtApiClient
 import pro.dev.tt.config.ConfigLoader
 import pro.dev.tt.getToken
@@ -53,7 +52,6 @@ class FillCommand : CliktCommand(
         }
 
         val chronoClient = ChronoClient(config.chronoApi)
-        val ollamaClient = OllamaClient(config.ollamaApi, config.ollamaModel)
         val ttClient = TtApiClient(getToken())
 
         try {
@@ -61,10 +59,10 @@ class FillCommand : CliktCommand(
                 // Batch mode: process date range at once
                 val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
                 val rangeTo = to ?: LocalDate.now()
-                runBatchMode(rangeFrom, rangeTo, config, chronoClient, ollamaClient, ttClient)
+                runBatchMode(rangeFrom, rangeTo, config, chronoClient, ttClient)
             } else {
                 // Day-by-day mode: interactive processing one day at a time
-                runDayByDayMode(config, chronoClient, ollamaClient, ttClient)
+                runDayByDayMode(config, chronoClient, ttClient)
             }
         } catch (e: ApiException) {
             echo("✗ API Error: ${e.message}", err = true)
@@ -72,7 +70,6 @@ class FillCommand : CliktCommand(
             echo("✗ Error: ${e.message}", err = true)
         } finally {
             chronoClient.close()
-            ollamaClient.close()
             ttClient.close()
         }
     } }
@@ -82,10 +79,9 @@ class FillCommand : CliktCommand(
         to: LocalDate,
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
-        ollamaClient: OllamaClient,
         ttClient: TtApiClient
     ) {
-        val actions = prepareActions(from, to, config, chronoClient, ollamaClient, ttClient)
+        val actions = prepareActions(from, to, config, chronoClient, ttClient)
         if (actions.isEmpty()) return
 
         echo()
@@ -104,7 +100,6 @@ class FillCommand : CliktCommand(
     private suspend fun runDayByDayMode(
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
-        ollamaClient: OllamaClient,
         ttClient: TtApiClient
     ) {
         val today = LocalDate.now()
@@ -174,7 +169,7 @@ class FillCommand : CliktCommand(
             val devproHours = devproHoursByDay[day] ?: 0.0
             echo("═══ ${day} (DevPro: ${String.format("%.1f", devproHours)}h) ═══")
 
-            val actions = prepareActions(day, day, config, chronoClient, ollamaClient, ttClient)
+            val actions = prepareActions(day, day, config, chronoClient, ttClient)
             if (actions.isEmpty()) {
                 echo("No entries for this day.\n")
                 continue
@@ -212,7 +207,6 @@ class FillCommand : CliktCommand(
         to: LocalDate,
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
-        ollamaClient: OllamaClient,
         ttClient: TtApiClient
     ): List<FillAction> {
         // 1. Fetch Chrono entries
@@ -253,21 +247,20 @@ class FillCommand : CliktCommand(
                 day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
             }
 
-        // 7. Generate task titles (Meetings = direct, others = Ollama)
-        echo("Generating task titles...")
+        // 7. Generate task titles from Chrono descriptions
         val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
 
         return normalized.map { norm ->
             val agg = norm.original
             val projectSuffix = " - ${agg.chronoProject}"
 
-            val taskTitle = if (norm.isMeeting && agg.descriptions.isNotEmpty()) {
-                // For Meetings/Operations: use description directly, strip project suffix and date
+            // Use first description directly, strip project suffix and date
+            val taskTitle = if (agg.descriptions.isNotEmpty()) {
                 agg.descriptions.first()
                     .removeSuffix(projectSuffix)
                     .replace(datePattern, "")
             } else {
-                ollamaClient.generateTaskTitle(agg.descriptions)
+                "Development work"
             }
             val devproProjectId = projectIdMap[agg.devproProjectName]!!
 
