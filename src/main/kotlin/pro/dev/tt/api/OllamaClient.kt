@@ -3,6 +3,7 @@ package pro.dev.tt.api
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.engine.cio.*
+import io.ktor.client.plugins.*
 import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -32,6 +33,10 @@ class OllamaClient(private val baseUrl: String, private val model: String) {
     private val client = HttpClient(CIO) {
         install(ContentNegotiation) {
             json(json)
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 120_000
+            connectTimeoutMillis = 10_000
         }
     }
 
