@@ -56,22 +56,39 @@ object FillerService {
 
         if (remainingHours <= 0) return emptyList()
 
-        // Generate fillers to fill the gap
-        return fillGap(date, remainingHours, fillers)
+        // Get projects that are already present in this day
+        val presentProjects = dayEntries.map { it.original.devproProjectName }.toSet()
+
+        // Generate fillers to fill the gap, but only for projects already present
+        return fillGap(date, remainingHours, fillers, presentProjects)
     }
 
     private fun fillGap(
         date: LocalDate,
         remainingHours: Double,
-        fillers: List<Filler>
+        fillers: List<Filler>,
+        presentProjects: Set<String>
     ): List<FillerEntry> {
         val result = mutableListOf<FillerEntry>()
         var hoursToFill = remainingHours
+        val usedProjects = mutableSetOf<String>()  // Track which projects already got a filler today
 
         // Keep adding fillers until we've filled the gap
         while (hoursToFill > 0 && hoursToFill >= HOUR_INCREMENT) {
-            // Select random filler
-            val filler = fillers.random()
+            // Select random filler from projects that:
+            // 1. Are present in this day
+            // 2. Haven't been used yet for fillers
+            val availableFillers = fillers.filter {
+                presentProjects.contains(it.devproProject) && !usedProjects.contains(it.devproProject)
+            }
+
+            if (availableFillers.isEmpty()) {
+                // No more available projects for fillers, break
+                break
+            }
+
+            val filler = availableFillers.random()
+            usedProjects.add(filler.devproProject)
 
             // Calculate hours for this filler (within its range, but not more than needed)
             val maxAllowed = min(filler.maxHours, hoursToFill)

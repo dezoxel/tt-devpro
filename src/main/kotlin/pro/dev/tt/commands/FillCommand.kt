@@ -13,6 +13,7 @@ import pro.dev.tt.model.CreateWorklogRequest
 import pro.dev.tt.model.UpdateWorklogRequest
 import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
+import pro.dev.tt.service.BorrowerService
 import pro.dev.tt.service.DayProjectAggregate
 import pro.dev.tt.service.FillerService
 import pro.dev.tt.service.TimeNormalizer
@@ -27,6 +28,8 @@ data class FillAction(
     val normalizedHours: Double,
     val isMeeting: Boolean,
     val isFiller: Boolean,
+    val isBorrowed: Boolean = false,
+    val sourceDate: LocalDate? = null,  // source date if borrowed
     val taskTitle: String,
     val devproProjectId: String,
     val action: ActionType,
@@ -234,15 +237,19 @@ class FillCommand : CliktCommand(
         // 3.5. Generate fillers for meeting-only days
         val fillerEntries = FillerService.generateFillers(normalized, config.fillers)
 
+        // 3.6. Borrow tasks from 7 days ago for remaining sparse days
+        val borrowedEntries = BorrowerService.borrowForMeetingOnlyDays(normalized, fillerEntries, chronoClient, config)
+
         // 4. Get DevPro user and projects
         val user = ttClient.getCurrentUser()
         val projectsResponse = ttClient.getAssignedProjects(user.uniqueId, from.toString())
         val devproProjects = projectsResponse.projects
 
-        // 5. Resolve project IDs (include filler projects)
+        // 5. Resolve project IDs (include filler and borrowed projects)
         val aggregates = normalized.map { it.original }
         val fillerProjectNames = fillerEntries.map { it.devproProjectName }.distinct()
-        val allProjectNames = (aggregates.map { it.devproProjectName } + fillerProjectNames).distinct()
+        val borrowedProjectNames = borrowedEntries.map { it.devproProjectName }.distinct()
+        val allProjectNames = (aggregates.map { it.devproProjectName } + fillerProjectNames + borrowedProjectNames).distinct()
         val projectByName = devproProjects.associateBy { it.shortName.lowercase() }
         val projectIdMap = allProjectNames.associateWith { name ->
             projectByName[name.lowercase()]?.uniqueId
@@ -316,7 +323,36 @@ class FillCommand : CliktCommand(
             )
         }
 
-        return (normalActions + fillerActions)
+        // 9. Create FillActions for borrowed entries
+        val borrowedActions = borrowedEntries.map { borrowed ->
+            val devproProjectId = projectIdMap[borrowed.devproProjectName]!!
+            val existing = findExisting(borrowed.date, devproProjectId, existingWorklogs)
+
+            // Create a synthetic aggregate for the borrowed task
+            val syntheticAggregate = DayProjectAggregate(
+                date = borrowed.date,
+                chronoProject = "[BORROWED]",
+                totalHours = borrowed.hours,
+                descriptions = listOf(borrowed.taskTitle),
+                devproProjectName = borrowed.devproProjectName,
+                billability = borrowed.billability
+            )
+
+            FillAction(
+                aggregate = syntheticAggregate,
+                normalizedHours = borrowed.hours,
+                isMeeting = false,
+                isFiller = false,
+                isBorrowed = true,
+                sourceDate = borrowed.sourceDate,
+                taskTitle = borrowed.taskTitle,
+                devproProjectId = devproProjectId,
+                action = if (existing != null) ActionType.UPDATE else ActionType.CREATE,
+                existingWorklogId = existing?.uniqueId
+            )
+        }
+
+        return (normalActions + fillerActions + borrowedActions)
             .sortedWith(compareBy({ it.aggregate.date }, { it.aggregate.devproProjectName }))
     }
 
@@ -342,6 +378,8 @@ class FillCommand : CliktCommand(
             val normalizedHours: Double,
             val isMeeting: Boolean,
             val isFiller: Boolean,
+            val isBorrowed: Boolean,
+            val sourceDate: String?,
             val action: String
         )
 
@@ -361,6 +399,8 @@ class FillCommand : CliktCommand(
                 normalizedHours = action.normalizedHours,
                 isMeeting = action.isMeeting,
                 isFiller = action.isFiller,
+                isBorrowed = action.isBorrowed,
+                sourceDate = action.sourceDate?.toString(),
                 action = action.action.name
             )
         }
@@ -396,8 +436,12 @@ class FillCommand : CliktCommand(
                 String.format("%5.2f→%5.2f%s", row.originalHours, row.normalizedHours, marker)
             }
 
-            // Add filler marker to action
-            val actionStr = if (row.isFiller) "${row.action}+" else row.action
+            // Add filler/borrowed markers to action
+            val actionStr = when {
+                row.isBorrowed -> "${row.action}~"
+                row.isFiller -> "${row.action}+"
+                else -> row.action
+            }
 
             val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
                 row.date,
