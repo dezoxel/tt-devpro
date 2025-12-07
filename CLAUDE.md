@@ -8,32 +8,32 @@ tt-devpro is a Kotlin CLI tool for synchronizing time entries from Chrono (local
 
 ## Build & Run Commands
 
-**IMPORTANT: Always run via Docker, never use `./gradlew run` directly.**
+**IMPORTANT: Always run via Docker using Makefile commands.**
 
 ```bash
-# Start Docker container with hot reload
-./dev.sh start
+# Docker lifecycle
+make start        # Start dev environment with hot reload
+make stop         # Stop container
+make logs         # View logs
+make clean        # Clean including Gradle cache
 
-# Execute CLI commands inside Docker
-./dev.sh tt fill --from 2025-12-01 --to 2025-12-15
-./dev.sh tt list
-./dev.sh tt projects
+# CLI commands (runs inside Docker)
+make tt list
+make tt projects
+make tt fill --from 2025-12-01 --to 2025-12-15
 
-# Other dev.sh commands
-./dev.sh stop     # Stop container
-./dev.sh logs     # View logs
-./dev.sh clean    # Clean including Gradle cache
+# Auth (runs on host, not Docker)
+make auth         # Refresh DevPro token via browser
 
 # Build only (for CI or testing)
-./gradlew build
-./gradlew test
+make build
 ```
 
 ## CLI Commands
 
 - `tt fill` - Main command: sync Chrono entries to DevPro (interactive day-by-day mode)
 - `tt fill --from YYYY-MM-DD --to YYYY-MM-DD` - Batch mode for date range
-- `tt auth` - Refresh DevPro token via browser (run `./auth.sh` on host if in Docker)
+- `tt auth` - Refresh DevPro token via browser (use `make auth` which runs on host)
 - `tt list [-p YYYY-MM-DD]` - List worklogs for a period
 - `tt projects` - List available DevPro projects
 - `tt create/update/delete` - CRUD operations for worklogs
