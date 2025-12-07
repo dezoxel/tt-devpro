@@ -11,7 +11,17 @@
       "Bash(curl:*)",
       "Bash(docker exec:*)",
       "Bash(./dev.sh restart:*)",
-      "Bash(./dev.sh stop:*)"
+      "Bash(./dev.sh stop:*)",
+      "Bash(/Users/iurii.buchchenko/Projects/tt-devpro/dev.sh build:*)",
+      "Bash(/Users/iurii.buchchenko/Projects/tt-devpro/dev.sh:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker compose:*)",
+      "Bash(/Users/iurii.buchchenko/Projects/tt-devpro/auth.sh:*)",
+      "Bash(xargs:*)",
+      "Bash(make help:*)",
+      "Bash(make tt:*)",
+      "Bash(make build:*)",
+      "Bash(make stop:*)"
     ],
     "deny": [],
     "ask": []

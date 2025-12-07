@@ -110,7 +110,7 @@ class FillCommand : CliktCommand(
         val today = LocalDate.now()
         val rangeStart = today.minusDays(45)
 
-        echo("Day-by-day mode: checking last 45 days for unfilled days (<8h)...")
+        echo("Checking last 45 days for unfilled days (<8h)...")
 
         // Fetch all data for the range (need to query each month separately)
         val user = ttClient.getCurrentUser()

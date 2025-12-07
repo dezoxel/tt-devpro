@@ -12,7 +12,7 @@ import java.io.File
 
 class TtCli : CliktCommand(
     name = "tt",
-    help = "Time Tracking Portal CLI"
+    help = "Fill Dev.Pro time reports from Chrono"
 ) {
     override fun run() = Unit
 }
@@ -49,13 +49,7 @@ fun getToken(): String {
 fun main(args: Array<String>) {
     TtCli()
         .subcommands(
-            AuthCommand(),
-            FillCommand(),
-            ListCommand(),
-            ProjectsCommand(),
-            CreateCommand(),
-            UpdateCommand(),
-            DeleteCommand()
+            FillCommand()
         )
         .main(args)
 }

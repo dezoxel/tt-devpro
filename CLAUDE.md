@@ -10,33 +10,36 @@ tt-devpro is a Kotlin CLI tool for synchronizing time entries from Chrono (local
 
 **IMPORTANT: Always run via Docker using Makefile commands.**
 
+### Usage Mode (pre-built image)
 ```bash
-# Docker lifecycle
-make start        # Start dev environment with hot reload
-make stop         # Stop container
-make logs         # View logs
-make clean        # Clean including Gradle cache
-
-# CLI commands (runs inside Docker)
-make tt list
+make build        # Build production Docker image (once or after code changes)
+make tt list      # Run CLI command with pre-built image
 make tt projects
 make tt fill --from 2025-12-01 --to 2025-12-15
-
-# Auth (runs on host, not Docker)
-make auth         # Refresh DevPro token via browser
-
-# Build only (for CI or testing)
-make build
 ```
+
+### Dev Mode (hot reload)
+```bash
+make start        # Start dev environment with hot reload
+make tt list      # Runs via docker exec (picks up code changes automatically)
+make stop         # Stop dev container
+make logs         # View container logs
+```
+
+### Other
+```bash
+make auth         # Refresh DevPro token via browser (runs on host)
+make clean        # Remove containers, volumes, and images
+```
+
+**Note:** `make tt` auto-detects mode - uses dev container if running, otherwise uses pre-built image.
 
 ## CLI Commands
 
 - `tt fill` - Main command: sync Chrono entries to DevPro (interactive day-by-day mode)
 - `tt fill --from YYYY-MM-DD --to YYYY-MM-DD` - Batch mode for date range
-- `tt auth` - Refresh DevPro token via browser (use `make auth` which runs on host)
-- `tt list [-p YYYY-MM-DD]` - List worklogs for a period
-- `tt projects` - List available DevPro projects
-- `tt create/update/delete` - CRUD operations for worklogs
+
+Note: Use `make auth` to refresh token (runs on host with browser, not in Docker).
 
 ## Architecture
 

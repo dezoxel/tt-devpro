@@ -24,6 +24,9 @@ dependencies {
     // JSON
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
 
+    // Logging (suppress SLF4J warnings from Ktor)
+    implementation("org.slf4j:slf4j-nop:2.0.9")
+
     // YAML
     implementation("com.charleskorn.kaml:kaml:0.57.0")
 

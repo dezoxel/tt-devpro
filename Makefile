@@ -4,38 +4,88 @@ MAKEFLAGS += --warn-undefined-variables
 MAKEFLAGS += --no-builtin-rules
 
 docker_compose := docker compose -f docker-compose.dev.yml
-container := tt-devpro-app-1
+dev_container := tt-devpro-app-1
+image_name := tt-devpro
 
 .PHONY: help
 help:
 	@echo "TT DevPro - Available Commands"
 	@echo ""
-	@echo "Docker:"
+	@echo "Usage mode (pre-built image):"
+	@echo "  make build      Build production Docker image"
+	@echo "  make tt CMD     Run tt command (auto-detects dev/prod mode)"
+	@echo ""
+	@echo "Dev mode (hot reload):"
 	@echo "  make start      Start dev environment with hot reload"
 	@echo "  make stop       Stop dev environment"
-	@echo "  make restart    Restart dev environment"
 	@echo "  make logs       Show container logs"
-	@echo "  make clean      Stop and remove volumes (Gradle cache)"
 	@echo ""
-	@echo "Build:"
-	@echo "  make build      Build the application"
-	@echo ""
-	@echo "CLI (runs inside Docker):"
-	@echo "  make tt CMD     Run tt command (e.g., make tt list)"
-	@echo ""
-	@echo "Auth:"
+	@echo "Other:"
 	@echo "  make auth       Refresh DevPro token via browser (runs on host)"
+	@echo "  make clean      Remove containers, volumes, and images"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make tt list"
-	@echo "  make tt projects"
+	@echo "  make build && make tt list    # Usage mode"
+	@echo "  make start && make tt list    # Dev mode"
 	@echo "  make tt fill --from 2025-12-01 --to 2025-12-15"
 
 
 # =============================================================================
-# Docker Lifecycle
+# Build (production image)
 # =============================================================================
-.PHONY: start stop restart logs clean
+.PHONY: build
+
+build:
+	@echo "Building production Docker image..."
+	docker build -t $(image_name) .
+	@echo "Done. Run 'make tt <command>' to use."
+
+
+# =============================================================================
+# CLI Commands (auto-detects dev/prod mode)
+# =============================================================================
+.PHONY: tt
+
+# Check if dev container is running
+define is_dev_running
+$(shell docker ps --filter "name=$(dev_container)" --filter "status=running" -q 2>/dev/null)
+endef
+
+# Volume mounts for production mode
+define prod_volumes
+-v $(HOME)/.tt-token:/root/.tt-token:ro \
+-v $(HOME)/.tt-config.yaml:/root/.tt-config.yaml:ro \
+-v $(HOME)/knowledge-base:/Users/iurii.buchchenko/knowledge-base:ro
+endef
+
+tt:
+	@if [ -n "$(is_dev_running)" ]; then \
+		if [ -t 0 ]; then \
+			docker exec -it $(dev_container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
+		else \
+			docker exec -i $(dev_container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
+		fi; \
+	else \
+		if ! docker image inspect $(image_name) >/dev/null 2>&1; then \
+			echo "Error: No production image found. Run 'make build' first."; \
+			exit 1; \
+		fi; \
+		if [ -t 0 ]; then \
+			docker run --rm -it $(prod_volumes) $(image_name) $(filter-out $@,$(MAKECMDGOALS)); \
+		else \
+			docker run --rm -i $(prod_volumes) $(image_name) $(filter-out $@,$(MAKECMDGOALS)); \
+		fi; \
+	fi
+
+# Catch-all target to allow passing arguments to tt
+%:
+	@:
+
+
+# =============================================================================
+# Dev mode (hot reload)
+# =============================================================================
+.PHONY: start stop logs
 
 start:
 	@echo "Starting dev environment with hot reload..."
@@ -46,45 +96,8 @@ stop:
 	@echo "Stopping dev environment..."
 	$(docker_compose) down
 
-restart:
-	@echo "Restarting dev environment..."
-	$(docker_compose) restart
-
 logs:
 	$(docker_compose) logs -f
-
-clean:
-	@echo "Cleaning up dev environment and Gradle cache..."
-	$(docker_compose) down -v
-
-
-# =============================================================================
-# Build
-# =============================================================================
-.PHONY: build
-
-build:
-	@echo "Building application..."
-	./gradlew build
-
-
-# =============================================================================
-# CLI Commands (via Docker)
-# =============================================================================
-.PHONY: tt
-
-# Run tt command inside Docker container
-# Usage: make tt list, make tt fill --from 2025-12-01 --to 2025-12-15
-tt:
-	@if [ -t 0 ]; then \
-		docker exec -it $(container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
-	else \
-		docker exec -i $(container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
-	fi
-
-# Catch-all target to allow passing arguments to tt
-%:
-	@:
 
 
 # =============================================================================
@@ -95,3 +108,15 @@ tt:
 auth:
 	@echo "Refreshing DevPro token via browser..."
 	./auth.sh
+
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+.PHONY: clean
+
+clean:
+	@echo "Cleaning up..."
+	-$(docker_compose) down -v 2>/dev/null
+	-docker rmi $(image_name) 2>/dev/null
+	@echo "Done."

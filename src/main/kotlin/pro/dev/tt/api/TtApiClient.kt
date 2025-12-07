@@ -59,12 +59,12 @@ class TtApiClient(private var token: String, private val onTokenRefresh: ((Strin
 
     private fun refreshTokenIfNeeded(): Boolean {
         if (isRunningInDocker()) {
-            println("\n❌ Token expired or invalid.")
-            println("   Run ./auth.sh on your host machine to refresh the token.")
+            println("\n❌ Dev.Pro Time Tracking Portal auth token expired or invalid.")
+            println("   Run 'make auth' on your host machine to refresh the token.")
             return false
         }
 
-        println("\n⚠️  Token expired or invalid. Refreshing token...")
+        println("\n⚠️  Dev.Pro Time Tracking Portal auth token expired. Refreshing...")
         val newToken = BrowserAuthService.refreshTokenViaBrowser()
 
         if (newToken != null) {
@@ -75,7 +75,7 @@ class TtApiClient(private var token: String, private val onTokenRefresh: ((Strin
         }
 
         println("❌ Token refresh failed.")
-        println("   Run ./auth.sh on your host machine to refresh the token.")
+        println("   Run 'make auth' on your host machine to refresh the token.")
         return false
     }
 
