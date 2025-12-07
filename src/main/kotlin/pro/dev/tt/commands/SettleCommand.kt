@@ -23,7 +23,7 @@ import java.time.Month
 import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 
-data class FillAction(
+data class SettleAction(
     val aggregate: DayProjectAggregate,
     val normalizedHours: Double,
     val isMeeting: Boolean,
@@ -38,9 +38,9 @@ data class FillAction(
 
 enum class ActionType { CREATE, UPDATE, SKIP }
 
-class FillCommand : CliktCommand(
-    name = "fill",
-    help = "Fill DevPro time tracking from Chrono data"
+class SettleCommand : CliktCommand(
+    name = "settle",
+    help = "Settle daily hours: normalize to 8h, auto-fill gaps, push to DevPro"
 ) {
     private val from by option("--from", help = "Start date (YYYY-MM-DD). Without --from/--to runs in day-by-day mode")
         .convert { LocalDate.parse(it) }
@@ -158,21 +158,25 @@ class FillCommand : CliktCommand(
         }
 
         if (unfilledDays.isEmpty()) {
-            echo("All days with Chrono data are filled (≥8h in DevPro).")
+            echo("All days are settled (≥8h logged).")
             return
         }
 
-        echo("Found ${unfilledDays.size} unfilled day(s):")
+        echo("${unfilledDays.size} days to settle:")
         unfilledDays.forEach { day ->
             val hours = devproHoursByDay[day] ?: 0.0
-            echo("  $day (${day.dayOfWeek}): ${String.format("%.1f", hours)}h in DevPro")
+            val weekday = day.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }.take(3)
+            val hoursInfo = if (hours < 0.01) "" else " (${String.format("%.1f", hours)}h)"
+            echo("  $day $weekday$hoursInfo")
         }
         echo()
 
         // Process day by day
         for (day in unfilledDays) {
             val devproHours = devproHoursByDay[day] ?: 0.0
-            echo("═══ ${day} (DevPro: ${String.format("%.1f", devproHours)}h) ═══")
+            val weekday = day.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }
+            val currentHours = if (devproHours < 0.01) "empty" else "${String.format("%.1f", devproHours)}h logged"
+            echo("═══ $day $weekday ($currentHours) ═══")
 
             val actions = prepareActions(day, day, config, chronoClient, ttClient)
             if (actions.isEmpty()) {
@@ -213,7 +217,7 @@ class FillCommand : CliktCommand(
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
         ttClient: TtApiClient
-    ): List<FillAction> {
+    ): List<SettleAction> {
         // 1. Fetch Chrono entries
         echo("Fetching Chrono data ($from to $to)...")
         val entries = chronoClient.getTimeEntries(from, to)
@@ -284,7 +288,7 @@ class FillCommand : CliktCommand(
 
             val existing = findExisting(agg.date, devproProjectId, existingWorklogs)
 
-            FillAction(
+            SettleAction(
                 aggregate = agg,
                 normalizedHours = norm.normalizedHours,
                 isMeeting = norm.isMeeting,
@@ -296,7 +300,7 @@ class FillCommand : CliktCommand(
             )
         }
 
-        // 8. Create FillActions for fillers
+        // 8. Create SettleActions for fillers
         val fillerActions = fillerEntries.map { filler ->
             val devproProjectId = projectIdMap[filler.devproProjectName]!!
             val existing = findExisting(filler.date, devproProjectId, existingWorklogs)
@@ -304,14 +308,14 @@ class FillCommand : CliktCommand(
             // Create a synthetic aggregate for the filler
             val syntheticAggregate = DayProjectAggregate(
                 date = filler.date,
-                chronoProject = "[FILLER]",
+                chronoProject = "[filler]",
                 totalHours = filler.hours,
                 descriptions = listOf(filler.taskTitle),
                 devproProjectName = filler.devproProjectName,
                 billability = filler.billability
             )
 
-            FillAction(
+            SettleAction(
                 aggregate = syntheticAggregate,
                 normalizedHours = filler.hours,
                 isMeeting = false,
@@ -323,7 +327,7 @@ class FillCommand : CliktCommand(
             )
         }
 
-        // 9. Create FillActions for borrowed entries
+        // 9. Create SettleActions for borrowed entries
         val borrowedActions = borrowedEntries.map { borrowed ->
             val devproProjectId = projectIdMap[borrowed.devproProjectName]!!
             val existing = findExisting(borrowed.date, devproProjectId, existingWorklogs)
@@ -331,14 +335,14 @@ class FillCommand : CliktCommand(
             // Create a synthetic aggregate for the borrowed task
             val syntheticAggregate = DayProjectAggregate(
                 date = borrowed.date,
-                chronoProject = "[BORROWED]",
+                chronoProject = "[borrowed]",
                 totalHours = borrowed.hours,
                 descriptions = listOf(borrowed.taskTitle),
                 devproProjectName = borrowed.devproProjectName,
                 billability = borrowed.billability
             )
 
-            FillAction(
+            SettleAction(
                 aggregate = syntheticAggregate,
                 normalizedHours = borrowed.hours,
                 isMeeting = false,
@@ -366,111 +370,100 @@ class FillCommand : CliktCommand(
         }?.first
     }
 
-    private fun showDraftTable(actions: List<FillAction>) {
-        // Prepare data with Chrono entries as comma-separated list
+    private fun showDraftTable(actions: List<SettleAction>) {
         data class Row(
             val date: String,
             val chronoProject: String,
-            val chronoEntries: String,
+            val chronoEntry: String,
             val devproProject: String,
             val taskTitle: String,
+            val type: String,
             val originalHours: Double,
             val normalizedHours: Double,
-            val isMeeting: Boolean,
-            val isFiller: Boolean,
-            val isBorrowed: Boolean,
-            val sourceDate: String?,
             val action: String
         )
 
         val rows = actions.map { action ->
-            // Strip project name suffix from descriptions (e.g., " - Operations - Artory - DevPro - Work")
-            val projectSuffix = " - ${action.aggregate.chronoProject}"
-            val cleanDescriptions = action.aggregate.descriptions.map { desc ->
-                if (desc.endsWith(projectSuffix)) desc.dropLast(projectSuffix.length) else desc
+            // Determine entry type (Meeting or Work, regardless of filler/borrowed)
+            val type = if (action.isMeeting) "Meeting" else "Work"
+
+            // Chrono entry: for filler/borrowed show marker, otherwise clean description
+            val chronoEntry = when {
+                action.isFiller -> "[filler]"
+                action.isBorrowed -> "[borrowed]"
+                else -> {
+                    val projectSuffix = " - ${action.aggregate.chronoProject}"
+                    action.aggregate.descriptions.map { desc ->
+                        if (desc.endsWith(projectSuffix)) desc.dropLast(projectSuffix.length) else desc
+                    }.joinToString("; ")
+                }
             }
+
             Row(
                 date = action.aggregate.date.toString(),
                 chronoProject = action.aggregate.chronoProject,
-                chronoEntries = cleanDescriptions.joinToString("; "),
+                chronoEntry = chronoEntry,
                 devproProject = action.aggregate.devproProjectName,
                 taskTitle = action.taskTitle,
+                type = type,
                 originalHours = action.aggregate.totalHours,
                 normalizedHours = action.normalizedHours,
-                isMeeting = action.isMeeting,
-                isFiller = action.isFiller,
-                isBorrowed = action.isBorrowed,
-                sourceDate = action.sourceDate?.toString(),
-                action = action.action.name
+                action = action.action.name.lowercase().replaceFirstChar { it.uppercase() }
             )
         }
 
         // Calculate dynamic column widths (with min/max constraints)
         val dateW = 10
         val chronoProjW = maxOf(14, rows.maxOfOrNull { it.chronoProject.length } ?: 14)
-        val chronoEntriesW = minOf(50, maxOf(14, rows.maxOfOrNull { it.chronoEntries.length } ?: 14))
-        val devproProjW = maxOf(12, rows.maxOfOrNull { it.devproProject.length } ?: 12)
-        val taskTitleW = maxOf(10, rows.maxOfOrNull { it.taskTitle.length } ?: 10)
+        val chronoEntryW = minOf(50, maxOf(12, rows.maxOfOrNull { it.chronoEntry.length } ?: 12))
+        val devproProjW = maxOf(14, rows.maxOfOrNull { it.devproProject.length } ?: 14)
+        val taskTitleW = maxOf(11, rows.maxOfOrNull { it.taskTitle.length } ?: 11)
+        val typeW = 8
         val hoursW = 13  // "5.50 → 6.00" format
-        val actionW = 6
 
         // Header
-        val header = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
-            "Date", "Chrono Project", "Chrono Entries", "DevPro", "Task Title", "Hours", "Action")
+        val header = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntryW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${typeW}s | %-${hoursW}s | %s",
+            "Date", "Chrono Project", "Chrono Entry", "DevPro Project", "DevPro Task", "Type", "Hours", "Action")
         val separator = "-".repeat(header.length)
 
         echo(header)
         echo(separator)
 
         rows.forEach { row ->
-            val entries = if (row.chronoEntries.length > chronoEntriesW)
-                row.chronoEntries.take(chronoEntriesW - 1) + "…"
-                else row.chronoEntries
-            val task = row.taskTitle
+            val entry = if (row.chronoEntry.length > chronoEntryW)
+                row.chronoEntry.take(chronoEntryW - 1) + "…"
+                else row.chronoEntry
+            val task = if (row.taskTitle.length > taskTitleW)
+                row.taskTitle.take(taskTitleW - 1) + "…"
+                else row.taskTitle
 
             // Show hours as "original → normalized" if different, or just normalized if same
             val hoursStr = if (kotlin.math.abs(row.originalHours - row.normalizedHours) < 0.01) {
                 String.format("%5.2f", row.normalizedHours)
             } else {
-                val marker = if (row.isMeeting) "*" else ""
-                String.format("%5.2f→%5.2f%s", row.originalHours, row.normalizedHours, marker)
+                String.format("%5.2f→%5.2f", row.originalHours, row.normalizedHours)
             }
 
-            // Add filler/borrowed markers to action
-            val actionStr = when {
-                row.isBorrowed -> "${row.action}~"
-                row.isFiller -> "${row.action}+"
-                else -> row.action
-            }
-
-            val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntriesW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${hoursW}s | %s",
+            val line = String.format("%-${dateW}s | %-${chronoProjW}s | %-${chronoEntryW}s | %-${devproProjW}s | %-${taskTitleW}s | %-${typeW}s | %-${hoursW}s | %s",
                 row.date,
                 row.chronoProject,
-                entries,
+                entry,
                 row.devproProject,
                 task,
+                row.type,
                 hoursStr,
-                actionStr
+                row.action
             )
             echo(line)
         }
 
         val originalTotal = actions.sumOf { it.aggregate.totalHours }
         val normalizedTotal = actions.sumOf { it.normalizedHours }
-        val fillerCount = actions.count { it.isFiller }
         echo(separator)
-        val legend = mutableListOf<String>()
-        if (kotlin.math.abs(originalTotal - normalizedTotal) >= 0.01) {
-            legend.add("* = meeting, not scaled")
-        }
-        if (fillerCount > 0) {
-            legend.add("+ = auto-filler")
-        }
-        val legendStr = if (legend.isNotEmpty()) " (${legend.joinToString(", ")})" else ""
-        echo("Total: %.2f → %.2f hours, %d entries%s".format(originalTotal, normalizedTotal, actions.size, legendStr))
+        echo("Total: %.2f → %.2f hours, %d entries".format(originalTotal, normalizedTotal, actions.size))
     }
 
-    private suspend fun applyAll(actions: List<FillAction>, client: TtApiClient) {
+    private suspend fun applyAll(actions: List<SettleAction>, client: TtApiClient) {
         var created = 0
         var updated = 0
         var errors = 0

@@ -16,18 +16,18 @@ help:
 	@echo "  make tt CMD     Run tt command (auto-detects dev/prod mode)"
 	@echo ""
 	@echo "Dev mode (hot reload):"
-	@echo "  make start      Start dev environment with hot reload"
-	@echo "  make stop       Stop dev environment"
-	@echo "  make logs       Show container logs"
+	@echo "  make dev-start  Start dev environment with hot reload"
+	@echo "  make dev-stop   Stop dev environment"
+	@echo "  make dev-logs   Show container logs"
 	@echo ""
 	@echo "Other:"
 	@echo "  make auth       Refresh DevPro token via browser (runs on host)"
 	@echo "  make clean      Remove containers, volumes, and images"
 	@echo ""
 	@echo "Examples:"
-	@echo "  make build && make tt list    # Usage mode"
-	@echo "  make start && make tt list    # Dev mode"
-	@echo "  make tt fill --from 2025-12-01 --to 2025-12-15"
+	@echo "  make build && make tt settle      # Usage mode"
+	@echo "  make dev-start && make tt settle  # Dev mode"
+	@echo "  make tt settle --from 2025-12-01 --to 2025-12-15"
 
 
 # =============================================================================
@@ -85,18 +85,18 @@ tt:
 # =============================================================================
 # Dev mode (hot reload)
 # =============================================================================
-.PHONY: start stop logs
+.PHONY: dev-start dev-stop dev-logs
 
-start:
+dev-start:
 	@echo "Starting dev environment with hot reload..."
 	$(docker_compose) up --build -d
-	@echo "Container started. Use 'make logs' to view output."
+	@echo "Container started. Use 'make dev-logs' to view output."
 
-stop:
+dev-stop:
 	@echo "Stopping dev environment..."
 	$(docker_compose) down
 
-logs:
+dev-logs:
 	$(docker_compose) logs -f
 
 

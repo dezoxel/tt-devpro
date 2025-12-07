@@ -130,11 +130,18 @@ object BorrowerService {
             val hours = roundToQuarter(maxAllowed)
 
             if (hours > 0) {
+                // Clean task title: remove project suffix and date pattern
+                val projectSuffix = " - ${sourceAggregate.chronoProject}"
+                val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
+                val cleanTitle = taskDescription
+                    .removeSuffix(projectSuffix)
+                    .replace(datePattern, "")
+
                 result.add(BorrowedEntry(
                     date = date,
                     sourceDate = sourceAggregate.date,
                     devproProjectName = sourceAggregate.devproProjectName,
-                    taskTitle = taskDescription,
+                    taskTitle = cleanTitle,
                     billability = sourceAggregate.billability,
                     hours = hours
                 ))

@@ -21,7 +21,8 @@
       "Bash(make help:*)",
       "Bash(make tt:*)",
       "Bash(make build:*)",
-      "Bash(make stop:*)"
+      "Bash(make stop:*)",
+      "Bash(make start:*)"
     ],
     "deny": [],
     "ask": []
