@@ -39,5 +39,7 @@ data class OverrideRule(
     val pattern: String,
     @SerialName("devpro_project")
     val devproProject: String,
-    val billability: String
+    val billability: String,
+    @SerialName("max_hours")
+    val maxHours: Double? = null
 )

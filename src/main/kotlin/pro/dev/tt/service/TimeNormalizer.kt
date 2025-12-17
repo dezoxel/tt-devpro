@@ -37,18 +37,22 @@ object TimeNormalizer {
             NormalizedAggregate(agg, agg.totalHours, isMeeting)
         }
 
-        val meetingsHours = withMeetingFlag.filter { it.isMeeting }.sumOf { it.normalizedHours }
-        val workEntries = withMeetingFlag.filter { !it.isMeeting }
+        // Fixed entries: meetings OR capped (maxHours set) - these are not scaled
+        val fixedEntries = withMeetingFlag.filter { it.isMeeting || it.original.maxHours != null }
+        val fixedHours = fixedEntries.sumOf { it.normalizedHours }
+
+        // Work entries: non-meetings without maxHours - these will be scaled
+        val workEntries = withMeetingFlag.filter { !it.isMeeting && it.original.maxHours == null }
         val workHours = workEntries.sumOf { it.normalizedHours }
-        val totalHours = meetingsHours + workHours
+        val totalHours = fixedHours + workHours
 
         // If already 8h (within rounding), just round everything
         if (kotlin.math.abs(totalHours - TARGET_HOURS) < HOUR_INCREMENT / 2) {
             return withMeetingFlag.map { it.copy(normalizedHours = roundToQuarter(it.normalizedHours)) }
         }
 
-        // Target hours for work entries (excluding meetings)
-        val targetWorkHours = TARGET_HOURS - meetingsHours
+        // Target hours for work entries (excluding fixed entries)
+        val targetWorkHours = TARGET_HOURS - fixedHours
 
         // If no work entries or target is negative/zero, can't normalize
         if (workEntries.isEmpty() || targetWorkHours <= 0) {
@@ -67,15 +71,15 @@ object TimeNormalizer {
         // After rounding, sum may not be exactly targetWorkHours
         // Adjust the largest entry to hit exactly target
         val scaledWorkTotal = scaledWork.sumOf { it.normalizedHours }
-        val roundedMeetings = withMeetingFlag.filter { it.isMeeting }
+        val roundedFixed = fixedEntries
             .map { it.copy(normalizedHours = roundToQuarter(it.normalizedHours)) }
-        val roundedMeetingsTotal = roundedMeetings.sumOf { it.normalizedHours }
+        val roundedFixedTotal = roundedFixed.sumOf { it.normalizedHours }
 
-        val adjustedTarget = TARGET_HOURS - roundedMeetingsTotal
+        val adjustedTarget = TARGET_HOURS - roundedFixedTotal
         val diff = adjustedTarget - scaledWorkTotal
 
         val finalWork = if (kotlin.math.abs(diff) >= HOUR_INCREMENT / 2 && scaledWork.isNotEmpty()) {
-            // Find the largest non-meeting entry and adjust it
+            // Find the largest scalable entry and adjust it
             val sorted = scaledWork.sortedByDescending { it.normalizedHours }
             val largest = sorted.first()
             val adjusted = largest.copy(normalizedHours = roundToQuarter(largest.normalizedHours + diff))
@@ -84,7 +88,7 @@ object TimeNormalizer {
             scaledWork
         }
 
-        return (roundedMeetings + finalWork)
+        return (roundedFixed + finalWork)
             .sortedWith(compareBy({ it.original.date }, { it.original.devproProjectName }))
     }
 

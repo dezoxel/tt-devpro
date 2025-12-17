@@ -12,7 +12,8 @@ data class DayProjectAggregate(
     val totalHours: Double,
     val descriptions: List<String>,
     val devproProjectName: String,
-    val billability: String
+    val billability: String,
+    val maxHours: Double? = null
 )
 
 object Aggregator {
@@ -47,16 +48,18 @@ object Aggregator {
             // Check override rules first (by description pattern)
             val override = findOverride(description, config.overrides)
 
-            val (devproProject, billability) = if (override != null) {
-                override.devproProject to override.billability
+            val (devproProject, billability, maxHours) = if (override != null) {
+                Triple(override.devproProject, override.billability, override.maxHours)
             } else {
                 val mapping = mappingByChronoProject[chronoProject]
                     ?: error(buildUnmappedProjectError(chronoProject, config))
-                mapping.devproProject to mapping.billability
+                Triple(mapping.devproProject, mapping.billability, null)
             }
 
             val totalSeconds = entriesGroup.sumOf { it.duration ?: 0 }
-            val totalHours = totalSeconds / 3600.0
+            val rawHours = totalSeconds / 3600.0
+            // Apply cap if maxHours is set
+            val totalHours = if (maxHours != null && rawHours > maxHours) maxHours else rawHours
 
             DayProjectAggregate(
                 date = date,
@@ -64,7 +67,8 @@ object Aggregator {
                 totalHours = totalHours,
                 descriptions = if (description.isNotBlank()) listOf(description) else emptyList(),
                 devproProjectName = devproProject,
-                billability = billability
+                billability = billability,
+                maxHours = maxHours
             )
         }.sortedWith(compareBy({ it.date }, { it.devproProjectName }))
     }
