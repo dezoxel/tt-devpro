@@ -1,6 +1,7 @@
 package pro.dev.tt.service
 
 import pro.dev.tt.config.Config
+import pro.dev.tt.config.OverrideRule
 import pro.dev.tt.model.ChronoTimeEntry
 import pro.dev.tt.model.Project
 import java.time.LocalDate
@@ -43,8 +44,16 @@ object Aggregator {
         return grouped.map { (key, entriesGroup) ->
             val (date, chronoProject, description) = key
 
-            val mapping = mappingByChronoProject[chronoProject]
-                ?: error(buildUnmappedProjectError(chronoProject, config))
+            // Check override rules first (by description pattern)
+            val override = findOverride(description, config.overrides)
+
+            val (devproProject, billability) = if (override != null) {
+                override.devproProject to override.billability
+            } else {
+                val mapping = mappingByChronoProject[chronoProject]
+                    ?: error(buildUnmappedProjectError(chronoProject, config))
+                mapping.devproProject to mapping.billability
+            }
 
             val totalSeconds = entriesGroup.sumOf { it.duration ?: 0 }
             val totalHours = totalSeconds / 3600.0
@@ -54,8 +63,8 @@ object Aggregator {
                 chronoProject = chronoProject,
                 totalHours = totalHours,
                 descriptions = if (description.isNotBlank()) listOf(description) else emptyList(),
-                devproProjectName = mapping.devproProject,
-                billability = mapping.billability
+                devproProjectName = devproProject,
+                billability = billability
             )
         }.sortedWith(compareBy({ it.date }, { it.devproProjectName }))
     }
@@ -70,6 +79,13 @@ object Aggregator {
         return uniqueDevproNames.associateWith { name ->
             projectByName[name.lowercase()]?.uniqueId
                 ?: error(buildDevproNotFoundError(name, devproProjects))
+        }
+    }
+
+    private fun findOverride(description: String, overrides: List<OverrideRule>): OverrideRule? {
+        if (description.isBlank()) return null
+        return overrides.find { rule ->
+            description.contains(rule.pattern, ignoreCase = true)
         }
     }
 

@@ -8,7 +8,8 @@ data class Config(
     @SerialName("chrono_api")
     val chronoApi: String,
     val mappings: List<ProjectMapping>,
-    val fillers: List<Filler> = emptyList()
+    val fillers: List<Filler> = emptyList(),
+    val overrides: List<OverrideRule> = emptyList()
 )
 
 @Serializable
@@ -31,4 +32,12 @@ data class Filler(
     val minHours: Double,
     @SerialName("max_hours")
     val maxHours: Double
+)
+
+@Serializable
+data class OverrideRule(
+    val pattern: String,
+    @SerialName("devpro_project")
+    val devproProject: String,
+    val billability: String
 )
