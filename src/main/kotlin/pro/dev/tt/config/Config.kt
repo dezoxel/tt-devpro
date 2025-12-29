@@ -11,7 +11,9 @@ data class Config(
     val fillers: List<Filler> = emptyList(),
     val overrides: List<OverrideRule> = emptyList(),
     @SerialName("project_ids")
-    val projectIds: Map<String, String> = emptyMap()
+    val projectIds: Map<String, String> = emptyMap(),
+    @SerialName("max_synthetic_hours")
+    val maxSyntheticHours: Double = 4.0
 )
 
 @Serializable

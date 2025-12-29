@@ -92,8 +92,10 @@ class SettleCommand : CliktCommand(
 
         echo()
         showDraftTable(actions)
+        val hasWarning = showUnderEightWarning(actions)
 
-        echo("\n[A]pprove / [C]ancel: ")
+        val prompt = if (hasWarning) "\n[A]pprove anyway / [C]ancel: " else "\n[A]pprove / [C]ancel: "
+        echo(prompt)
         val input = readLine()?.trim()?.lowercase()
 
         when (input) {
@@ -189,8 +191,10 @@ class SettleCommand : CliktCommand(
 
             while (true) {
                 showDraftTable(currentActions)
+                val hasWarning = showUnderEightWarning(currentActions)
 
-                echo("\n[A]pprove / [E]dit / [S]kip / [C]ancel all: ")
+                val prompt = if (hasWarning) "\n[A]pprove anyway / [E]dit / [S]kip / [C]ancel all: " else "\n[A]pprove / [E]dit / [S]kip / [C]ancel all: "
+                echo(prompt)
                 val input = readLine()?.trim()?.lowercase()
 
                 when (input) {
@@ -248,11 +252,11 @@ class SettleCommand : CliktCommand(
         // 3. Normalize to 8h per day
         val normalized = TimeNormalizer.normalize(rawAggregates)
 
-        // 3.5. Generate fillers for meeting-only days
-        val fillerEntries = FillerService.generateFillers(normalized, config.fillers)
+        // 3.5. Generate fillers for meeting-only days (capped by maxSyntheticHours)
+        val fillerEntries = FillerService.generateFillers(normalized, config.fillers, config.maxSyntheticHours)
 
-        // 3.6. Borrow tasks from 7 days ago for remaining sparse days
-        val borrowedEntries = BorrowerService.borrowForMeetingOnlyDays(normalized, fillerEntries, chronoClient, config)
+        // 3.6. Borrow tasks from 7 days ago for remaining sparse days (using remaining synthetic budget)
+        val borrowedEntries = BorrowerService.borrowForMeetingOnlyDays(normalized, fillerEntries, chronoClient, config, config.maxSyntheticHours)
 
         // 4. Get DevPro user and projects
         val user = ttClient.getCurrentUser()
@@ -367,7 +371,7 @@ class SettleCommand : CliktCommand(
         }
 
         val allActions = normalActions + fillerActions + borrowedActions
-        val adjusted = adjustToEightHours(allActions)
+        val adjusted = adjustToEightHours(allActions, config.maxSyntheticHours)
         return adjusted.sortedWith(compareBy({ it.aggregate.date }, { it.aggregate.devproProjectName }))
     }
 
@@ -375,7 +379,7 @@ class SettleCommand : CliktCommand(
      * Final adjustment to ensure each day totals exactly 8h.
      * Adjusts the largest scalable entry to compensate for rounding errors.
      */
-    private fun adjustToEightHours(actions: List<SettleAction>): List<SettleAction> {
+    private fun adjustToEightHours(actions: List<SettleAction>, maxSyntheticHours: Double): List<SettleAction> {
         val byDate = actions.groupBy { it.aggregate.date }
         val adjustedByDate = byDate.mapValues { (_, dayActions) ->
             val total = dayActions.sumOf { it.normalizedHours }
@@ -384,13 +388,35 @@ class SettleCommand : CliktCommand(
             // Skip if already at 8h (within small tolerance)
             if (kotlin.math.abs(diff) < 0.01) return@mapValues dayActions
 
+            // Calculate current synthetic hours for this day
+            val syntheticHours = dayActions.filter { it.isFiller || it.isBorrowed }.sumOf { it.normalizedHours }
+
             // Find scalable entries (non-meeting, non-manually-fixed)
             val scalable = dayActions.filter { !it.isMeeting && !it.isManuallyFixed }
             if (scalable.isEmpty()) return@mapValues dayActions
 
-            // Adjust the largest scalable entry
-            val largest = scalable.maxByOrNull { it.normalizedHours } ?: return@mapValues dayActions
-            val newHours = (((largest.normalizedHours + diff) / 0.25).toInt() * 0.25).coerceAtLeast(0.25)
+            // Prefer non-synthetic entries for adjustment to respect the cap
+            val nonSyntheticScalable = scalable.filter { !it.isFiller && !it.isBorrowed }
+            val syntheticScalable = scalable.filter { it.isFiller || it.isBorrowed }
+
+            // First try to adjust non-synthetic entries
+            if (nonSyntheticScalable.isNotEmpty()) {
+                val largest = nonSyntheticScalable.maxByOrNull { it.normalizedHours } ?: return@mapValues dayActions
+                val newHours = (((largest.normalizedHours + diff) / 0.25).toInt() * 0.25).coerceAtLeast(0.25)
+                return@mapValues dayActions.map { if (it === largest) it.copy(normalizedHours = newHours) else it }
+            }
+
+            // Only adjust synthetic if cap allows
+            val remainingSyntheticBudget = maxSyntheticHours - syntheticHours
+            if (diff > 0 && remainingSyntheticBudget <= 0.01) {
+                // Cap reached, don't increase synthetic entries
+                return@mapValues dayActions
+            }
+
+            // Adjust synthetic entry but only within remaining budget
+            val largest = syntheticScalable.maxByOrNull { it.normalizedHours } ?: return@mapValues dayActions
+            val adjustAmount = if (diff > 0) kotlin.math.min(diff, remainingSyntheticBudget) else diff
+            val newHours = (((largest.normalizedHours + adjustAmount) / 0.25).toInt() * 0.25).coerceAtLeast(0.25)
 
             dayActions.map { if (it === largest) it.copy(normalizedHours = newHours) else it }
         }
@@ -498,6 +524,31 @@ class SettleCommand : CliktCommand(
         val normalizedTotal = actions.sumOf { it.normalizedHours }
         echo(separator)
         echo("Total: %.2f → %.2f hours, %d entries".format(originalTotal, normalizedTotal, actions.size))
+    }
+
+    /**
+     * Shows warning if any day has less than 8h due to synthetic hours cap.
+     * Returns true if there are days under 8h.
+     */
+    private fun showUnderEightWarning(actions: List<SettleAction>): Boolean {
+        val byDate = actions.groupBy { it.aggregate.date }
+        val underEightDays = byDate.mapNotNull { (date, dayActions) ->
+            val totalHours = dayActions.sumOf { it.normalizedHours }
+            if (totalHours < 8.0 - 0.01) {  // small epsilon for floating point
+                date to totalHours
+            } else {
+                null
+            }
+        }
+
+        if (underEightDays.isNotEmpty()) {
+            echo("\n⚠️  WARNING: Some days don't reach 8h due to borrowed+filler cap:")
+            underEightDays.forEach { (date, hours) ->
+                echo("  $date: %.2fh (need %.2fh more)".format(hours, 8.0 - hours))
+            }
+            return true
+        }
+        return false
     }
 
     private fun editEntry(actions: List<SettleAction>): List<SettleAction> {

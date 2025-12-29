@@ -29,12 +29,14 @@ object BorrowerService {
     /**
      * Borrows tasks from 7 days ago for meeting-only days that don't reach 8h.
      * Returns a list of borrowed entries to be added.
+     * @param maxSyntheticHours maximum total hours for borrowed+filler per day
      */
     suspend fun borrowForMeetingOnlyDays(
         normalized: List<TimeNormalizer.NormalizedAggregate>,
         fillers: List<FillerService.FillerEntry>,
         chronoClient: ChronoClient,
-        config: Config
+        config: Config,
+        maxSyntheticHours: Double
     ): List<BorrowedEntry> {
         // Group by date to find days with shortfall even after fillers
         val byDate = normalized.groupBy { it.original.date }
@@ -47,14 +49,19 @@ object BorrowerService {
                 val totalHours = entryHours + fillerHours
                 val shortfall = TARGET_HOURS - totalHours
 
+                // Calculate remaining synthetic hours budget for borrowed entries
+                val remainingSyntheticBudget = maxSyntheticHours - fillerHours
+                // Cap shortfall to remaining budget
+                val cappedShortfall = min(shortfall, remainingSyntheticBudget)
+
                 // Only consider if there's a meaningful shortfall (and day is meeting-heavy)
                 // Check if day consists primarily of meetings (meeting entries > work entries in hours)
                 val meetingHours = dayEntries.filter { it.isMeeting }.sumOf { it.normalizedHours }
                 val workHours = dayEntries.filter { !it.isMeeting }.sumOf { it.normalizedHours }
                 val isMeetingHeavy = meetingHours >= workHours
 
-                if (shortfall > HOUR_INCREMENT && isMeetingHeavy) {
-                    date to shortfall
+                if (cappedShortfall > HOUR_INCREMENT && isMeetingHeavy) {
+                    date to cappedShortfall
                 } else {
                     null
                 }

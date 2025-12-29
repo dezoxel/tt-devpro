@@ -26,10 +26,12 @@ object FillerService {
     /**
      * Adds filler entries to meeting-only days that don't reach 8h.
      * Returns a list of filler entries to be added.
+     * @param maxSyntheticHours maximum total hours for fillers per day (part of borrowed+filler cap)
      */
     fun generateFillers(
         normalized: List<TimeNormalizer.NormalizedAggregate>,
-        fillers: List<Filler>
+        fillers: List<Filler>,
+        maxSyntheticHours: Double
     ): List<FillerEntry> {
         if (fillers.isEmpty()) return emptyList()
 
@@ -37,14 +39,15 @@ object FillerService {
         val byDate = normalized.groupBy { it.original.date }
 
         return byDate.flatMap { (date, dayEntries) ->
-            generateFillersForDay(date, dayEntries, fillers)
+            generateFillersForDay(date, dayEntries, fillers, maxSyntheticHours)
         }
     }
 
     private fun generateFillersForDay(
         date: LocalDate,
         dayEntries: List<TimeNormalizer.NormalizedAggregate>,
-        fillers: List<Filler>
+        fillers: List<Filler>,
+        maxSyntheticHours: Double
     ): List<FillerEntry> {
         // Check if all entries are meetings
         val allMeetings = dayEntries.all { it.isMeeting }
@@ -56,11 +59,14 @@ object FillerService {
 
         if (remainingHours <= 0) return emptyList()
 
+        // Cap fillers to maxSyntheticHours (leave room for borrowed entries)
+        val cappedRemainingHours = min(remainingHours, maxSyntheticHours)
+
         // Get projects that are already present in this day
         val presentProjects = dayEntries.map { it.original.devproProjectName }.toSet()
 
         // Generate fillers to fill the gap, but only for projects already present
-        return fillGap(date, remainingHours, fillers, presentProjects)
+        return fillGap(date, cappedRemainingHours, fillers, presentProjects)
     }
 
     private fun fillGap(
