@@ -49,7 +49,8 @@ fun getToken(): String {
 fun main(args: Array<String>) {
     TtCli()
         .subcommands(
-            SettleCommand()
+            SettleCommand(),
+            apiSubcommands()
         )
         .main(args)
 }

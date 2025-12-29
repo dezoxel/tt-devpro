@@ -6,6 +6,7 @@ MAKEFLAGS += --no-builtin-rules
 docker_compose := docker compose -f docker-compose.dev.yml
 dev_container := tt-devpro-app-1
 image_name := tt-devpro
+ARGS ?=
 
 .PHONY: help
 help:
@@ -59,11 +60,16 @@ define prod_volumes
 endef
 
 tt:
-	@if [ -n "$(is_dev_running)" ]; then \
+	@if [ -n "$(ARGS)" ]; then \
+		args="$(ARGS)"; \
+	else \
+		args="$(filter-out $@,$(MAKECMDGOALS))"; \
+	fi; \
+	if [ -n "$(is_dev_running)" ]; then \
 		if [ -t 0 ]; then \
-			docker exec -it $(dev_container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
+			docker exec -it $(dev_container) gradle run --args="$$args" --quiet; \
 		else \
-			docker exec -i $(dev_container) gradle run --args="$(filter-out $@,$(MAKECMDGOALS))" --quiet; \
+			docker exec -i $(dev_container) gradle run --args="$$args" --quiet; \
 		fi; \
 	else \
 		if ! docker image inspect $(image_name) >/dev/null 2>&1; then \
@@ -71,9 +77,9 @@ tt:
 			exit 1; \
 		fi; \
 		if [ -t 0 ]; then \
-			docker run --rm -it $(prod_volumes) $(image_name) $(filter-out $@,$(MAKECMDGOALS)); \
+			docker run --rm -it $(prod_volumes) $(image_name) $$args; \
 		else \
-			docker run --rm -i $(prod_volumes) $(image_name) $(filter-out $@,$(MAKECMDGOALS)); \
+			docker run --rm -i $(prod_volumes) $(image_name) $$args; \
 		fi; \
 	fi
 

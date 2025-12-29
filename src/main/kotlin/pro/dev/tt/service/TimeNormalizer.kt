@@ -1,7 +1,11 @@
 package pro.dev.tt.service
 
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.LocalDate
+import kotlin.io.path.name
+import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
 /**
@@ -100,9 +104,35 @@ object TimeNormalizer {
 
         // Check if description refers to a calendar event (meeting note in Obsidian)
         if (agg.descriptions.isNotEmpty()) {
-            val noteFile = File("$KNOWLEDGE_BASE/${agg.descriptions.first()}.md")
+            val description = agg.descriptions.first()
+
+            // Try exact path first
+            val noteFile = File("$KNOWLEDGE_BASE/$description.md")
             if (noteFile.exists() && noteFile.readText().contains("The task represents the calendar event")) {
                 return true
+            }
+
+            // Search recursively: extract keywords and find matching file
+            val keywords = description
+                .replace(Regex("\\[|\\]"), "")  // remove brackets
+                .split(Regex("[,\\s]+"))
+                .filter { it.length > 3 }
+                .take(4)  // first 4 significant words
+
+            if (keywords.size >= 2) {
+                val matchingFile = Files.walk(Path.of(KNOWLEDGE_BASE))
+                    .filter { it.name.endsWith(".md") }
+                    .filter { path -> keywords.all { kw -> path.name.contains(kw, ignoreCase = true) } }
+                    .findFirst()
+                    .orElse(null)
+
+                if (matchingFile != null) {
+                    try {
+                        if (matchingFile.readText().contains("The task represents the calendar event")) {
+                            return true
+                        }
+                    } catch (_: Exception) {}
+                }
             }
         }
 

@@ -24,7 +24,8 @@ data class WorklogDetail(
     val taskTitle: String,
     val billability: String,
     val loggedHours: Double,
-    val isDeletable: Boolean = true
+    val isDeletable: Boolean = true,
+    val expenseType: String? = null  // Added for testing
 )
 
 @Serializable

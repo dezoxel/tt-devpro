@@ -33,7 +33,8 @@ data class SettleAction(
     val taskTitle: String,
     val devproProjectId: String,
     val action: ActionType,
-    val existingWorklogId: String? = null
+    val existingWorklogId: String? = null,
+    val isManuallyFixed: Boolean = false
 )
 
 enum class ActionType { CREATE, UPDATE, SKIP }
@@ -184,26 +185,35 @@ class SettleCommand : CliktCommand(
                 continue
             }
 
-            showDraftTable(actions)
+            var currentActions = actions
 
-            echo("\n[A]pprove / [S]kip / [C]ancel all: ")
-            val input = readLine()?.trim()?.lowercase()
+            while (true) {
+                showDraftTable(currentActions)
 
-            when (input) {
-                "a" -> {
-                    applyAll(actions, ttClient)
-                    echo()
-                }
-                "s" -> {
-                    echo("Skipped.\n")
-                }
-                "c", null -> {
-                    echo("Cancelled.")
-                    return
-                }
-                else -> {
-                    echo("Unknown option. Cancelled.")
-                    return
+                echo("\n[A]pprove / [E]dit / [S]kip / [C]ancel all: ")
+                val input = readLine()?.trim()?.lowercase()
+
+                when (input) {
+                    "a" -> {
+                        applyAll(currentActions, ttClient)
+                        echo()
+                        break
+                    }
+                    "e" -> {
+                        currentActions = editEntry(currentActions)
+                    }
+                    "s" -> {
+                        echo("Skipped.\n")
+                        break
+                    }
+                    "c", null -> {
+                        echo("Cancelled.")
+                        return
+                    }
+                    else -> {
+                        echo("Unknown option. Cancelled.")
+                        return
+                    }
                 }
             }
         }
@@ -463,7 +473,104 @@ class SettleCommand : CliktCommand(
         echo("Total: %.2f → %.2f hours, %d entries".format(originalTotal, normalizedTotal, actions.size))
     }
 
+    private fun editEntry(actions: List<SettleAction>): List<SettleAction> {
+        val editableEntries = actions.filter { !it.isMeeting }
+        if (editableEntries.isEmpty()) {
+            echo("No editable entries (meetings cannot be edited).")
+            return actions
+        }
+
+        // Check if there are at least 2 scalable entries (need one to remain scalable after edit)
+        val scalableEntries = actions.filter { !it.isMeeting && !it.isManuallyFixed }
+        if (scalableEntries.size < 2) {
+            echo("✗ Cannot edit: need at least 2 work entries to redistribute hours.")
+            return actions
+        }
+
+        echo("\nEditable entries:")
+        editableEntries.forEachIndexed { index, action ->
+            val marker = if (action.isManuallyFixed) "*" else " "
+            echo("  ${index + 1}.$marker ${action.aggregate.devproProjectName}: ${action.taskTitle} (${String.format("%.2f", action.normalizedHours)}h)")
+        }
+        echo("  (* = manually fixed, won't scale)")
+
+        echo("\nEntry number (or 'b' to go back): ")
+        val indexInput = readLine()?.trim()
+        if (indexInput == "b" || indexInput.isNullOrEmpty()) return actions
+
+        val index = indexInput.toIntOrNull()?.minus(1)
+        if (index == null || index < 0 || index >= editableEntries.size) {
+            echo("Invalid entry number.")
+            return actions
+        }
+
+        val selectedAction = editableEntries[index]
+        echo("Current: ${String.format("%.2f", selectedAction.normalizedHours)}h. New hours: ")
+        val hoursInput = readLine()?.trim()
+        if (hoursInput.isNullOrEmpty()) return actions
+
+        val newHours = hoursInput.toDoubleOrNull()
+        if (newHours == null || newHours < 0.25) {
+            echo("Invalid. Must be >= 0.25")
+            return actions
+        }
+
+        val roundedHours = (newHours / 0.25).toInt() * 0.25
+        val updatedAction = selectedAction.copy(normalizedHours = roundedHours, isManuallyFixed = true)
+
+        val updatedActions = actions.map { if (it === selectedAction) updatedAction else it }
+        val result = renormalizeAfterEdit(updatedActions)
+
+        // Block if total < 8h
+        val totalHours = result.sumOf { it.normalizedHours }
+        if (totalHours < 7.99) {
+            echo("✗ Cannot set ${roundedHours}h — would result in ${String.format("%.2f", totalHours)}h total (< 8h)")
+            echo("  Minimum for this entry: ${String.format("%.2f", roundedHours + (8.0 - totalHours))}h")
+            return actions  // return unchanged
+        }
+
+        return result
+    }
+
+    private fun renormalizeAfterEdit(actions: List<SettleAction>): List<SettleAction> {
+        val fixedHours = actions.filter { it.isMeeting || it.isManuallyFixed }.sumOf { it.normalizedHours }
+        val scalableEntries = actions.filter { !it.isMeeting && !it.isManuallyFixed }
+
+        // No scalable entries left - just return as is (user will see warning)
+        if (scalableEntries.isEmpty()) return actions
+
+        val scalableHours = scalableEntries.sumOf { it.normalizedHours }
+        val targetHours = 8.0 - fixedHours
+        if (targetHours <= 0) {
+            return actions.map { if (!it.isMeeting && !it.isManuallyFixed) it.copy(normalizedHours = 0.25) else it }
+        }
+
+        val scaleFactor = targetHours / scalableHours
+        val scaled = scalableEntries.map {
+            it.copy(normalizedHours = maxOf(0.25, (it.normalizedHours * scaleFactor / 0.25).toInt() * 0.25))
+        }
+
+        val diff = targetHours - scaled.sumOf { it.normalizedHours }
+        val finalScaled = if (kotlin.math.abs(diff) >= 0.125 && scaled.isNotEmpty()) {
+            val sorted = scaled.sortedByDescending { it.normalizedHours }
+            val adjusted = sorted.first().copy(normalizedHours = maxOf(0.25, ((sorted.first().normalizedHours + diff) / 0.25).toInt() * 0.25))
+            listOf(adjusted) + sorted.drop(1)
+        } else scaled
+
+        val scaledMap = finalScaled.associateBy { it.aggregate }
+        return actions.map { scaledMap[it.aggregate] ?: it }
+    }
+
     private suspend fun applyAll(actions: List<SettleAction>, client: TtApiClient) {
+        // Fail fast: validate all hours are positive before any API calls
+        val invalidActions = actions.filter { it.normalizedHours <= 0 && it.action != ActionType.SKIP }
+        if (invalidActions.isNotEmpty()) {
+            invalidActions.forEach { action ->
+                echo("✗ Invalid hours: ${action.aggregate.date} ${action.aggregate.devproProjectName} (${action.normalizedHours}h)", err = true)
+            }
+            throw IllegalStateException("Found ${invalidActions.size} entries with non-positive hours. Aborting.")
+        }
+
         var created = 0
         var updated = 0
         var errors = 0
@@ -477,7 +584,8 @@ class SettleCommand : CliktCommand(
                             projectUniqueId = action.devproProjectId,
                             taskTitle = action.taskTitle,
                             billability = action.aggregate.billability,
-                            duration = action.normalizedHours
+                            duration = action.normalizedHours,
+                            expenseType = "None"
                         ))
                         created++
                         echo("✓ Created: ${action.aggregate.date} ${action.aggregate.devproProjectName} (${action.normalizedHours}h)")
@@ -489,7 +597,8 @@ class SettleCommand : CliktCommand(
                             projectUniqueId = action.devproProjectId,
                             taskTitle = action.taskTitle,
                             billability = action.aggregate.billability,
-                            duration = action.normalizedHours
+                            duration = action.normalizedHours,
+                            expenseType = "None"
                         ))
                         updated++
                         echo("✓ Updated: ${action.aggregate.date} ${action.aggregate.devproProjectName} (${action.normalizedHours}h)")

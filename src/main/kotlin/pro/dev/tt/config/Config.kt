@@ -9,7 +9,9 @@ data class Config(
     val chronoApi: String,
     val mappings: List<ProjectMapping>,
     val fillers: List<Filler> = emptyList(),
-    val overrides: List<OverrideRule> = emptyList()
+    val overrides: List<OverrideRule> = emptyList(),
+    @SerialName("project_ids")
+    val projectIds: Map<String, String> = emptyMap()
 )
 
 @Serializable
