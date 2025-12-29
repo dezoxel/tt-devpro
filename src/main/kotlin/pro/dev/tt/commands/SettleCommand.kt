@@ -366,8 +366,35 @@ class SettleCommand : CliktCommand(
             )
         }
 
-        return (normalActions + fillerActions + borrowedActions)
-            .sortedWith(compareBy({ it.aggregate.date }, { it.aggregate.devproProjectName }))
+        val allActions = normalActions + fillerActions + borrowedActions
+        val adjusted = adjustToEightHours(allActions)
+        return adjusted.sortedWith(compareBy({ it.aggregate.date }, { it.aggregate.devproProjectName }))
+    }
+
+    /**
+     * Final adjustment to ensure each day totals exactly 8h.
+     * Adjusts the largest scalable entry to compensate for rounding errors.
+     */
+    private fun adjustToEightHours(actions: List<SettleAction>): List<SettleAction> {
+        val byDate = actions.groupBy { it.aggregate.date }
+        val adjustedByDate = byDate.mapValues { (_, dayActions) ->
+            val total = dayActions.sumOf { it.normalizedHours }
+            val diff = 8.0 - total
+
+            // Skip if already at 8h (within small tolerance)
+            if (kotlin.math.abs(diff) < 0.01) return@mapValues dayActions
+
+            // Find scalable entries (non-meeting, non-manually-fixed)
+            val scalable = dayActions.filter { !it.isMeeting && !it.isManuallyFixed }
+            if (scalable.isEmpty()) return@mapValues dayActions
+
+            // Adjust the largest scalable entry
+            val largest = scalable.maxByOrNull { it.normalizedHours } ?: return@mapValues dayActions
+            val newHours = (((largest.normalizedHours + diff) / 0.25).toInt() * 0.25).coerceAtLeast(0.25)
+
+            dayActions.map { if (it === largest) it.copy(normalizedHours = newHours) else it }
+        }
+        return adjustedByDate.values.flatten()
     }
 
     private fun findExisting(

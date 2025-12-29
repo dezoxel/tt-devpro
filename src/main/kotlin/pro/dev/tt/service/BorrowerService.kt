@@ -122,7 +122,7 @@ object BorrowerService {
         var taskIndex = 0
 
         // Keep borrowing tasks until we've filled the shortfall
-        while (hoursToFill > HOUR_INCREMENT && taskIndex < sortedTasks.size) {
+        while (hoursToFill >= HOUR_INCREMENT && taskIndex < sortedTasks.size) {
             val (taskDescription, sourceAggregate) = sortedTasks[taskIndex]
 
             // Calculate hours for this borrowed task
