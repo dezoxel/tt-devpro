@@ -120,23 +120,29 @@ object BorrowerService {
         val result = mutableListOf<BorrowedEntry>()
         var hoursToFill = shortfall
         var taskIndex = 0
+        val usedTaskTitles = mutableSetOf<String>()
 
         // Keep borrowing tasks until we've filled the shortfall
         while (hoursToFill >= HOUR_INCREMENT && taskIndex < sortedTasks.size) {
             val (taskDescription, sourceAggregate) = sortedTasks[taskIndex]
+            taskIndex++
+
+            // Clean task title: remove project suffix and date pattern
+            val projectSuffix = " - ${sourceAggregate.chronoProject}"
+            val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
+            val cleanTitle = taskDescription
+                .removeSuffix(projectSuffix)
+                .replace(datePattern, "")
+
+            // Skip if already used this task title today (ensure filler diversity)
+            if (usedTaskTitles.contains(cleanTitle)) continue
+            usedTaskTitles.add(cleanTitle)
 
             // Calculate hours for this borrowed task
             val maxAllowed = min(sourceAggregate.totalHours / sourceAggregate.descriptions.size.coerceAtLeast(1), hoursToFill)
             val hours = roundToQuarter(maxAllowed)
 
             if (hours > 0) {
-                // Clean task title: remove project suffix and date pattern
-                val projectSuffix = " - ${sourceAggregate.chronoProject}"
-                val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
-                val cleanTitle = taskDescription
-                    .removeSuffix(projectSuffix)
-                    .replace(datePattern, "")
-
                 result.add(BorrowedEntry(
                     date = date,
                     sourceDate = sourceAggregate.date,
@@ -147,8 +153,6 @@ object BorrowerService {
                 ))
                 hoursToFill -= hours
             }
-
-            taskIndex++
         }
 
         return result
