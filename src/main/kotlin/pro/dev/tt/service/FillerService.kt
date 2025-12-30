@@ -27,11 +27,13 @@ object FillerService {
      * Adds filler entries to meeting-only days that don't reach 8h.
      * Returns a list of filler entries to be added.
      * @param maxSyntheticHours maximum total hours for fillers per day (part of borrowed+filler cap)
+     * @param periodBudgets mutable map tracking remaining budget per filler for the billing period
      */
     fun generateFillers(
         normalized: List<TimeNormalizer.NormalizedAggregate>,
         fillers: List<Filler>,
-        maxSyntheticHours: Double
+        maxSyntheticHours: Double,
+        periodBudgets: MutableMap<FillerBudgetService.FillerKey, Double>? = null
     ): List<FillerEntry> {
         if (fillers.isEmpty()) return emptyList()
 
@@ -39,7 +41,7 @@ object FillerService {
         val byDate = normalized.groupBy { it.original.date }
 
         return byDate.flatMap { (date, dayEntries) ->
-            generateFillersForDay(date, dayEntries, fillers, maxSyntheticHours)
+            generateFillersForDay(date, dayEntries, fillers, maxSyntheticHours, periodBudgets)
         }
     }
 
@@ -47,7 +49,8 @@ object FillerService {
         date: LocalDate,
         dayEntries: List<TimeNormalizer.NormalizedAggregate>,
         fillers: List<Filler>,
-        maxSyntheticHours: Double
+        maxSyntheticHours: Double,
+        periodBudgets: MutableMap<FillerBudgetService.FillerKey, Double>?
     ): List<FillerEntry> {
         // Check if all entries are meetings
         val allMeetings = dayEntries.all { it.isMeeting }
@@ -66,14 +69,15 @@ object FillerService {
         val presentProjects = dayEntries.map { it.original.devproProjectName }.toSet()
 
         // Generate fillers to fill the gap, but only for projects already present
-        return fillGap(date, cappedRemainingHours, fillers, presentProjects)
+        return fillGap(date, cappedRemainingHours, fillers, presentProjects, periodBudgets)
     }
 
     private fun fillGap(
         date: LocalDate,
         remainingHours: Double,
         fillers: List<Filler>,
-        presentProjects: Set<String>
+        presentProjects: Set<String>,
+        periodBudgets: MutableMap<FillerBudgetService.FillerKey, Double>?
     ): List<FillerEntry> {
         val result = mutableListOf<FillerEntry>()
         var hoursToFill = remainingHours
@@ -84,8 +88,15 @@ object FillerService {
             // Select random filler from projects that:
             // 1. Are present in this day
             // 2. Haven't been used yet for fillers
-            val availableFillers = fillers.filter {
-                presentProjects.contains(it.devproProject) && !usedProjects.contains(it.devproProject)
+            // 3. Have remaining period budget (if budget tracking is enabled)
+            val availableFillers = fillers.filter { filler ->
+                val isPresent = presentProjects.contains(filler.devproProject)
+                val notUsedToday = !usedProjects.contains(filler.devproProject)
+                val hasBudget = periodBudgets?.let {
+                    FillerBudgetService.hasRemainingBudget(it, filler.devproProject, filler.taskTitle)
+                } ?: true
+
+                isPresent && notUsedToday && hasBudget
             }
 
             if (availableFillers.isEmpty()) {
@@ -97,8 +108,23 @@ object FillerService {
             usedProjects.add(filler.devproProject)
 
             // Calculate hours for this filler (within its range, but not more than needed)
-            val maxAllowed = min(filler.maxHours, hoursToFill)
+            var maxAllowed = min(filler.maxHours, hoursToFill)
+
+            // Also cap by remaining period budget
+            if (periodBudgets != null) {
+                val key = FillerBudgetService.FillerKey(filler.devproProject, filler.taskTitle)
+                val remainingBudget = periodBudgets[key] ?: Double.MAX_VALUE
+                if (remainingBudget < Double.MAX_VALUE) {
+                    maxAllowed = min(maxAllowed, remainingBudget)
+                }
+            }
+
             val minAllowed = min(filler.minHours, maxAllowed)
+
+            // Skip if we can't meet minimum
+            if (maxAllowed < HOUR_INCREMENT) {
+                continue
+            }
 
             // Generate random hours within allowed range
             val rawHours = if (maxAllowed <= minAllowed) {
@@ -111,14 +137,21 @@ object FillerService {
             val hours = roundToQuarter(rawHours)
 
             if (hours > 0) {
-                result.add(FillerEntry(
-                    date = date,
-                    devproProjectName = filler.devproProject,
-                    taskTitle = filler.taskTitle,
-                    billability = filler.billability,
-                    hours = hours
-                ))
-                hoursToFill -= hours
+                // Consume from period budget
+                val consumed = periodBudgets?.let {
+                    FillerBudgetService.consumeBudget(it, filler.devproProject, filler.taskTitle, hours)
+                } ?: hours
+
+                if (consumed >= HOUR_INCREMENT) {
+                    result.add(FillerEntry(
+                        date = date,
+                        devproProjectName = filler.devproProject,
+                        taskTitle = filler.taskTitle,
+                        billability = filler.billability,
+                        hours = roundToQuarter(consumed)
+                    ))
+                    hoursToFill -= roundToQuarter(consumed)
+                }
             } else {
                 // Can't add more fillers, break to avoid infinite loop
                 break

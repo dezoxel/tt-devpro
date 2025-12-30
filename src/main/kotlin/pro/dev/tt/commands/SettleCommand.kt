@@ -15,6 +15,7 @@ import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
 import pro.dev.tt.service.BorrowerService
 import pro.dev.tt.service.DayProjectAggregate
+import pro.dev.tt.service.FillerBudgetService
 import pro.dev.tt.service.FillerService
 import pro.dev.tt.service.TimeNormalizer
 import java.time.DayOfWeek
@@ -252,8 +253,27 @@ class SettleCommand : CliktCommand(
         // 3. Normalize to 8h per day
         val normalized = TimeNormalizer.normalize(rawAggregates)
 
-        // 3.5. Generate fillers for meeting-only days (capped by maxSyntheticHours)
-        val fillerEntries = FillerService.generateFillers(normalized, config.fillers, config.maxSyntheticHours)
+        // 3.4. Fetch existing worklogs for budget calculation
+        val period = from.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+        val normalView = ttClient.getNormalView(period)
+        val existingWorklogs = normalView.pageList
+            .flatMap { it.detailsByDates }
+            .flatMap { day ->
+                day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
+            }
+
+        // 3.5. Calculate period budgets for fillers
+        val billingPeriods = FillerBudgetService.getBillingPeriodsInRange(from, to)
+        val periodBudgets = if (config.fillers.any { it.maxHoursPerPeriod != null }) {
+            // Calculate remaining budgets for the first billing period (most common case)
+            val primaryPeriod = billingPeriods.firstOrNull() ?: FillerBudgetService.getBillingPeriod(from)
+            FillerBudgetService.calculateRemainingBudgets(config.fillers, existingWorklogs, primaryPeriod)
+        } else {
+            null
+        }
+
+        // 3.6. Generate fillers for meeting-only days (capped by maxSyntheticHours and period budgets)
+        val fillerEntries = FillerService.generateFillers(normalized, config.fillers, config.maxSyntheticHours, periodBudgets)
 
         // 3.6. Borrow tasks from 7 days ago for remaining sparse days (using remaining synthetic budget)
         val borrowedEntries = BorrowerService.borrowForMeetingOnlyDays(normalized, fillerEntries, chronoClient, config, config.maxSyntheticHours)
@@ -274,16 +294,7 @@ class SettleCommand : CliktCommand(
                 ?: error("DevPro project '$name' not found")
         }
 
-        // 6. Get existing worklogs from DevPro
-        val period = from.format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
-        val normalView = ttClient.getNormalView(period)
-        val existingWorklogs = normalView.pageList
-            .flatMap { it.detailsByDates }
-            .flatMap { day ->
-                day.worklogsDetails.map { it to LocalDate.parse(day.date.substring(0, 10)) }
-            }
-
-        // 7. Generate task titles from Chrono descriptions
+        // 6. Generate task titles from Chrono descriptions
         val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")
 
         val normalActions = normalized.map { norm ->

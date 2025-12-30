@@ -35,7 +35,9 @@ data class Filler(
     @SerialName("min_hours")
     val minHours: Double,
     @SerialName("max_hours")
-    val maxHours: Double
+    val maxHours: Double,
+    @SerialName("max_hours_per_period")
+    val maxHoursPerPeriod: Double? = null
 )
 
 @Serializable
