@@ -194,7 +194,7 @@ class SettleCommand : CliktCommand(
                 showDraftTable(currentActions)
                 val hasWarning = showUnderEightWarning(currentActions)
 
-                val prompt = if (hasWarning) "\n[A]pprove anyway / [E]dit / [S]kip / [C]ancel all: " else "\n[A]pprove / [E]dit / [S]kip / [C]ancel all: "
+                val prompt = if (hasWarning) "\n[A]pprove anyway / [E]dit / [D]elete / [S]kip / [C]ancel all: " else "\n[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all: "
                 echo(prompt)
                 val input = readLine()?.trim()?.lowercase()
 
@@ -206,6 +206,9 @@ class SettleCommand : CliktCommand(
                     }
                     "e" -> {
                         currentActions = editEntry(currentActions)
+                    }
+                    "d" -> {
+                        currentActions = deleteEntry(currentActions)
                     }
                     "s" -> {
                         echo("Skipped.\n")
@@ -618,6 +621,47 @@ class SettleCommand : CliktCommand(
             return actions  // return unchanged
         }
 
+        return result
+    }
+
+    private fun deleteEntry(actions: List<SettleAction>): List<SettleAction> {
+        val deletableEntries = actions.filter { !it.isMeeting }
+        if (deletableEntries.isEmpty()) {
+            echo("No deletable entries (meetings cannot be deleted).")
+            return actions
+        }
+
+        // Must have at least 2 work entries to delete one
+        if (deletableEntries.size < 2) {
+            echo("✗ Cannot delete: need at least 2 work entries.")
+            return actions
+        }
+
+        echo("\nDeletable entries:")
+        deletableEntries.forEachIndexed { index, action ->
+            val marker = if (action.isManuallyFixed) "*" else " "
+            echo("  ${index + 1}.$marker ${action.aggregate.devproProjectName}: ${action.taskTitle} (${String.format("%.2f", action.normalizedHours)}h)")
+        }
+
+        echo("\nEntry number to delete (or 'b' to go back): ")
+        val input = readLine()?.trim()
+        if (input == "b" || input.isNullOrEmpty()) return actions
+
+        val index = input.toIntOrNull()?.minus(1)
+        if (index == null || index < 0 || index >= deletableEntries.size) {
+            echo("Invalid entry number.")
+            return actions
+        }
+
+        val toDelete = deletableEntries[index]
+
+        // Remove from list
+        val remaining = actions.filter { it !== toDelete }
+
+        // Redistribute hours among remaining entries
+        val result = renormalizeAfterEdit(remaining)
+
+        echo("✓ Deleted: ${toDelete.taskTitle}")
         return result
     }
 
