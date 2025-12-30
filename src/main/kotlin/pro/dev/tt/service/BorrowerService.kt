@@ -91,9 +91,15 @@ object BorrowerService {
         // Aggregate historical entries to find candidate tasks
         val historicalAggregates = Aggregator.aggregate(historyEntries, config, historyStartDate, historyEndDate)
 
+        // Filter out meetings from historical data - meetings should not be borrowed
+        val normalizedHistory = TimeNormalizer.normalize(historicalAggregates)
+        val nonMeetingAggregates = normalizedHistory
+            .filter { !it.isMeeting }
+            .map { it.original }
+
         // For each day with shortfall, borrow tasks
         return daysWithShortfall.flatMap { (date, shortfall) ->
-            borrowForDay(date, shortfall, historicalAggregates, config)
+            borrowForDay(date, shortfall, nonMeetingAggregates, config)
         }
     }
 
