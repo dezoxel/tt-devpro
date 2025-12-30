@@ -12,3 +12,4 @@ build/
 # Local settings
 .claude/settings.local.json
 .dez/
+CLAUDE.md
