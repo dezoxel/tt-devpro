@@ -78,7 +78,7 @@ object BorrowerService {
         val historyEndDate = earliestDate.minusDays(1)
 
         val historyEntries = try {
-            chronoClient.getTimeEntries(historyStartDate, historyEndDate)
+            chronoClient.getTimeEntries(historyStartDate, historyEndDate.plusDays(1))
         } catch (e: Exception) {
             // If we can't fetch history, just skip borrowing
             return emptyList()

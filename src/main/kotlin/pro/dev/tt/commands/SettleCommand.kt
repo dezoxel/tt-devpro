@@ -19,8 +19,10 @@ import pro.dev.tt.service.FillerBudgetService
 import pro.dev.tt.service.FillerService
 import pro.dev.tt.service.TimeNormalizer
 import java.time.DayOfWeek
+import java.time.Instant
 import java.time.LocalDate
 import java.time.Month
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 
@@ -139,17 +141,17 @@ class SettleCommand : CliktCommand(
                 }
         }
 
-        // Fetch Chrono entries for the range
-        val allEntries = chronoClient.getTimeEntries(rangeStart, today)
+        // Fetch Chrono entries for the range (+1 day to catch late-night local entries stored as next UTC day)
+        val allEntries = chronoClient.getTimeEntries(rangeStart, today.plusDays(1))
         if (allEntries.isEmpty()) {
             echo("No entries found in Chrono for the last 45 days.")
             return
         }
 
-        // Get days that have Chrono data
+        // Get days that have Chrono data (convert UTC to local timezone)
         val chronoDays = allEntries
             .mapNotNull { entry ->
-                entry.startTime.substring(0, 10).let { LocalDate.parse(it) }
+                Instant.parse(entry.startTime).atZone(ZoneId.systemDefault()).toLocalDate()
             }
             .distinct()
             .sorted()
@@ -236,9 +238,10 @@ class SettleCommand : CliktCommand(
         chronoClient: ChronoClient,
         ttClient: TtApiClient
     ): List<SettleAction> {
-        // 1. Fetch Chrono entries
+        // 1. Fetch Chrono entries (extend range by +1 day to catch entries that
+        // fall on the next UTC day but belong to the local date, e.g. 7:45 PM EST = next day in UTC)
         echo("Fetching Chrono data ($from to $to)...")
-        val entries = chronoClient.getTimeEntries(from, to)
+        val entries = chronoClient.getTimeEntries(from, to.plusDays(1))
 
         if (entries.isEmpty()) {
             echo("No entries found in Chrono for this period.")

@@ -4,7 +4,9 @@ import pro.dev.tt.config.Config
 import pro.dev.tt.config.OverrideRule
 import pro.dev.tt.model.ChronoTimeEntry
 import pro.dev.tt.model.Project
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 
 data class DayProjectAggregate(
     val date: LocalDate,
@@ -30,13 +32,13 @@ object Aggregator {
         // Only entries with same description are grouped together
         val grouped = entries
             .filter { it.project != null && it.duration != null && it.duration > 0 }
-            .filter { it.project!!.name.endsWith("DevPro - Work") }
+            .filter { it.project!!.name.endsWith("DevPro - Work") || it.project!!.name.endsWith("DevPro/Work") }
             .filter { entry ->
-                val date = LocalDate.parse(entry.startTime.substring(0, 10))
+                val date = Instant.parse(entry.startTime).atZone(ZoneId.systemDefault()).toLocalDate()
                 (dateFrom == null || date >= dateFrom) && (dateTo == null || date <= dateTo)
             }
             .groupBy { entry ->
-                val date = LocalDate.parse(entry.startTime.substring(0, 10))
+                val date = Instant.parse(entry.startTime).atZone(ZoneId.systemDefault()).toLocalDate()
                 val projectName = entry.project!!.name
                 val description = entry.description?.trim() ?: ""
                 Triple(date, projectName, description)

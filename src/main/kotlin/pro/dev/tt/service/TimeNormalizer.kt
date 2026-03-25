@@ -66,10 +66,10 @@ object TimeNormalizer {
         // Scale factor for work entries
         val scaleFactor = targetWorkHours / workHours
 
-        // Apply proportional scaling and round
+        // Apply proportional scaling and round (minimum 0.25h to avoid zero entries)
         val scaledWork = workEntries.map { entry ->
             val scaled = entry.normalizedHours * scaleFactor
-            entry.copy(normalizedHours = roundToQuarter(scaled))
+            entry.copy(normalizedHours = maxOf(HOUR_INCREMENT, roundToQuarter(scaled)))
         }
 
         // After rounding, sum may not be exactly targetWorkHours
@@ -83,10 +83,10 @@ object TimeNormalizer {
         val diff = adjustedTarget - scaledWorkTotal
 
         val finalWork = if (kotlin.math.abs(diff) >= HOUR_INCREMENT / 2 && scaledWork.isNotEmpty()) {
-            // Find the largest scalable entry and adjust it
+            // Find the largest scalable entry and adjust it (minimum 0.25h)
             val sorted = scaledWork.sortedByDescending { it.normalizedHours }
             val largest = sorted.first()
-            val adjusted = largest.copy(normalizedHours = roundToQuarter(largest.normalizedHours + diff))
+            val adjusted = largest.copy(normalizedHours = maxOf(HOUR_INCREMENT, roundToQuarter(largest.normalizedHours + diff)))
             listOf(adjusted) + sorted.drop(1)
         } else {
             scaledWork
