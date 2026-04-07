@@ -1,14 +1,18 @@
 package pro.dev.tt.service
 
+import kotlinx.serialization.Serializable
 import pro.dev.tt.config.Config
 import pro.dev.tt.config.OverrideRule
 import pro.dev.tt.model.ChronoTimeEntry
+import pro.dev.tt.model.LocalDateSerializer
 import pro.dev.tt.model.Project
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
+@Serializable
 data class DayProjectAggregate(
+    @Serializable(with = LocalDateSerializer::class)
     val date: LocalDate,
     val chronoProject: String,
     val totalHours: Double,

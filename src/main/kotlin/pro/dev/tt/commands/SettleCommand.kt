@@ -2,14 +2,19 @@ package pro.dev.tt.commands
 
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.parameters.options.convert
+import com.github.ajalt.clikt.parameters.options.flag
 import com.github.ajalt.clikt.parameters.options.option
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json as KJson
 import pro.dev.tt.api.ApiException
 import pro.dev.tt.api.ChronoClient
 import pro.dev.tt.api.TtApiClient
 import pro.dev.tt.config.ConfigLoader
 import pro.dev.tt.getToken
 import pro.dev.tt.model.CreateWorklogRequest
+import pro.dev.tt.model.LocalDateSerializer
 import pro.dev.tt.model.UpdateWorklogRequest
 import pro.dev.tt.model.WorklogDetail
 import pro.dev.tt.service.Aggregator
@@ -26,12 +31,14 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.TemporalAdjusters
 
+@Serializable
 data class SettleAction(
     val aggregate: DayProjectAggregate,
     val normalizedHours: Double,
     val isMeeting: Boolean,
     val isFiller: Boolean,
     val isBorrowed: Boolean = false,
+    @Serializable(with = LocalDateSerializer::class)
     val sourceDate: LocalDate? = null,  // source date if borrowed
     val taskTitle: String,
     val devproProjectId: String,
@@ -40,6 +47,7 @@ data class SettleAction(
     val isManuallyFixed: Boolean = false
 )
 
+@Serializable
 enum class ActionType { CREATE, UPDATE, SKIP }
 
 class SettleCommand : CliktCommand(
@@ -51,6 +59,9 @@ class SettleCommand : CliktCommand(
 
     private val to by option("--to", help = "End date (YYYY-MM-DD). Without --from/--to runs in day-by-day mode")
         .convert { LocalDate.parse(it) }
+
+    private val json by option("--json", help = "Output proposed actions as JSON and exit without applying")
+        .flag(default = false)
 
     override fun run() { runBlocking {
         val config = try {
@@ -64,7 +75,10 @@ class SettleCommand : CliktCommand(
         val ttClient = TtApiClient(getToken())
 
         try {
-            if (from != null || to != null) {
+            if (json) {
+                // JSON mode: output proposed actions as JSON and exit
+                runJsonMode(config, chronoClient, ttClient)
+            } else if (from != null || to != null) {
                 // Batch mode: process date range at once
                 val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
                 val rangeTo = to ?: LocalDate.now()
@@ -108,15 +122,19 @@ class SettleCommand : CliktCommand(
         }
     }
 
-    private suspend fun runDayByDayMode(
-        config: pro.dev.tt.config.Config,
+    private data class UnfilledDaysResult(
+        val unfilledDays: List<LocalDate>,
+        val devproHoursByDay: Map<LocalDate, Double>
+    )
+
+    private suspend fun findUnfilledDays(
         chronoClient: ChronoClient,
         ttClient: TtApiClient
-    ) {
+    ): UnfilledDaysResult {
         val today = LocalDate.now()
         val rangeStart = today.minusDays(45)
 
-        echo("Checking last 45 days for unfilled days (<8h)...")
+        echo("Checking last 45 days for unfilled days (<8h)...", err = json)
 
         // Fetch all data for the range (need to query each month separately)
         val user = ttClient.getCurrentUser()
@@ -144,8 +162,7 @@ class SettleCommand : CliktCommand(
         // Fetch Chrono entries for the range (+1 day to catch late-night local entries stored as next UTC day)
         val allEntries = chronoClient.getTimeEntries(rangeStart, today.plusDays(1))
         if (allEntries.isEmpty()) {
-            echo("No entries found in Chrono for the last 45 days.")
-            return
+            return UnfilledDaysResult(emptyList(), devproHoursByDay)
         }
 
         // Get days that have Chrono data (convert UTC to local timezone)
@@ -162,6 +179,50 @@ class SettleCommand : CliktCommand(
             val isWeekend = day.dayOfWeek == DayOfWeek.SATURDAY || day.dayOfWeek == DayOfWeek.SUNDAY
             devproHours < 8.0 && !isWeekend && !isUSHoliday(day)
         }
+
+        return UnfilledDaysResult(unfilledDays, devproHoursByDay)
+    }
+
+    private suspend fun runJsonMode(
+        config: pro.dev.tt.config.Config,
+        chronoClient: ChronoClient,
+        ttClient: TtApiClient
+    ) {
+        val allActions: List<SettleAction>
+
+        if (from != null || to != null) {
+            // Explicit date range
+            val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
+            val rangeTo = to ?: LocalDate.now()
+            allActions = prepareActions(rangeFrom, rangeTo, config, chronoClient, ttClient)
+        } else {
+            // Default: find unfilled days in last 45 days
+            val result = findUnfilledDays(chronoClient, ttClient)
+            if (result.unfilledDays.isEmpty()) {
+                echo("[]")
+                return
+            }
+
+            val collected = mutableListOf<SettleAction>()
+            for (day in result.unfilledDays) {
+                val actions = prepareActions(day, day, config, chronoClient, ttClient)
+                collected.addAll(actions)
+            }
+            allActions = collected
+        }
+
+        val jsonFormat = KJson { prettyPrint = true }
+        echo(jsonFormat.encodeToString(ListSerializer(SettleAction.serializer()), allActions))
+    }
+
+    private suspend fun runDayByDayMode(
+        config: pro.dev.tt.config.Config,
+        chronoClient: ChronoClient,
+        ttClient: TtApiClient
+    ) {
+        val result = findUnfilledDays(chronoClient, ttClient)
+        val unfilledDays = result.unfilledDays
+        val devproHoursByDay = result.devproHoursByDay
 
         if (unfilledDays.isEmpty()) {
             echo("All days are settled (≥8h logged).")
@@ -240,11 +301,11 @@ class SettleCommand : CliktCommand(
     ): List<SettleAction> {
         // 1. Fetch Chrono entries (extend range by +1 day to catch entries that
         // fall on the next UTC day but belong to the local date, e.g. 7:45 PM EST = next day in UTC)
-        echo("Fetching Chrono data ($from to $to)...")
+        echo("Fetching Chrono data ($from to $to)...", err = json)
         val entries = chronoClient.getTimeEntries(from, to.plusDays(1))
 
         if (entries.isEmpty()) {
-            echo("No entries found in Chrono for this period.")
+            echo("No entries found in Chrono for this period.", err = json)
             return emptyList()
         }
 
@@ -252,7 +313,7 @@ class SettleCommand : CliktCommand(
         val rawAggregates = Aggregator.aggregate(entries, config, from, to)
 
         if (rawAggregates.isEmpty()) {
-            echo("No work entries to process (entries without project or duration are skipped).")
+            echo("No work entries to process (entries without project or duration are skipped).", err = json)
             return emptyList()
         }
 
