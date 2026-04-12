@@ -1,11 +1,7 @@
 package pro.dev.tt.service
 
-import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
-import java.time.LocalDate
-import kotlin.io.path.name
-import kotlin.io.path.readText
 import kotlin.math.roundToInt
 
 /**
@@ -18,6 +14,19 @@ object TimeNormalizer {
     private const val TARGET_HOURS = 8.0
     private const val HOUR_INCREMENT = 0.25
     private const val KNOWLEDGE_BASE = "/Users/iurii.buchchenko/knowledge-base"
+
+    private val calendarDirs: List<Path> by lazy {
+        try {
+            Files.walk(Path.of(KNOWLEDGE_BASE), 10)
+                .filter { Files.isDirectory(it) && it.fileName.toString() == "Calendar" }
+                .toList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private val sanitizeRegex = Regex("""[/\\:*?"<>|]""")
+    private val dateSuffixRegex = Regex(""", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2} \d{4}$""")
 
     data class NormalizedAggregate(
         val original: DayProjectAggregate,
@@ -102,36 +111,29 @@ object TimeNormalizer {
             return true
         }
 
-        // Check if description refers to a calendar event (meeting note in Obsidian)
-        if (agg.descriptions.isNotEmpty()) {
-            val description = agg.descriptions.first()
+        if (agg.descriptions.isEmpty()) {
+            return false
+        }
 
-            // Try exact path first
-            val noteFile = File("$KNOWLEDGE_BASE/$description.md")
-            if (noteFile.exists() && noteFile.readText().contains("The task represents the calendar event")) {
-                return true
-            }
+        // Extract meeting name from description (strip project suffix + date)
+        // Old format: "Event Name, Apr 8 2026 - Project - DevPro - Work"
+        // New format: "Event Name" (just display_name)
+        val rawDescription = agg.descriptions.first()
+        val projectSuffix = " - ${agg.chronoProject}"
+        val meetingName = rawDescription
+            .removeSuffix(projectSuffix)
+            .replace(dateSuffixRegex, "")
+        val sanitized = meetingName.replace(sanitizeRegex, "-")
+        val candidates = listOf(
+            "$sanitized ${agg.date}.md",       // standard: "Event Name 2026-04-08.md"
+            "$sanitized  ${agg.date}.md",      // double-space: trailing whitespace in display_name
+            "$sanitized.md"                     // event_name fallback: date already in description
+        )
 
-            // Search recursively: extract keywords and find matching file
-            val keywords = description
-                .replace(Regex("\\[|\\]"), "")  // remove brackets
-                .split(Regex("[,\\s]+"))
-                .filter { it.length > 3 }
-                .take(4)  // first 4 significant words
-
-            if (keywords.size >= 2) {
-                val matchingFile = Files.walk(Path.of(KNOWLEDGE_BASE))
-                    .filter { it.name.endsWith(".md") }
-                    .filter { path -> keywords.all { kw -> path.name.contains(kw, ignoreCase = true) } }
-                    .findFirst()
-                    .orElse(null)
-
-                if (matchingFile != null) {
-                    try {
-                        if (matchingFile.readText().contains("The task represents the calendar event")) {
-                            return true
-                        }
-                    } catch (_: Exception) {}
+        for (dir in calendarDirs) {
+            for (filename in candidates) {
+                if (Files.exists(dir.resolve(filename))) {
+                    return true
                 }
             }
         }
