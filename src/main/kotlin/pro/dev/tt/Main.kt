@@ -7,7 +7,6 @@ import com.github.ajalt.clikt.parameters.options.required
 import kotlinx.coroutines.runBlocking
 import pro.dev.tt.api.TtApiClient
 import pro.dev.tt.commands.*
-import pro.dev.tt.service.BrowserAuthService
 import java.io.File
 
 class TtCli : CliktCommand(
@@ -17,33 +16,27 @@ class TtCli : CliktCommand(
     override fun run() = Unit
 }
 
-fun getToken(): String {
-    val tokenFile = File(System.getProperty("user.home"), ".tt-token")
+// Returns the portal session cookie (`name=value`) used to authenticate API
+// calls. Refreshing it requires a host-side browser login (`make auth`), which
+// cannot run inside the Docker container — so here we only read it.
+fun getSessionCookie(): String {
+    val cookieFile = File(System.getProperty("user.home"), ".tt-cookie")
 
-    // Try to get token from file
-    if (tokenFile.exists()) {
-        val token = tokenFile.readText().trim()
-        if (token.isNotEmpty()) {
-            return token
+    // Try to get cookie from file
+    if (cookieFile.exists()) {
+        val cookie = cookieFile.readText().trim()
+        if (cookie.isNotEmpty()) {
+            return cookie
         }
     }
 
-    // Try to get token from env var
-    val envToken = System.getenv("TT_TOKEN")
-    if (envToken != null && envToken.isNotEmpty()) {
-        return envToken
+    // Try to get cookie from env var
+    val envCookie = System.getenv("TT_COOKIE")
+    if (envCookie != null && envCookie.isNotEmpty()) {
+        return envCookie
     }
 
-    // No token found - trigger browser login
-    println("No valid token found. Starting browser authentication...")
-    val newToken = BrowserAuthService.refreshTokenViaBrowser()
-
-    if (newToken != null) {
-        BrowserAuthService.saveToken(newToken)
-        return newToken
-    }
-
-    error("Authentication failed. Unable to obtain token.")
+    error("No Dev.Pro session cookie found. Run 'make auth' on your host machine to create one.")
 }
 
 fun main(args: Array<String>) {

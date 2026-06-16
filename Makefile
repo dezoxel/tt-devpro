@@ -54,7 +54,7 @@ endef
 
 # Volume mounts for production mode
 define prod_volumes
--v $(HOME)/.tt-token:/root/.tt-token:ro \
+-v $(HOME)/.tt-cookie:/root/.tt-cookie:ro \
 -v $(HOME)/.tt-config.yaml:/root/.tt-config.yaml:ro \
 -v $(HOME)/knowledge-base:/Users/iurii.buchchenko/knowledge-base:ro
 endef

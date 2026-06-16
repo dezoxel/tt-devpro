@@ -39,14 +39,16 @@ CLI (runs inside Docker):
   make tt CMD     Run tt command (e.g., make tt list)
 
 Auth:
-  make auth       Refresh DevPro token via browser (runs on host)
+  make auth       Refresh DevPro session via browser (runs on host)
 ```
 
 ## Authentication
 
 Before using the CLI, you need to authenticate with DevPro Time Tracking Portal.
 
-### Token refresh
+The portal authenticates API calls with a server-side session cookie (scoped to `.dev.pro`), which lasts ~2 weeks.
+
+### Session refresh
 
 Run on your **host machine** (not in Docker):
 
@@ -57,10 +59,10 @@ make auth
 This will:
 1. Open a browser window
 2. Navigate to DevPro Time Tracking Portal
-3. Wait for you to complete Google OAuth login
-4. Extract and save the authentication token to `~/.tt-token`
+3. Wait for you to complete Google OAuth login (first run only — the session persists between runs)
+4. Extract and save the session cookie to `~/.tt-cookie`
 
-The token is automatically mounted into the Docker container.
+The cookie is automatically mounted into the Docker container.
 
 ### Why run on host?
 

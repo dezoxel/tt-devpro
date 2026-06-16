@@ -7,7 +7,7 @@ import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
 import kotlinx.coroutines.runBlocking
 import pro.dev.tt.api.TtApiClient
-import pro.dev.tt.getToken
+import pro.dev.tt.getSessionCookie
 import pro.dev.tt.model.CreateWorklogRequest
 import pro.dev.tt.model.UpdateWorklogRequest
 
@@ -27,7 +27,7 @@ class ApiGetProjectsCommand : CliktCommand(
     help = "Get assigned projects"
 ) {
     override fun run() = runBlocking {
-        val client = TtApiClient(getToken())
+        val client = TtApiClient(getSessionCookie())
 
         try {
             val user = client.getCurrentUser()
@@ -50,7 +50,7 @@ class ApiGetWorklogsCommand : CliktCommand(
     private val date by option("--date", "-d", help = "Period date (YYYY-MM-DD)").required()
 
     override fun run() = runBlocking {
-        val client = TtApiClient(getToken())
+        val client = TtApiClient(getSessionCookie())
 
         try {
             val response = client.getNormalView(date)
@@ -89,7 +89,7 @@ class ApiCreateWorklogCommand : CliktCommand(
     private val description by option("--description", help = "Optional description")
 
     override fun run() = runBlocking {
-        val client = TtApiClient(getToken())
+        val client = TtApiClient(getSessionCookie())
 
         val request = CreateWorklogRequest(
             worklogDate = date,
@@ -136,7 +136,7 @@ class ApiUpdateWorklogCommand : CliktCommand(
     private val description by option("--description", help = "Optional description")
 
     override fun run() = runBlocking {
-        val client = TtApiClient(getToken())
+        val client = TtApiClient(getSessionCookie())
 
         val request = UpdateWorklogRequest(
             uniqueId = id,
@@ -177,7 +177,7 @@ class ApiDeleteWorklogCommand : CliktCommand(
     private val id by argument(help = "Worklog uniqueId to delete")
 
     override fun run() = runBlocking {
-        val client = TtApiClient(getToken())
+        val client = TtApiClient(getSessionCookie())
 
         echo("Deleting worklog: $id")
 

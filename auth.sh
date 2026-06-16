@@ -1,11 +1,11 @@
 #!/bin/bash
-# auth.sh - Refresh DevPro authentication token via browser
+# auth.sh - Refresh DevPro session cookie via browser
 #
 # This script runs the authentication flow on the host machine (not in Docker)
 # because Playwright cannot open a GUI browser inside Docker containers on macOS.
 #
-# The token will be saved to ~/.tt-token and will be available to the Docker
-# container via volume mount.
+# The session cookie will be saved to ~/.tt-cookie and will be available to the
+# Docker container via volume mount.
 
 set -e
 

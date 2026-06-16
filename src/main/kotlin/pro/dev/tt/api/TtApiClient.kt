@@ -10,14 +10,13 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.Json
 import pro.dev.tt.model.*
-import pro.dev.tt.service.BrowserAuthService
 import java.util.UUID
 
 class ApiException(val statusCode: Int, message: String) : Exception(message)
 
-class TokenRefreshRequiredException : Exception("Token refresh required")
+class AuthRequiredException : Exception("Authentication required")
 
-class TtApiClient(private var token: String, private val onTokenRefresh: ((String) -> Unit)? = null) {
+class TtApiClient(private val cookie: String) {
     private val baseUrl = "https://timetrackingportal.dev.pro/api"
 
     private val json = Json {
@@ -34,7 +33,7 @@ class TtApiClient(private var token: String, private val onTokenRefresh: ((Strin
 
     private suspend inline fun <reified T> HttpResponse.checkAndParse(): T {
         when (status.value) {
-            401, 403 -> throw TokenRefreshRequiredException()
+            401, 403 -> throw AuthRequiredException()
             404 -> throw ApiException(404, "Resource not found.")
             in 400..499 -> throw ApiException(status.value, "Client error: ${status.description}")
             in 500..599 -> throw ApiException(status.value, "Server error: ${status.description}")
@@ -45,95 +44,69 @@ class TtApiClient(private var token: String, private val onTokenRefresh: ((Strin
     private suspend fun HttpResponse.checkStatus(): Boolean {
         val responseBody = bodyAsText()
         when (status.value) {
-            401, 403 -> throw TokenRefreshRequiredException()
+            401, 403 -> throw AuthRequiredException()
             in 400..499 -> throw ApiException(status.value, "Client error (${status.value}): $responseBody")
             in 500..599 -> throw ApiException(status.value, "Server error (${status.value}): $responseBody")
         }
         return status == HttpStatusCode.OK
     }
 
-    private fun isRunningInDocker(): Boolean {
-        return java.io.File("/.dockerenv").exists() ||
-               System.getenv("DOCKER_CONTAINER") != null
-    }
-
-    private fun refreshTokenIfNeeded(): Boolean {
-        if (isRunningInDocker()) {
-            println("\n❌ Dev.Pro Time Tracking Portal auth token expired or invalid.")
-            println("   Run 'make auth' on your host machine to refresh the token.")
-            return false
-        }
-
-        println("\n⚠️  Dev.Pro Time Tracking Portal auth token expired. Refreshing...")
-        val newToken = BrowserAuthService.refreshTokenViaBrowser()
-
-        if (newToken != null) {
-            token = newToken
-            BrowserAuthService.saveToken(newToken)
-            onTokenRefresh?.invoke(newToken)
-            return true
-        }
-
-        println("❌ Token refresh failed.")
-        println("   Run 'make auth' on your host machine to refresh the token.")
-        return false
-    }
-
-    private suspend inline fun <reified T> withTokenRefresh(block: suspend () -> T): T {
+    // The session cookie can only be refreshed by a host-side browser login
+    // (`make auth`), which cannot run inside the Docker container. So on 401/403
+    // we surface a clear instruction instead of attempting an in-process refresh.
+    private suspend inline fun <reified T> withAuthCheck(block: suspend () -> T): T {
         return try {
             block()
-        } catch (e: TokenRefreshRequiredException) {
-            if (refreshTokenIfNeeded()) {
-                block() // Retry with new token
-            } else {
-                throw ApiException(401, "Authentication failed. Unable to refresh token.")
-            }
+        } catch (e: AuthRequiredException) {
+            println("\n❌ Dev.Pro Time Tracking Portal session expired or invalid.")
+            println("   Run 'make auth' on your host machine to refresh the session.")
+            throw ApiException(401, "Authentication failed. Session cookie expired — run 'make auth'.")
         }
     }
 
-    suspend fun getCurrentUser(): CurrentUser = withTokenRefresh {
+    suspend fun getCurrentUser(): CurrentUser = withAuthCheck {
         client.get("$baseUrl/contact/currentUser") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
         }.checkAndParse()
     }
 
-    suspend fun getAssignedProjects(contactId: String, dateFrom: String): AssignedProjectsResponse = withTokenRefresh {
+    suspend fun getAssignedProjects(contactId: String, dateFrom: String): AssignedProjectsResponse = withAuthCheck {
         client.get("$baseUrl/contact/$contactId/assignedProjectsOnDate") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
             parameter("dateFrom", dateFrom)
         }.checkAndParse()
     }
 
-    suspend fun getNormalView(period: String): NormalViewResponse = withTokenRefresh {
+    suspend fun getNormalView(period: String): NormalViewResponse = withAuthCheck {
         client.get("$baseUrl/timeTracking/normalView") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
             parameter("period", period)
             parameter("pageInfo.pageIndex", 1)
             parameter("pageInfo.pageSize", 500)
         }.checkAndParse()
     }
 
-    suspend fun createWorklog(request: CreateWorklogRequest): Boolean = withTokenRefresh {
+    suspend fun createWorklog(request: CreateWorklogRequest): Boolean = withAuthCheck {
         client.post("$baseUrl/worklog/create") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
             header("IdempotencyKey", UUID.randomUUID().toString())
             contentType(ContentType.Application.Json)
             setBody(request)
         }.checkStatus()
     }
 
-    suspend fun updateWorklog(request: UpdateWorklogRequest): Boolean = withTokenRefresh {
+    suspend fun updateWorklog(request: UpdateWorklogRequest): Boolean = withAuthCheck {
         client.post("$baseUrl/worklog/update") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
             header("IdempotencyKey", UUID.randomUUID().toString())
             contentType(ContentType.Application.Json)
             setBody(request)
         }.checkStatus()
     }
 
-    suspend fun deleteWorklog(uniqueId: String): Boolean = withTokenRefresh {
+    suspend fun deleteWorklog(uniqueId: String): Boolean = withAuthCheck {
         client.delete("$baseUrl/worklog/$uniqueId") {
-            header("Authorization", "Bearer $token")
+            header("Cookie", cookie)
         }.checkStatus()
     }
 

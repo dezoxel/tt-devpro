@@ -12,7 +12,7 @@ import pro.dev.tt.api.ApiException
 import pro.dev.tt.api.ChronoClient
 import pro.dev.tt.api.TtApiClient
 import pro.dev.tt.config.ConfigLoader
-import pro.dev.tt.getToken
+import pro.dev.tt.getSessionCookie
 import pro.dev.tt.model.CreateWorklogRequest
 import pro.dev.tt.model.LocalDateSerializer
 import pro.dev.tt.model.UpdateWorklogRequest
@@ -72,7 +72,7 @@ class SettleCommand : CliktCommand(
         }
 
         val chronoClient = ChronoClient(config.chronoApi)
-        val ttClient = TtApiClient(getToken())
+        val ttClient = TtApiClient(getSessionCookie())
 
         try {
             if (json) {

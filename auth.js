@@ -1,38 +1,47 @@
 #!/usr/bin/env node
-// auth.js - DevPro token refresh via Firefox with persistent session
+// auth.js - DevPro session refresh via Firefox with persistent session
 // After first login, subsequent runs skip login/password/captcha/MFA
+//
+// The portal authenticates API calls with a server-side session cookie scoped
+// to .dev.pro (it no longer accepts the Firebase Bearer token from IndexedDB).
+// We extract the full `name=value` pair and verbatim-store it, so a future
+// cookie-name change needs no code change.
 
 const { firefox } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-const TOKEN_FILE = path.join(process.env.HOME, '.tt-token');
+const COOKIE_FILE = path.join(process.env.HOME, '.tt-cookie');
 const USER_DATA_DIR = path.join(process.env.HOME, '.tt-browser-profile');
 const PORTAL_URL = 'https://timetrackingportal.dev.pro/';
+const COOKIE_DOMAIN = 'dev.pro';
 const TIMEOUT_MS = 120000; // 2 minutes for first login
 
-async function extractToken(page) {
-    return await page.evaluate(() => {
-        return new Promise((resolve, reject) => {
-            const request = indexedDB.open('firebaseLocalStorageDb');
-            request.onerror = () => reject('Failed to open IndexedDB');
-            request.onsuccess = (event) => {
-                const db = event.target.result;
-                const transaction = db.transaction(['firebaseLocalStorage'], 'readonly');
-                const store = transaction.objectStore('firebaseLocalStorage');
-                const getAllRequest = store.getAll();
-                getAllRequest.onsuccess = () => {
-                    const data = getAllRequest.result[0];
-                    if (data && data.value && data.value.stsTokenManager) {
-                        resolve(data.value.stsTokenManager.accessToken);
-                    } else {
-                        reject('Token not found in IndexedDB');
-                    }
-                };
-                getAllRequest.onerror = () => reject('Failed to get data from IndexedDB');
-            };
-        });
-    });
+// Returns the portal session cookie as `name=value`, or null if not present yet.
+// context.cookies(url) returns httpOnly cookies too (unlike document.cookie) and
+// is already scoped to cookies valid for the portal URL.
+async function extractSessionCookie(context) {
+    const cookies = await context.cookies(PORTAL_URL);
+    const session = cookies.find((c) => c.domain.includes(COOKIE_DOMAIN) && c.value);
+    return session ? `${session.name}=${session.value}` : null;
+}
+
+// Poll until the session cookie is set: appears immediately for an already
+// logged-in persistent session, or once the user completes login on first run.
+// Decoupled from any redirect URL (the post-login target is brittle).
+async function waitForSessionCookie(context, timeoutMs) {
+    const start = Date.now();
+    let announced = false;
+    while (Date.now() - start < timeoutMs) {
+        const cookie = await extractSessionCookie(context);
+        if (cookie) return cookie;
+        if (!announced) {
+            console.log('⏳ Waiting for login (first time only)...');
+            announced = true;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error('Timed out waiting for session cookie');
 }
 
 async function main() {
@@ -49,21 +58,11 @@ async function main() {
     try {
         await page.goto(PORTAL_URL);
 
-        // Check if already logged in
-        const currentUrl = page.url();
-        if (currentUrl.includes('/time-tracking')) {
-            console.log('✓ Already logged in! Extracting token...');
-        } else {
-            console.log('⏳ Waiting for login (first time only)...');
-            await page.waitForURL('**/time-tracking**', { timeout: TIMEOUT_MS });
-            console.log('✓ Login successful!');
-        }
+        const cookie = await waitForSessionCookie(context, TIMEOUT_MS);
+        console.log('✓ Login successful!');
 
-        await page.waitForTimeout(1000);
-        const token = await extractToken(page);
-
-        fs.writeFileSync(TOKEN_FILE, token);
-        console.log(`✓ Token saved to ${TOKEN_FILE}`);
+        fs.writeFileSync(COOKIE_FILE, cookie);
+        console.log(`✓ Session cookie saved to ${COOKIE_FILE}`);
 
     } catch (error) {
         console.error('❌ Authentication failed:', error.message);
