@@ -63,6 +63,9 @@ class SettleCommand : CliktCommand(
     private val json by option("--json", help = "Output proposed actions as JSON and exit without applying")
         .flag(default = false)
 
+    private val dryRun by option("--dry-run", help = "Print a readable per-day summary of proposed actions and exit without applying (--json wins if both are given)")
+        .flag(default = false)
+
     override fun run() { runBlocking {
         val config = try {
             ConfigLoader.load()
@@ -76,8 +79,11 @@ class SettleCommand : CliktCommand(
 
         try {
             if (json) {
-                // JSON mode: output proposed actions as JSON and exit
+                // JSON mode: output proposed actions as JSON and exit (wins over --dry-run)
                 runJsonMode(config, chronoClient, ttClient)
+            } else if (dryRun) {
+                // Dry-run: readable per-day summary, no prompts, no apply
+                runDryRunMode(config, chronoClient, ttClient)
             } else if (from != null || to != null) {
                 // Batch mode: process date range at once
                 val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
@@ -107,6 +113,13 @@ class SettleCommand : CliktCommand(
         val actions = prepareActions(from, to, config, chronoClient, ttClient)
         if (actions.isEmpty()) return
 
+        // No TTY to prompt on (piped/automation): show the readable summary and
+        // exit instead of falling through readLine()→null→"Cancelled."
+        if (System.console() == null) {
+            echo(renderDaySummary(actions))
+            return
+        }
+
         echo()
         showDraftTable(actions)
         val hasWarning = showUnderEightWarning(actions)
@@ -134,7 +147,7 @@ class SettleCommand : CliktCommand(
         val today = LocalDate.now()
         val rangeStart = today.minusDays(45)
 
-        echo("Checking last 45 days for unfilled days (<8h)...", err = json)
+        echo("Checking last 45 days for unfilled days (<8h)...", err = json || dryRun)
 
         // Fetch all data for the range (need to query each month separately)
         val user = ttClient.getCurrentUser()
@@ -183,36 +196,48 @@ class SettleCommand : CliktCommand(
         return UnfilledDaysResult(unfilledDays, devproHoursByDay)
     }
 
+    /**
+     * Collect proposed actions for the requested scope, shared by JSON and
+     * dry-run modes. With --from/--to → the explicit range; otherwise → the
+     * unfilled days in the last 45 days (same semantics as interactive mode).
+     */
+    private suspend fun collectActions(
+        config: pro.dev.tt.config.Config,
+        chronoClient: ChronoClient,
+        ttClient: TtApiClient
+    ): List<SettleAction> {
+        return if (from != null || to != null) {
+            val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
+            val rangeTo = to ?: LocalDate.now()
+            prepareActions(rangeFrom, rangeTo, config, chronoClient, ttClient)
+        } else {
+            findUnfilledDays(chronoClient, ttClient).unfilledDays.flatMap { day ->
+                prepareActions(day, day, config, chronoClient, ttClient)
+            }
+        }
+    }
+
     private suspend fun runJsonMode(
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
         ttClient: TtApiClient
     ) {
-        val allActions: List<SettleAction>
-
-        if (from != null || to != null) {
-            // Explicit date range
-            val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
-            val rangeTo = to ?: LocalDate.now()
-            allActions = prepareActions(rangeFrom, rangeTo, config, chronoClient, ttClient)
-        } else {
-            // Default: find unfilled days in last 45 days
-            val result = findUnfilledDays(chronoClient, ttClient)
-            if (result.unfilledDays.isEmpty()) {
-                echo("[]")
-                return
-            }
-
-            val collected = mutableListOf<SettleAction>()
-            for (day in result.unfilledDays) {
-                val actions = prepareActions(day, day, config, chronoClient, ttClient)
-                collected.addAll(actions)
-            }
-            allActions = collected
-        }
-
+        val allActions = collectActions(config, chronoClient, ttClient)
         val jsonFormat = KJson { prettyPrint = true }
         echo(jsonFormat.encodeToString(ListSerializer(SettleAction.serializer()), allActions))
+    }
+
+    private suspend fun runDryRunMode(
+        config: pro.dev.tt.config.Config,
+        chronoClient: ChronoClient,
+        ttClient: TtApiClient
+    ) {
+        val allActions = collectActions(config, chronoClient, ttClient)
+        if (allActions.isEmpty()) {
+            echo("All days are settled (≥8h logged).")
+            return
+        }
+        echo(renderDaySummary(allActions))
     }
 
     private suspend fun runDayByDayMode(
@@ -226,6 +251,15 @@ class SettleCommand : CliktCommand(
 
         if (unfilledDays.isEmpty()) {
             echo("All days are settled (≥8h logged).")
+            return
+        }
+
+        // No TTY to prompt on (piped/automation): can't run the interactive
+        // per-day flow, so show the readable summary across all unfilled days
+        // and exit instead of hanging/cancelling on readLine().
+        if (System.console() == null) {
+            val allActions = unfilledDays.flatMap { prepareActions(it, it, config, chronoClient, ttClient) }
+            echo(renderDaySummary(allActions))
             return
         }
 
@@ -301,11 +335,11 @@ class SettleCommand : CliktCommand(
     ): List<SettleAction> {
         // 1. Fetch Chrono entries (extend range by +1 day to catch entries that
         // fall on the next UTC day but belong to the local date, e.g. 7:45 PM EST = next day in UTC)
-        echo("Fetching Chrono data ($from to $to)...", err = json)
+        echo("Fetching Chrono data ($from to $to)...", err = json || dryRun)
         val entries = chronoClient.getTimeEntries(from, to.plusDays(1))
 
         if (entries.isEmpty()) {
-            echo("No entries found in Chrono for this period.", err = json)
+            echo("No entries found in Chrono for this period.", err = json || dryRun)
             return emptyList()
         }
 
@@ -313,7 +347,7 @@ class SettleCommand : CliktCommand(
         val rawAggregates = Aggregator.aggregate(entries, config, from, to)
 
         if (rawAggregates.isEmpty()) {
-            echo("No work entries to process (entries without project or duration are skipped).", err = json)
+            echo("No work entries to process (entries without project or duration are skipped).", err = json || dryRun)
             return emptyList()
         }
 
@@ -525,28 +559,13 @@ class SettleCommand : CliktCommand(
         )
 
         val rows = actions.map { action ->
-            // Determine entry type (Meeting or Work, regardless of filler/borrowed)
-            val type = if (action.isMeeting) "Meeting" else "Work"
-
-            // Chrono entry: for filler/borrowed show marker, otherwise clean description
-            val chronoEntry = when {
-                action.isFiller -> "[filler]"
-                action.isBorrowed -> "[borrowed]"
-                else -> {
-                    val projectSuffix = " - ${action.aggregate.chronoProject}"
-                    action.aggregate.descriptions.map { desc ->
-                        if (desc.endsWith(projectSuffix)) desc.dropLast(projectSuffix.length) else desc
-                    }.joinToString("; ")
-                }
-            }
-
             Row(
                 date = action.aggregate.date.toString(),
                 chronoProject = action.aggregate.chronoProject,
-                chronoEntry = chronoEntry,
+                chronoEntry = cleanChronoEntry(action),
                 devproProject = action.aggregate.devproProjectName,
                 taskTitle = action.taskTitle,
-                type = type,
+                type = entryType(action),
                 originalHours = action.aggregate.totalHours,
                 normalizedHours = action.normalizedHours,
                 action = action.action.name.lowercase().replaceFirstChar { it.uppercase() }
