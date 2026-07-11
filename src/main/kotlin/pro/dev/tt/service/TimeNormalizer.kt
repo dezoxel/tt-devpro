@@ -13,7 +13,10 @@ import kotlin.math.roundToInt
 object TimeNormalizer {
     private const val TARGET_HOURS = 8.0
     private const val HOUR_INCREMENT = 0.25
-    private const val KNOWLEDGE_BASE = "/Users/iurii.buchchenko/knowledge-base"
+    // Read the knowledge-base off disk from the host home dir (was a hardcoded
+    // absolute path that only resolved because Docker mounted ~/knowledge-base
+    // to it; now portable to any host).
+    private val KNOWLEDGE_BASE = "${System.getProperty("user.home")}/knowledge-base"
 
     private val calendarDirs: List<Path> by lazy {
         try {
