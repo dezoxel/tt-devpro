@@ -1,7 +1,10 @@
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     kotlin("jvm") version "1.9.22"
     kotlin("plugin.serialization") version "1.9.22"
     application
+    id("org.graalvm.buildtools.native") version "0.10.3"
 }
 
 group = "pro.dev"
@@ -42,6 +45,27 @@ tasks.test {
     useJUnitPlatform()
 }
 
-kotlin {
-    jvmToolchain(17)
+// No jvmToolchain: compile with whatever JDK runs Gradle (install.sh points
+// JAVA_HOME at the GraalVM install so compile/installDist/nativeCompile all
+// share one JDK). Target 17 bytecode — GraalVM-21 compiles it fine, and the
+// JVM-fallback launcher then runs on any host JDK >= 17. The task-level DSL is
+// the stable, non-opt-in form for Kotlin 1.9.x.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType<KotlinCompile> {
+    kotlinOptions.jvmTarget = "17"
+}
+
+graalvmNative {
+    // Use the Gradle-running JDK (our JAVA_HOME GraalVM) directly rather than
+    // trying to detect a GraalVM toolchain by vendor — Gradle mis-reads the
+    // Oracle GraalVM cask's vendor, so detection is unreliable (gradle#25521).
+    toolchainDetection.set(false)
+    binaries.named("main") {
+        imageName.set("tt-devpro")
+        mainClass.set("pro.dev.tt.MainKt")
+    }
 }
