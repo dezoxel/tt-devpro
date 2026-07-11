@@ -628,19 +628,10 @@ class SettleCommand : CliktCommand(
      * Returns true if there are days under 8h.
      */
     private fun showUnderEightWarning(actions: List<SettleAction>): Boolean {
-        val byDate = actions.groupBy { it.aggregate.date }
-        val underEightDays = byDate.mapNotNull { (date, dayActions) ->
-            val totalHours = dayActions.sumOf { it.normalizedHours }
-            if (totalHours < 8.0 - 0.01) {  // small epsilon for floating point
-                date to totalHours
-            } else {
-                null
-            }
-        }
-
-        if (underEightDays.isNotEmpty()) {
+        val under = underEightDays(actions)
+        if (under.isNotEmpty()) {
             echo("\n⚠️  WARNING: Some days don't reach 8h due to borrowed+filler cap:")
-            underEightDays.forEach { (date, hours) ->
+            under.forEach { (date, hours) ->
                 echo("  $date: %.2fh (need %.2fh more)".format(hours, 8.0 - hours))
             }
             return true

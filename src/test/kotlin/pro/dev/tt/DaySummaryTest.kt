@@ -86,6 +86,25 @@ class DaySummaryTest {
     }
 
     @Test
+    fun `flags days that fall short of 8h`() {
+        val out = renderDaySummary(
+            listOf(
+                action("2026-07-03", "A", 4.5, "x"),   // under 8h
+                action("2026-07-02", "B", 8.0, "y"),   // exactly 8h — not flagged
+            )
+        )
+        assertTrue(out.contains("⚠️  Under 8h"), out)
+        assertTrue(out.contains("2026-07-03: 4.50h (need 3.50h more)"), out)
+        assertTrue(!out.contains("2026-07-02:"), out)  // the full day is not listed
+    }
+
+    @Test
+    fun `no warning when every day reaches 8h`() {
+        val out = renderDaySummary(listOf(action("2026-07-02", "A", 8.0, "y")))
+        assertTrue(!out.contains("Under 8h"), out)
+    }
+
+    @Test
     fun `entryType reflects meeting flag`() {
         assertEquals("Meeting", entryType(action("2026-07-10", "A", 1.0, "sync", isMeeting = true)))
         assertEquals("Work", entryType(action("2026-07-10", "A", 1.0, "code")))

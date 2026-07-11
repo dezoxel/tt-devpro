@@ -72,10 +72,39 @@ Unmapped Chrono projects are silently skipped — if entries are missing, check 
 
 ## Development
 
+Sources live in `src/main/kotlin/pro/dev/tt/`. The Gradle wrapper (`./gradlew`)
+is committed, so you don't need a system Gradle — you only need a GraalVM JDK on
+`JAVA_HOME` for the native build (see [Build toolchain](#build-toolchain-one-time);
+`make`/`install.sh` set it automatically from SDKMAN).
+
+Typical loop — **edit → test → reinstall**:
+
 ```bash
-make build     # Build the native image
+# 1. make your change under src/main/kotlin/...
+make test          # 2. run the suite (fast; add tests under src/test/kotlin/...)
+make install       # 3. rebuild the native image AND reinstall it to ~/.local/bin
+tt-devpro settle --dry-run   # 4. exercise the installed binary
+```
+
+`make install` (or `./install.sh`) always rebuilds *and* reinstalls, so the
+global `tt-devpro` on your `PATH` reflects your latest changes — there is no
+separate "deploy" step. Other targets:
+
+```bash
+make build     # Build the native image only (build/native/nativeCompile/tt-devpro)
 make test      # Run the test suite
 make clean     # Remove build artifacts
+```
+
+If you change how the app uses reflection (new serialized types, new HTTP
+paths), regenerate the native-image metadata so the binary keeps working:
+
+```bash
+JAVA_HOME=$(ls -d ~/.sdkman/candidates/java/*graal* | tail -1) \
+  ./gradlew -Pagent run --args="settle --dry-run"           # capture with the tracing agent
+./gradlew metadataCopy --task run \
+  --dir src/main/resources/META-INF/native-image             # copy config into the repo
+make install                                                 # rebuild with the new metadata
 ```
 
 See `CLAUDE.md` for architecture notes.

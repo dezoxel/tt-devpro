@@ -1,11 +1,25 @@
 package pro.dev.tt.commands
 
+import java.time.LocalDate
+
 /**
  * Pure rendering helpers for settle output, extracted so they can be shared by
  * the interactive draft table and the non-interactive `--dry-run` summary, and
  * unit-tested without a live CLI. Nothing here does I/O — callers decide how to
  * emit the returned strings.
  */
+
+/**
+ * Days whose proposed hours fall short of 8h (e.g. the borrowed+filler cap was
+ * reached), paired with their total. Sorted by date. Shared by the interactive
+ * warning and the dry-run summary.
+ */
+internal fun underEightDays(actions: List<SettleAction>): List<Pair<LocalDate, Double>> =
+    actions.groupBy { it.aggregate.date }.toSortedMap()
+        .mapNotNull { (date, day) ->
+            val total = day.sumOf { it.normalizedHours }
+            if (total < 8.0 - 0.01) date to total else null  // small epsilon for float noise
+        }
 
 /** Entry type label (Meeting vs Work), independent of filler/borrowed origin. */
 internal fun entryType(action: SettleAction): String =
@@ -57,5 +71,13 @@ internal fun renderDaySummary(actions: List<SettleAction>): String {
     val grandTotal = actions.sumOf { it.normalizedHours }
     val dayWord = if (byDate.size == 1) "day" else "days"
     sb.append("Total: %.2fh across %d %s, %d entries".format(grandTotal, byDate.size, dayWord, actions.size))
+
+    val under = underEightDays(actions)
+    if (under.isNotEmpty()) {
+        sb.append("\n\n⚠️  Under 8h (borrowed+filler cap reached):")
+        under.forEach { (date, total) ->
+            sb.append("\n  %s: %.2fh (need %.2fh more)".format(date, total, 8.0 - total))
+        }
+    }
     return sb.toString()
 }
