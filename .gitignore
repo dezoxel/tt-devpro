@@ -9,7 +9,9 @@ package-lock.json
 build/
 .gradle/
 
-# Local settings
+# Local settings / agent scaffolding
 .claude/settings.local.json
 .dez/
+.ergon/
+.fastembed_cache/
 CLAUDE.md
