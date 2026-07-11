@@ -66,6 +66,11 @@ class SettleCommand : CliktCommand(
     private val dryRun by option("--dry-run", help = "Print a readable per-day summary of proposed actions and exit without applying (--json wins if both are given)")
         .flag(default = false)
 
+    // True whenever output is machine/summary-bound rather than an interactive
+    // session: --json, --dry-run, or a non-TTY (piped/automation) run. Status
+    // and progress lines go to stderr in these cases so stdout stays clean.
+    private val quiet: Boolean get() = json || dryRun || System.console() == null
+
     override fun run() { runBlocking {
         val config = try {
             ConfigLoader.load()
@@ -147,7 +152,7 @@ class SettleCommand : CliktCommand(
         val today = LocalDate.now()
         val rangeStart = today.minusDays(45)
 
-        echo("Checking last 45 days for unfilled days (<8h)...", err = json || dryRun)
+        echo("Checking last 45 days for unfilled days (<8h)...", err = quiet)
 
         // Fetch all data for the range (need to query each month separately)
         val user = ttClient.getCurrentUser()
@@ -234,7 +239,9 @@ class SettleCommand : CliktCommand(
     ) {
         val allActions = collectActions(config, chronoClient, ttClient)
         if (allActions.isEmpty()) {
-            echo("All days are settled (≥8h logged).")
+            // For an explicit range, empty can mean "no Chrono/mapped entries"
+            // (already reported to stderr) rather than "settled" — stay neutral.
+            echo(if (from != null || to != null) "No actions to settle for this range." else "All days are settled (≥8h logged).")
             return
         }
         echo(renderDaySummary(allActions))
@@ -335,11 +342,11 @@ class SettleCommand : CliktCommand(
     ): List<SettleAction> {
         // 1. Fetch Chrono entries (extend range by +1 day to catch entries that
         // fall on the next UTC day but belong to the local date, e.g. 7:45 PM EST = next day in UTC)
-        echo("Fetching Chrono data ($from to $to)...", err = json || dryRun)
+        echo("Fetching Chrono data ($from to $to)...", err = quiet)
         val entries = chronoClient.getTimeEntries(from, to.plusDays(1))
 
         if (entries.isEmpty()) {
-            echo("No entries found in Chrono for this period.", err = json || dryRun)
+            echo("No entries found in Chrono for this period.", err = quiet)
             return emptyList()
         }
 
@@ -347,7 +354,7 @@ class SettleCommand : CliktCommand(
         val rawAggregates = Aggregator.aggregate(entries, config, from, to)
 
         if (rawAggregates.isEmpty()) {
-            echo("No work entries to process (entries without project or duration are skipped).", err = json || dryRun)
+            echo("No work entries to process (entries without project or duration are skipped).", err = quiet)
             return emptyList()
         }
 
