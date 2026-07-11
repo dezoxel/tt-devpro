@@ -1,7 +1,0 @@
-.git
-.gradle
-build
-*.jar
-*.tar
-.idea
-.vscode

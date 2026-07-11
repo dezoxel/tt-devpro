@@ -52,8 +52,9 @@ class TtApiClient(private val cookie: String) {
     }
 
     // The session cookie can only be refreshed by a host-side browser login
-    // (`make auth`), which cannot run inside the Docker container. So on 401/403
-    // we surface a clear instruction instead of attempting an in-process refresh.
+    // (`make auth`), which drives a GUI browser via Playwright and so must run
+    // on the host. On 401/403 we surface a clear instruction instead of
+    // attempting an in-process refresh.
     private suspend inline fun <reified T> withAuthCheck(block: suspend () -> T): T {
         return try {
             block()

@@ -10,15 +10,15 @@ import pro.dev.tt.commands.*
 import java.io.File
 
 class TtCli : CliktCommand(
-    name = "tt",
+    name = "tt-devpro",
     help = "Settle Dev.Pro time reports from Chrono"
 ) {
     override fun run() = Unit
 }
 
 // Returns the portal session cookie (`name=value`) used to authenticate API
-// calls. Refreshing it requires a host-side browser login (`make auth`), which
-// cannot run inside the Docker container — so here we only read it.
+// calls. Refreshing it requires a host-side browser login (`make auth`) that
+// drives a GUI browser via Playwright — so here we only read the saved cookie.
 fun getSessionCookie(): String {
     val cookieFile = File(System.getProperty("user.home"), ".tt-cookie")
 

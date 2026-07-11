@@ -1,69 +1,81 @@
 # tt-devpro
 
-CLI tool for syncing time entries from Chrono to DevPro Time Tracking Portal.
+A single global CLI that syncs time entries from **Chrono** (local time tracker) to the **Dev.Pro Time Tracking Portal**. It reads your Chrono entries, aggregates them by date + project, normalizes each day to 8 hours (meetings preserved, work scaled), and syncs them as worklogs.
 
-## Quick Start
+No Docker, no Gradle-on-PATH at runtime — `tt-devpro` is a self-contained binary on your `PATH`.
+
+## Install
 
 ```bash
-# Start dev environment
-make start
-
-# Run CLI commands
-make tt list
-make tt projects
-make tt fill --from 2025-12-01 --to 2025-12-15
-
-# View logs
-make logs
-
-# Stop
-make stop
+./install.sh
 ```
 
-## Commands
+This builds and installs `tt-devpro` to `~/.local/bin/`:
 
-Run `make help` for all available commands:
+- **Native** (preferred) — a single self-contained binary via GraalVM `native-image`, no JVM needed at runtime. Requires a GraalVM JDK; the script auto-detects one installed via SDKMAN.
+- **JVM fallback** — `./install.sh --jvm` (or automatic if native-image is unavailable) builds a `gradle installDist` launcher that runs on any host JDK ≥ 17.
 
+Ensure `~/.local/bin` is on your `PATH`.
+
+### Build toolchain (one-time)
+
+The native build needs a GraalVM JDK 21. Simplest, no-sudo path:
+
+```bash
+curl -s "https://get.sdkman.io" | bash
+sdk install java 21.0.11-graal
 ```
-Docker:
-  make start      Start dev environment with hot reload
-  make stop       Stop dev environment
-  make restart    Restart dev environment
-  make logs       Show container logs
-  make clean      Stop and remove volumes (Gradle cache)
 
-Build:
-  make build      Build the application
+`install.sh` and the `Makefile` pick this up automatically via `JAVA_HOME`.
 
-CLI (runs inside Docker):
-  make tt CMD     Run tt command (e.g., make tt list)
+## Usage
 
-Auth:
-  make auth       Refresh DevPro session via browser (runs on host)
+```bash
+tt-devpro settle                       # Interactive: review each unfilled day, approve/edit/skip
+tt-devpro settle --dry-run             # Readable per-day summary of proposed actions, nothing written
+tt-devpro settle --json                # Machine-readable JSON of proposed actions
+tt-devpro settle --from 2026-07-01 --to 2026-07-15   # Batch a specific range
 ```
+
+- **Interactive** (a TTY): steps through each unfilled day for `[A]pprove / [E]dit / [D]elete / [S]kip`.
+- **Piped / non-interactive**: prints the same readable summary as `--dry-run` instead of prompting.
+- `--dry-run` and `--json` compute the proposals without applying them. If both are given, `--json` wins.
 
 ## Authentication
 
-Before using the CLI, you need to authenticate with DevPro Time Tracking Portal.
-
-The portal authenticates API calls with a server-side session cookie (scoped to `.dev.pro`), which lasts ~2 weeks.
-
-### Session refresh
-
-Run on your **host machine** (not in Docker):
+The portal authenticates API calls with a server-side session cookie (scoped to `.dev.pro`, ~2-week lifetime), saved to `~/.tt-cookie`.
 
 ```bash
-make auth
+make auth      # or: ./auth.sh
 ```
 
-This will:
-1. Open a browser window
-2. Navigate to DevPro Time Tracking Portal
-3. Wait for you to complete Google OAuth login (first run only — the session persists between runs)
-4. Extract and save the session cookie to `~/.tt-cookie`
+This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window), waits for you to log in the first time (the session then persists), and extracts the cookie to `~/.tt-cookie`.
 
-The cookie is automatically mounted into the Docker container.
+## Configuration (`~/.tt-config.yaml`)
 
-### Why run on host?
+Maps Chrono projects to DevPro projects and defines fillers/overrides:
 
-Playwright cannot open a GUI browser inside Docker containers on macOS. The `make auth` command runs the authentication flow on your host machine where the browser can be displayed.
+```yaml
+chrono_api: "http://localhost:9247"
+
+mappings:
+  - chrono_project: "Velocitor - DevPro - Work"
+    devpro_project: "Velocitor: NLP"
+    billability: "Billable"
+
+fillers:        # Auto-fill meeting-only days with work entries
+overrides:      # Reroute entries by pattern before mapping
+project_ids:    # DevPro project ID overrides
+```
+
+Unmapped Chrono projects are silently skipped — if entries are missing, check your mappings.
+
+## Development
+
+```bash
+make build     # Build the native image
+make test      # Run the test suite
+make clean     # Remove build artifacts
+```
+
+See `CLAUDE.md` for architecture notes.
