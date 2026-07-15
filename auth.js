@@ -105,10 +105,12 @@ async function main() {
         headless: false,
     });
 
-    const page = context.pages()[0] || await context.newPage();
     let failed = false;
 
     try {
+        // Inside the try: a failure here must still reach the close() below,
+        // or a half-launched Firefox is left on screen with nothing to close it.
+        const page = context.pages()[0] || await context.newPage();
         await page.goto(PORTAL_URL);
 
         const saved = await extractSessionCookie(context);
