@@ -49,7 +49,9 @@ The portal authenticates API calls with a server-side session cookie (scoped to 
 make auth      # or: ./auth.sh
 ```
 
-This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window), waits for you to log in the first time (the session then persists), and extracts the cookie to `~/.tt-cookie`.
+This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window) against a persistent profile, so the Google login and its MFA are asked for once and then reused.
+
+A cookie is written only after the portal answered `200` to that exact cookie on an authenticated endpoint, and the verified account is printed — presence in the browser profile proves nothing, since a dead cookie lingers there forever. If the saved session is rejected, `auth` drops the `.dev.pro` cookies (the Google session survives), logs in again and verifies the new one. When no session can be obtained it fails with a non-zero exit and leaves `~/.tt-cookie` untouched, rather than re-blessing a dead cookie.
 
 ## Configuration (`~/.tt-config.yaml`)
 
