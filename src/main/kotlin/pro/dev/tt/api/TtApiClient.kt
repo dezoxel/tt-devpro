@@ -7,7 +7,9 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
+import io.ktor.http.content.TextContent
 import io.ktor.serialization.kotlinx.json.*
+import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.json.Json
 import pro.dev.tt.model.*
 import java.util.UUID
@@ -30,6 +32,18 @@ class TtApiClient(private val cookie: String) {
             json(json)
         }
     }
+
+    // Request bodies name their serializer at the call site instead of letting
+    // Ktor look one up from the body's type. That lookup is reflective, so in
+    // the native image the class must appear in reflect-config.json — and it
+    // never can: the metadata comes from tracing `settle --dry-run`, a run that
+    // by definition issues no POST, so no request class is ever reachable by the
+    // agent. Hand-adding one would not survive either, since `metadataCopy`
+    // overwrites that file. Naming the serializer makes it a compile-time
+    // symbol, which no build step can lose. TextContent is an OutgoingContent,
+    // so ContentNegotiation passes it through instead of re-encoding it.
+    internal fun <T> jsonBody(serializer: SerializationStrategy<T>, value: T) =
+        TextContent(json.encodeToString(serializer, value), ContentType.Application.Json)
 
     private suspend inline fun <reified T> HttpResponse.checkAndParse(): T {
         when (status.value) {
@@ -55,7 +69,7 @@ class TtApiClient(private val cookie: String) {
     // (`make auth`), which drives a GUI browser via Playwright and so must run
     // on the host. On 401/403 we surface a clear instruction instead of
     // attempting an in-process refresh.
-    private suspend inline fun <reified T> withAuthCheck(block: suspend () -> T): T {
+    private suspend inline fun <reified T> withAuthCheck(block: () -> T): T {
         return try {
             block()
         } catch (e: AuthRequiredException) {
@@ -91,8 +105,7 @@ class TtApiClient(private val cookie: String) {
         client.post("$baseUrl/worklog/create") {
             header("Cookie", cookie)
             header("IdempotencyKey", UUID.randomUUID().toString())
-            contentType(ContentType.Application.Json)
-            setBody(request)
+            setBody(jsonBody(CreateWorklogRequest.serializer(), request))
         }.checkStatus()
     }
 
@@ -100,8 +113,7 @@ class TtApiClient(private val cookie: String) {
         client.post("$baseUrl/worklog/update") {
             header("Cookie", cookie)
             header("IdempotencyKey", UUID.randomUUID().toString())
-            contentType(ContentType.Application.Json)
-            setBody(request)
+            setBody(jsonBody(UpdateWorklogRequest.serializer(), request))
         }.checkStatus()
     }
 
