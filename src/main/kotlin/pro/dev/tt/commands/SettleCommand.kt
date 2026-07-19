@@ -26,10 +26,8 @@ import pro.dev.tt.service.TimeNormalizer
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
-import java.time.Month
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.time.temporal.TemporalAdjusters
 
 @Serializable
 data class SettleAction(
@@ -195,7 +193,7 @@ class SettleCommand : CliktCommand(
         val unfilledDays = chronoDays.filter { day ->
             val devproHours = devproHoursByDay[day] ?: 0.0
             val isWeekend = day.dayOfWeek == DayOfWeek.SATURDAY || day.dayOfWeek == DayOfWeek.SUNDAY
-            devproHours < 8.0 && !isWeekend && !isUSHoliday(day)
+            devproHours < 8.0 && !isWeekend && !isUsFederalHoliday(day)
         }
 
         return UnfilledDaysResult(unfilledDays, devproHoursByDay)
@@ -826,39 +824,5 @@ class SettleCommand : CliktCommand(
         }
 
         echo("\nDone! Created: $created, Updated: $updated, Errors: $errors")
-    }
-
-    private fun isUSHoliday(date: LocalDate): Boolean {
-        val year = date.year
-
-        // Fixed holidays
-        val newYearsDay = LocalDate.of(year, Month.JANUARY, 1)
-        val independenceDay = LocalDate.of(year, Month.JULY, 4)
-        val christmasDay = LocalDate.of(year, Month.DECEMBER, 25)
-
-        // Floating holidays
-        // Martin Luther King Jr. Day: 3rd Monday of January
-        val mlkDay = LocalDate.of(year, Month.JANUARY, 1)
-            .with(TemporalAdjusters.dayOfWeekInMonth(3, DayOfWeek.MONDAY))
-
-        // Memorial Day: Last Monday of May
-        val memorialDay = LocalDate.of(year, Month.MAY, 1)
-            .with(TemporalAdjusters.lastInMonth(DayOfWeek.MONDAY))
-
-        // Labor Day: 1st Monday of September
-        val laborDay = LocalDate.of(year, Month.SEPTEMBER, 1)
-            .with(TemporalAdjusters.dayOfWeekInMonth(1, DayOfWeek.MONDAY))
-
-        // Thanksgiving: 4th Thursday of November
-        val thanksgiving = LocalDate.of(year, Month.NOVEMBER, 1)
-            .with(TemporalAdjusters.dayOfWeekInMonth(4, DayOfWeek.THURSDAY))
-
-        return date == newYearsDay ||
-               date == mlkDay ||
-               date == memorialDay ||
-               date == independenceDay ||
-               date == laborDay ||
-               date == thanksgiving ||
-               date == christmasDay
     }
 }
