@@ -67,10 +67,12 @@ mappings:
 
 fillers:        # Auto-fill meeting-only days with work entries
 overrides:      # Reroute entries by pattern before mapping
-project_ids:    # DevPro project ID overrides
+project_ids:    # Fallback ids by DevPro project name (see below)
 ```
 
 Unmapped Chrono projects are silently skipped — if entries are missing, check your mappings.
+
+`project_ids` is a **fallback**, not an override. Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` prints a warning naming the project and the id it used, since a hardcoded id can quietly go stale. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
 
 ## Development
 

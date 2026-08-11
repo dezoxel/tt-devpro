@@ -152,8 +152,9 @@ class SettleCommand : CliktCommand(
 
         echo("Checking last 45 days for unfilled days (<8h)...", err = quiet)
 
-        // Fetch all data for the range (need to query each month separately)
-        val user = ttClient.getCurrentUser()
+        // Fail fast on a dead session before scanning 45 days of months: this call
+        // throws when the cookie is rejected. The user itself is not needed here.
+        ttClient.getCurrentUser()
 
         // Get all months in range
         val months = mutableSetOf<LocalDate>()
@@ -394,11 +395,16 @@ class SettleCommand : CliktCommand(
         val fillerProjectNames = fillerEntries.map { it.devproProjectName }.distinct()
         val borrowedProjectNames = borrowedEntries.map { it.devproProjectName }.distinct()
         val allProjectNames = (aggregates.map { it.devproProjectName } + fillerProjectNames + borrowedProjectNames).distinct()
-        val projectByName = devproProjects.associateBy { it.shortName.lowercase() }
-        val projectIdMap = allProjectNames.associateWith { name ->
-            projectByName[name.lowercase()]?.uniqueId
-                ?: error("DevPro project '$name' not found")
+        val resolution = Aggregator.resolveProjectIds(allProjectNames, devproProjects, config.projectIds)
+        // Always stderr: keeps --json stdout clean, stays visible in an interactive run.
+        resolution.fallbacks.forEach { fallback ->
+            echo(
+                "⚠ '${fallback.name}' is not in your assigned projects — using id ${fallback.id} " +
+                    "from project_ids in ~/.tt-config.yaml. Check it still points at the right project.",
+                err = true
+            )
         }
+        val projectIdMap = resolution.idsByName
 
         // 6. Generate task titles from Chrono descriptions
         val datePattern = Regex(", (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \\d{1,2} \\d{4}$")

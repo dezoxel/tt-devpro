@@ -22,6 +22,14 @@ data class DayProjectAggregate(
     val maxHours: Double? = null
 )
 
+/** A DevPro project name resolved from the config's `project_ids` rather than the live list. */
+data class FallbackId(val name: String, val id: String)
+
+data class ProjectIdResolution(
+    val idsByName: Map<String, String>,
+    val fallbacks: List<FallbackId>
+)
+
 object Aggregator {
 
     fun aggregate(
@@ -36,7 +44,7 @@ object Aggregator {
         // Only entries with same description are grouped together
         val grouped = entries
             .filter { it.project != null && it.duration != null && it.duration > 0 }
-            .filter { it.project!!.name.endsWith("DevPro - Work") || it.project!!.name.endsWith("DevPro/Work") }
+            .filter { it.project!!.name.endsWith("DevPro - Work") || it.project.name.endsWith("DevPro/Work") }
             .filter { entry ->
                 val date = Instant.parse(entry.startTime).atZone(ZoneId.systemDefault()).toLocalDate()
                 (dateFrom == null || date >= dateFrom) && (dateTo == null || date <= dateTo)
@@ -79,17 +87,42 @@ object Aggregator {
         }.sortedWith(compareBy({ it.date }, { it.devproProjectName }))
     }
 
+    /**
+     * Resolves DevPro project names to ids, preferring the live assigned-projects
+     * list and falling back to the ids recorded in the config's `project_ids`.
+     *
+     * The live list always wins: a stale configured id silently overriding a
+     * correct live one would post worklogs to the wrong project unnoticed, which
+     * is worse than the crash this fallback exists to prevent. Every fallback
+     * that fires is returned in [ProjectIdResolution.fallbacks] so the caller can
+     * say out loud that the id came from config and deserves a check.
+     */
     fun resolveProjectIds(
-        aggregates: List<DayProjectAggregate>,
-        devproProjects: List<Project>
-    ): Map<String, String> {
+        projectNames: List<String>,
+        devproProjects: List<Project>,
+        configuredIds: Map<String, String>
+    ): ProjectIdResolution {
         val projectByName = devproProjects.associateBy { it.shortName.lowercase() }
-        val uniqueDevproNames = aggregates.map { it.devproProjectName }.distinct()
+        val configuredByName = configuredIds.entries.associate { it.key.lowercase() to it.value }
 
-        return uniqueDevproNames.associateWith { name ->
-            projectByName[name.lowercase()]?.uniqueId
+        val idsByName = mutableMapOf<String, String>()
+        val fallbacks = mutableListOf<FallbackId>()
+
+        for (name in projectNames.distinct()) {
+            val liveId = projectByName[name.lowercase()]?.uniqueId
+            if (liveId != null) {
+                idsByName[name] = liveId
+                continue
+            }
+
+            val configuredId = configuredByName[name.lowercase()]
                 ?: error(buildDevproNotFoundError(name, devproProjects))
+
+            idsByName[name] = configuredId
+            fallbacks += FallbackId(name, configuredId)
         }
+
+        return ProjectIdResolution(idsByName, fallbacks)
     }
 
     private fun findOverride(description: String, overrides: List<OverrideRule>): OverrideRule? {
@@ -123,6 +156,12 @@ object Aggregator {
             |
             |Available projects:
             |${names.joinToString("\n") { "  - $it" }}
+            |
+            |If the project was renamed or unassigned, either point the mapping at its
+            |current name above, or record its id as a fallback in ~/.tt-config.yaml:
+            |
+            |project_ids:
+            |  "$name": "<uniqueId>"
         """.trimMargin()
     }
 }
