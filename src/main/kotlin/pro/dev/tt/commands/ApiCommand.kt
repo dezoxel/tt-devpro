@@ -3,13 +3,17 @@ package pro.dev.tt.commands
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
+import com.github.ajalt.clikt.parameters.options.convert
+import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.option
 import com.github.ajalt.clikt.parameters.options.required
 import kotlinx.coroutines.runBlocking
 import pro.dev.tt.api.TtApiClient
 import pro.dev.tt.getSessionCookie
 import pro.dev.tt.model.CreateWorklogRequest
+import pro.dev.tt.model.Project
 import pro.dev.tt.model.UpdateWorklogRequest
+import java.time.LocalDate
 
 /**
  * Direct API proxy commands for Time Tracking Portal.
@@ -22,21 +26,41 @@ class ApiCommand : CliktCommand(
     override fun run() = Unit
 }
 
+/**
+ * Renders the assigned-projects answer.
+ *
+ * The portal endpoint is date-scoped (assignedProjectsOnDate), so the date is
+ * part of the answer, not context around it — a bare list invites being read as
+ * "the projects" and has already produced a false "assignment revoked" diagnosis.
+ * An empty result says so explicitly rather than leaving a lone header that
+ * looks like truncated output.
+ */
+fun renderAssignedProjects(date: LocalDate, projects: List<Project>): String {
+    val header = "Assigned projects as of $date (${projects.size}):"
+    val lines = if (projects.isEmpty()) {
+        listOf("  (none)")
+    } else {
+        projects.map { "  ${it.shortName}: ${it.uniqueId}" }
+    }
+    return (listOf(header) + lines).joinToString("\n")
+}
+
 class ApiGetProjectsCommand : CliktCommand(
     name = "get-projects",
-    help = "Get assigned projects"
+    help = "Get assigned projects as of a date (defaults to today)"
 ) {
+    private val date by option("--date", "-d", help = "Assignment date (YYYY-MM-DD), defaults to today")
+        .convert { LocalDate.parse(it) }
+        .default(LocalDate.now())
+
     override fun run() = runBlocking {
         val client = TtApiClient(getSessionCookie())
 
         try {
             val user = client.getCurrentUser()
-            val response = client.getAssignedProjects(user.uniqueId, "2025-01-01")
+            val response = client.getAssignedProjects(user.uniqueId, date.toString())
 
-            echo("Assigned Projects:")
-            response.projects.forEach { project ->
-                echo("  ${project.shortName}: ${project.uniqueId}")
-            }
+            echo(renderAssignedProjects(date, response.projects))
         } catch (e: Exception) {
             echo("✗ Error: ${e.message}", err = true)
         }
