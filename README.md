@@ -34,12 +34,15 @@ sdk install java 21.0.11-graal
 tt-devpro settle                       # Interactive: review each unfilled day, approve/edit/skip
 tt-devpro settle --dry-run             # Readable per-day summary of proposed actions, nothing written
 tt-devpro settle --json                # Machine-readable JSON of proposed actions
+tt-devpro settle --include-today       # Also offer today, whose hours aren't final yet
 tt-devpro settle --from 2026-07-01 --to 2026-07-15   # Batch a specific range
 ```
 
 - **Interactive** (a TTY): steps through each unfilled day for `[A]pprove / [E]dit / [D]elete / [S]kip`.
 - **Piped / non-interactive**: prints the same readable summary as `--dry-run` instead of prompting.
 - `--dry-run` and `--json` compute the proposals without applying them. If both are given, `--json` wins.
+
+**The window ends at the last completed day.** `settle` proposes days that came back under 8h, and today qualifies by construction — it isn't over. Left unbounded, the filler and borrowing synthesis rounded a half-finished day up to a convincing 8h and parked it in the review table next to the legitimate one, where a single `[A]` published it. Future days got in the same way, since Chrono also holds planned entries for days that haven't started. So the default upper bound is yesterday: any date you didn't type is a completed date. `--include-today` moves the bound to today for the deliberate case (closing the books early before time off) and never past it. An explicit `--from`/`--to` is honoured verbatim, with a note on stderr if the range reaches today or beyond.
 
 ## Authentication
 

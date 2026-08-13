@@ -52,11 +52,14 @@ class SettleCommand : CliktCommand(
     name = "settle",
     help = "Settle daily hours: normalize to 8h, auto-fill gaps, push to DevPro"
 ) {
-    private val from by option("--from", help = "Start date (YYYY-MM-DD). Without --from/--to runs in day-by-day mode")
+    private val from by option("--from", help = "Start date (YYYY-MM-DD), defaults to the 1st of this month. Without --from/--to runs in day-by-day mode")
         .convert { LocalDate.parse(it) }
 
-    private val to by option("--to", help = "End date (YYYY-MM-DD). Without --from/--to runs in day-by-day mode")
+    private val to by option("--to", help = "End date (YYYY-MM-DD), defaults to the last completed day. Without --from/--to runs in day-by-day mode")
         .convert { LocalDate.parse(it) }
+
+    private val includeToday by option("--include-today", help = "Also settle today. Off by default: today is unfinished, so its hours aren't final")
+        .flag(default = false)
 
     private val json by option("--json", help = "Output proposed actions as JSON and exit without applying")
         .flag(default = false)
@@ -68,6 +71,10 @@ class SettleCommand : CliktCommand(
     // session: --json, --dry-run, or a non-TTY (piped/automation) run. Status
     // and progress lines go to stderr in these cases so stdout stays clean.
     private val quiet: Boolean get() = json || dryRun || System.console() == null
+
+    // The last day whose hours are final, and therefore the newest day settle
+    // may ever propose. See SettleWindow.kt for why this boundary exists.
+    private val settleThrough: LocalDate get() = lastSettleableDay(LocalDate.now(), includeToday)
 
     override fun run() { runBlocking {
         val config = try {
@@ -89,9 +96,8 @@ class SettleCommand : CliktCommand(
                 runDryRunMode(config, chronoClient, ttClient)
             } else if (from != null || to != null) {
                 // Batch mode: process date range at once
-                val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
-                val rangeTo = to ?: LocalDate.now()
-                runBatchMode(rangeFrom, rangeTo, config, chronoClient, ttClient)
+                val range = resolveRange()
+                runBatchMode(range.from, range.to, config, chronoClient, ttClient)
             } else {
                 // Day-by-day mode: interactive processing one day at a time
                 runDayByDayMode(config, chronoClient, ttClient)
@@ -105,6 +111,42 @@ class SettleCommand : CliktCommand(
             ttClient.close()
         }
     } }
+
+    private data class ResolvedRange(val from: LocalDate, val to: LocalDate)
+
+    /**
+     * Resolves the explicit `--from`/`--to` range, filling in the ends the user
+     * did not type. The rule is "any date you didn't type is a completed date",
+     * so the default upper end is the cutoff, never `today`.
+     *
+     * An explicitly typed date is honoured verbatim — it is the deliberate
+     * escape hatch, alongside `--include-today` — but not silently: a `--to`
+     * that reaches today or beyond reopens exactly the bug this boundary exists
+     * to close (`--to 2026-09-13` for `08-13` is one keystroke away), so it says
+     * so on stderr and carries on.
+     *
+     * Both call sites are mutually exclusive per invocation, so the note fires
+     * at most once.
+     */
+    private fun resolveRange(): ResolvedRange {
+        val cutoff = settleThrough
+        val range = ResolvedRange(
+            from = from ?: LocalDate.now().withDayOfMonth(1),
+            to = to ?: cutoff
+        )
+        // Compared against the cutoff, not today: under --include-today the
+        // cutoff *is* today, and warning that the range reaches "past the last
+        // completed day" about the very day that flag just made settleable
+        // would contradict itself.
+        if (range.to.isAfter(cutoff)) {
+            echo(
+                "ℹ Range ends ${range.to}, past the last completed day ($cutoff) — " +
+                    "those days' hours aren't final.",
+                err = true
+            )
+        }
+        return range
+    }
 
     private suspend fun runBatchMode(
         from: LocalDate,
@@ -140,7 +182,10 @@ class SettleCommand : CliktCommand(
 
     private data class UnfilledDaysResult(
         val unfilledDays: List<LocalDate>,
-        val devproHoursByDay: Map<LocalDate, Double>
+        val devproHoursByDay: Map<LocalDate, Double>,
+        // Candidate days dropped for not being over yet. An empty list is what
+        // lets the caller say "all settled" instead of "nothing final yet".
+        val notFinal: List<LocalDate> = emptyList()
     )
 
     private suspend fun findUnfilledDays(
@@ -148,18 +193,22 @@ class SettleCommand : CliktCommand(
         ttClient: TtApiClient
     ): UnfilledDaysResult {
         val today = LocalDate.now()
+        val cutoff = settleThrough
         val rangeStart = today.minusDays(45)
 
-        echo("Checking last 45 days for unfilled days (<8h)...", err = quiet)
+        // Name the actual window: "last 45 days" said nothing about the upper
+        // end, which is precisely where this command used to be wrong.
+        echo("Checking $rangeStart to $cutoff for unfilled days (<8h)...", err = quiet)
 
         // Fail fast on a dead session before scanning 45 days of months: this call
         // throws when the cookie is rejected. The user itself is not needed here.
         ttClient.getCurrentUser()
 
-        // Get all months in range
+        // Get all months in range. Bounded by the cutoff, not today: no candidate
+        // day can live past it, so a later month has nothing to contribute.
         val months = mutableSetOf<LocalDate>()
         var current = rangeStart.withDayOfMonth(1)
-        while (!current.isAfter(today)) {
+        while (!current.isAfter(cutoff)) {
             months.add(current)
             current = current.plusMonths(1)
         }
@@ -176,8 +225,11 @@ class SettleCommand : CliktCommand(
                 }
         }
 
-        // Fetch Chrono entries for the range (+1 day to catch late-night local entries stored as next UTC day)
-        val allEntries = chronoClient.getTimeEntries(rangeStart, today.plusDays(1))
+        // Fetch Chrono entries for the range (+1 day to catch late-night local
+        // entries stored as next UTC day — the padding is on the UTC axis, and
+        // every entry is re-dated to its local day below, so it can never add a
+        // future local day).
+        val allEntries = chronoClient.getTimeEntries(rangeStart, cutoff.plusDays(1))
         if (allEntries.isEmpty()) {
             return UnfilledDaysResult(emptyList(), devproHoursByDay)
         }
@@ -190,34 +242,55 @@ class SettleCommand : CliktCommand(
             .distinct()
             .sorted()
 
+        // Drop days whose hours aren't final before anything else looks at them:
+        // today is under 8h by construction, and Chrono also holds planned
+        // entries for days that haven't started.
+        val window = splitByFinality(chronoDays, today, includeToday)
+        if (window.notFinal.isNotEmpty()) {
+            echo("ℹ Skipped (hours not final yet): ${describeNotFinalDays(window.notFinal, today)}", err = true)
+        }
+
         // Find unfilled days (have Chrono data AND <8h in DevPro AND not weekend/holiday)
-        val unfilledDays = chronoDays.filter { day ->
+        val unfilledDays = window.settleable.filter { day ->
             val devproHours = devproHoursByDay[day] ?: 0.0
             val isWeekend = day.dayOfWeek == DayOfWeek.SATURDAY || day.dayOfWeek == DayOfWeek.SUNDAY
             devproHours < 8.0 && !isWeekend && !isUsFederalHoliday(day)
         }
 
-        return UnfilledDaysResult(unfilledDays, devproHoursByDay)
+        return UnfilledDaysResult(unfilledDays, devproHoursByDay, window.notFinal)
     }
+
+    /**
+     * Proposed actions plus the days that were dropped for not being over yet.
+     * The dropped list is what keeps an empty result from claiming everything
+     * is settled when in fact nothing was final enough to look at.
+     */
+    private data class CollectedActions(
+        val actions: List<SettleAction>,
+        val notFinal: List<LocalDate>
+    )
 
     /**
      * Collect proposed actions for the requested scope, shared by JSON and
      * dry-run modes. With --from/--to → the explicit range; otherwise → the
-     * unfilled days in the last 45 days (same semantics as interactive mode).
+     * unfilled days in the scan window (same semantics as interactive mode).
      */
     private suspend fun collectActions(
         config: pro.dev.tt.config.Config,
         chronoClient: ChronoClient,
         ttClient: TtApiClient
-    ): List<SettleAction> {
+    ): CollectedActions {
         return if (from != null || to != null) {
-            val rangeFrom = from ?: LocalDate.now().withDayOfMonth(1)
-            val rangeTo = to ?: LocalDate.now()
-            prepareActions(rangeFrom, rangeTo, config, chronoClient, ttClient)
+            // An explicit range is taken at face value, so it has no finality
+            // concept to report.
+            val range = resolveRange()
+            CollectedActions(prepareActions(range.from, range.to, config, chronoClient, ttClient), emptyList())
         } else {
-            findUnfilledDays(chronoClient, ttClient).unfilledDays.flatMap { day ->
+            val result = findUnfilledDays(chronoClient, ttClient)
+            val actions = result.unfilledDays.flatMap { day ->
                 prepareActions(day, day, config, chronoClient, ttClient)
             }
+            CollectedActions(actions, result.notFinal)
         }
     }
 
@@ -226,9 +299,9 @@ class SettleCommand : CliktCommand(
         chronoClient: ChronoClient,
         ttClient: TtApiClient
     ) {
-        val allActions = collectActions(config, chronoClient, ttClient)
+        val collected = collectActions(config, chronoClient, ttClient)
         val jsonFormat = KJson { prettyPrint = true }
-        echo(jsonFormat.encodeToString(ListSerializer(SettleAction.serializer()), allActions))
+        echo(jsonFormat.encodeToString(ListSerializer(SettleAction.serializer()), collected.actions))
     }
 
     private suspend fun runDryRunMode(
@@ -236,14 +309,17 @@ class SettleCommand : CliktCommand(
         chronoClient: ChronoClient,
         ttClient: TtApiClient
     ) {
-        val allActions = collectActions(config, chronoClient, ttClient)
-        if (allActions.isEmpty()) {
+        val collected = collectActions(config, chronoClient, ttClient)
+        if (collected.actions.isEmpty()) {
             // For an explicit range, empty can mean "no Chrono/mapped entries"
             // (already reported to stderr) rather than "settled" — stay neutral.
-            echo(if (from != null || to != null) "No actions to settle for this range." else "All days are settled (≥8h logged).")
+            echo(
+                if (from != null || to != null) "No actions to settle for this range."
+                else nothingToSettleMessage(collected.notFinal, LocalDate.now())
+            )
             return
         }
-        echo(renderDaySummary(allActions))
+        echo(renderDaySummary(collected.actions))
     }
 
     private suspend fun runDayByDayMode(
@@ -256,7 +332,7 @@ class SettleCommand : CliktCommand(
         val devproHoursByDay = result.devproHoursByDay
 
         if (unfilledDays.isEmpty()) {
-            echo("All days are settled (≥8h logged).")
+            echo(nothingToSettleMessage(result.notFinal, LocalDate.now()))
             return
         }
 
