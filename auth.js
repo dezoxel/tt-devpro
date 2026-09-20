@@ -15,6 +15,63 @@ const { firefox } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
+// Playwright resolves its browser by revision number, and that number is not
+// ours to control: playwright-core 1.62 wants firefox-1538, the globally
+// installed @playwright/cli wants firefox-1544, and in the alpha channel the
+// revision moves almost every day. Every mismatch costs a fresh ~280 MB download
+// and leaves another "Nightly" in the macOS default-browser list — on 20 September
+// 2026 there were two builds in the cache and nine dead entries in LaunchServices
+// from the ones before them.
+//
+// What this script asks of Firefox — open the portal, let the login happen in a
+// visible window, read one cookie — is the same in any recent build, so the build
+// already in the cache is as good as the one our pinned version names. Pinning the
+// version stays worthwhile for reproducibility; this only stops the pin from
+// forcing a second download.
+function browsersRoot() {
+    if (process.env.PLAYWRIGHT_BROWSERS_PATH) return process.env.PLAYWRIGHT_BROWSERS_PATH;
+    if (process.platform === 'darwin') return path.join(process.env.HOME, 'Library', 'Caches', 'ms-playwright');
+    if (process.platform === 'win32') return path.join(process.env.LOCALAPPDATA || '', 'ms-playwright');
+    return path.join(process.env.HOME, '.cache', 'ms-playwright');
+}
+
+const FIREFOX_BINARY = {
+    darwin: path.join('firefox', 'Nightly.app', 'Contents', 'MacOS', 'firefox'),
+    win32: path.join('firefox', 'firefox.exe'),
+}[process.platform] || path.join('firefox', 'firefox');
+
+// Returns a path to override Playwright's own resolution with, or undefined to
+// leave it alone. Undefined is the answer in both good cases: the pinned revision
+// is present, or the cache is empty and Playwright's own "run npx playwright
+// install" error is the right thing for the user to read.
+function cachedFirefoxPath() {
+    let pinned = null;
+    try {
+        pinned = firefox.executablePath();
+    } catch {
+        // Playwright could not name a path at all; the cache scan below still can.
+    }
+    if (pinned && fs.existsSync(pinned)) return undefined;
+
+    let entries;
+    try {
+        entries = fs.readdirSync(browsersRoot());
+    } catch {
+        return undefined;
+    }
+
+    const newest = entries
+        .map((name) => /^firefox-(\d+)$/.exec(name))
+        .filter(Boolean)
+        .map((match) => ({ revision: Number(match[1]), binary: path.join(browsersRoot(), match[0], FIREFOX_BINARY) }))
+        .filter((build) => fs.existsSync(build.binary))
+        .sort((a, b) => b.revision - a.revision)[0];
+
+    if (!newest) return undefined;
+    console.log(`\u21bb Reusing the Firefox already in the Playwright cache (revision ${newest.revision}).`);
+    return newest.binary;
+}
+
 const COOKIE_FILE = path.join(process.env.HOME, '.tt-cookie');
 const USER_DATA_DIR = path.join(process.env.HOME, '.tt-browser-profile');
 const PORTAL_URL = 'https://timetrackingportal.dev.pro/';
@@ -101,8 +158,10 @@ async function main() {
     console.log('==============================================\n');
 
     // Use persistent context - saves session between runs
+    const executablePath = cachedFirefoxPath();
     const context = await firefox.launchPersistentContext(USER_DATA_DIR, {
         headless: false,
+        ...(executablePath ? { executablePath } : {}),
     });
 
     let failed = false;
@@ -148,4 +207,8 @@ async function main() {
     console.log('\n✅ Done!');
 }
 
-main();
+// Running the file logs in; requiring it exposes the browser resolution so it
+// can be exercised without opening a window.
+if (require.main === module) main();
+
+module.exports = { cachedFirefoxPath };
