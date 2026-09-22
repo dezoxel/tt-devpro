@@ -397,7 +397,21 @@ fn sanitize(s: &str) -> String {
 /// trailing line terminator, and the replacement leaves that terminator in place:
 /// `"Event, Apr 8 2026\n"` → `"Event\n"` (measured). Two trailing terminators means
 /// no match at all, because `$` only reaches back over the last one.
-fn strip_date_suffix(s: &str) -> String {
+///
+/// **The single copy.** The incumbent carries this regex three times —
+/// `TimeNormalizer.kt:32` (C26, the meeting-filename probe), `SettleCommand.kt:486`
+/// and `BorrowerService.kt:145` (both C12, the task title). They are one pattern, so
+/// they are one function here, and [`crate::commands::settle_render`] calls this one
+/// rather than keeping its own.
+///
+/// It was briefly two: this module and `settle_render` each hand-ported the regex
+/// independently, with different day-digit strategies — one arguing the greedy
+/// `\d{1,2}` needs no backtracking, the other backtracking explicitly. A differential
+/// run over **826 964** adversarial inputs (`scratchpad/datecmp/`) found both agreeing
+/// with `java.util.regex` and with each other on every one, so the collapse is a
+/// deduplication and not a behaviour change. `pub` rather than private for that reason,
+/// and no third copy when `borrower.rs` needs it.
+pub fn strip_date_suffix(s: &str) -> String {
     let (core, terminator) = split_final_line_terminator(s);
     match date_suffix_start(core) {
         Some(at) => format!("{}{}", &core[..at], terminator),
@@ -668,6 +682,61 @@ mod tests {
             ..work("Delivery Practices", 0.5)
         };
         assert!(TimeNormalizer::with_knowledge_base(kb.path()).is_meeting_entry(&entry));
+    }
+
+    /// The two strips fail **together** on a trailing line terminator, and the
+    /// entry silently stops being a meeting. C12/C26, measured on JDK 21 running
+    /// the whole incumbent pipeline (`scratchpad/verify/Suffix.java`):
+    ///
+    /// ```text
+    /// <Team Sync, Apr 8 2026 - Practices - DevPro - Work>    -> <Team Sync>
+    /// <Team Sync, Apr 8 2026 - Practices - DevPro - Work\n>  -> unchanged
+    /// <Team Sync, Apr 8 2026\n>                              -> <Team Sync\n>
+    /// ```
+    ///
+    /// `removeSuffix` is an exact end-of-string test, so the terminator makes it
+    /// miss; the surviving project suffix then pushes the date out of `$`'s reach,
+    /// so the date is not stripped either. The third line is the control: with no
+    /// project suffix in the way, the date still goes and the terminator still
+    /// survives, which is what says the failure belongs to the composition rather
+    /// than to either half.
+    ///
+    /// Rust's `strip_suffix` reproduces this by construction. The test exists
+    /// because the repair anyone would reach for — trimming the description before
+    /// stripping — is invisible in a diff and turns a scalable-work day into a
+    /// meeting day, changing hours on real dates. Under that repair the first
+    /// assertion below flips to `true`.
+    #[test]
+    fn a_trailing_newline_defeats_both_strips_and_the_meeting_is_missed() {
+        let kb = knowledge_base(&["Calendar/Team Sync 2026-04-08.md"]);
+        let normalizer = TimeNormalizer::with_knowledge_base(kb.path());
+
+        let with_terminator = DayProjectAggregate {
+            date: date(2026, 4, 8),
+            chrono_project: "Practices - DevPro - Work".to_string(),
+            descriptions: vec![
+                "Team Sync, Apr 8 2026 - Practices - DevPro - Work\n".to_string(),
+            ],
+            ..work("Delivery Practices", 0.5)
+        };
+        assert!(
+            !normalizer.is_meeting_entry(&with_terminator),
+            "neither strip fires, so the probe looks for the whole raw description as a filename and finds nothing"
+        );
+
+        // The premise: the identical entry without the terminator IS a meeting, so
+        // the assertion above is about the terminator and not about the fixture.
+        let without_terminator = DayProjectAggregate {
+            descriptions: vec![
+                "Team Sync, Apr 8 2026 - Practices - DevPro - Work".to_string(),
+            ],
+            ..with_terminator.clone()
+        };
+        assert!(normalizer.is_meeting_entry(&without_terminator));
+
+        // The control: with no project suffix to survive, the date strip works and
+        // the terminator is carried into the probed name.
+        assert_eq!(strip_date_suffix("Team Sync, Apr 8 2026\n"), "Team Sync\n");
     }
 
     /// Java's `$` reaches back over one trailing line terminator but `replaceAll`

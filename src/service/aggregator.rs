@@ -317,12 +317,30 @@ fn find_override<'a>(description: &str, overrides: &'a [OverrideRule]) -> Option
 /// the character-by-character comparison never sees and matches needles Kotlin
 /// rejects. Comparing character by character cannot invent a character.
 ///
-/// One residual divergence stays, and it is named rather than hidden: Java's
-/// `Character.toLowerCase(U+0130)` is `i`, and Rust's standard library exposes
-/// only the full mapping, so [`simple_lowercase`] leaves that one character
-/// alone where the JVM would fold it. It takes a Turkish capital `İ` in a Chrono
-/// description to reach, and closing it would mean carrying a table of simple
-/// case mappings.
+/// Residual divergences stay, and there are **82**, not the one this comment
+/// first named. Measured 2026-09-21 by walking every code point on both sides
+/// (`scratchpad/casecmp/`, `Character.toUpperCase`/`toLowerCase` on JDK 21
+/// against the shipped helpers on rustc 1.91). They split cleanly in two, and
+/// neither half is closable here:
+///
+/// - **28 are simple-vs-full gaps.** Java has a single-character mapping where
+///   Rust's standard library exposes only the multi-character one, so the
+///   fallback in [`simple_uppercase`] returns the input unchanged. `İ` U+0130
+///   is one; the Greek ypogegrammeni block U+1F80..U+1FF3 is most of the rest.
+/// - **54 are Unicode version skew.** rustc 1.91 knows case pairs this JDK does
+///   not (U+A7CB..U+A7DC, U+10D50..U+10D85 and neighbours), so Rust folds where
+///   the JVM does not.
+///
+/// Zero code points map differently on both sides, which is what says the
+/// *mechanism* is right and only the tables differ. A hand-carried table would
+/// close the first 28 and pin the second 54 to one JDK's Unicode version, which
+/// moves under both toolchains — trading a named divergence for a hidden,
+/// version-dependent one.
+///
+/// Not reachable on this tool's data: over the live 2 710-entry window
+/// (2026-07-01..2026-09-22) the descriptions, projects and aspects contain 43
+/// distinct non-ASCII characters and **none** of the 82; `~/.tt-config.yaml`
+/// contains one non-ASCII character (`→`) and it is not among them either.
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     // `indexOf` of an empty needle is 0, so an override rule with an empty
     // pattern matches every non-blank description.
@@ -2051,6 +2069,42 @@ mod tests {
         assert!(
             find_override("x", &rules).is_some(),
             "the premise: the rule does match"
+        );
+    }
+
+    /// The two halves of the measured 82-code-point residue, one representative
+    /// each, so the doc comment above cannot drift away from the behaviour.
+    /// Both were read off a full code-point walk on JDK 21 versus rustc 1.91
+    /// (`scratchpad/casecmp/`), not reasoned about.
+    ///
+    /// Neither is reachable on this tool's data — the live 2 710-entry window
+    /// holds 43 distinct non-ASCII characters and none of the 82 — which is why
+    /// they are locked as known divergences rather than repaired with a table.
+    #[test]
+    fn the_two_documented_case_folding_residues_behave_as_recorded() {
+        // Half one: the JVM has a simple mapping, Rust exposes only the full one.
+        // `Character.toUpperCase('\u1F80')` is U+1F88 on the JVM; the full Rust
+        // mapping is three characters, so the fallback returns the input.
+        assert_eq!(
+            simple_uppercase('\u{1f80}'),
+            '\u{1f80}',
+            "Greek ypogegrammeni: the full mapping is multi-character, so it falls back"
+        );
+        assert!(
+            '\u{1f80}'.to_uppercase().count() > 1,
+            "the premise: Rust's full mapping really is multi-character here"
+        );
+
+        // U+0130, the case this comment originally named as the only one.
+        assert_eq!(simple_lowercase('\u{130}'), '\u{130}');
+        assert!('\u{130}'.to_lowercase().count() > 1);
+
+        // Half two: rustc knows a case pair this JDK does not. Rust folds these
+        // together and the JVM does not, so a needle that differs only by this
+        // pair matches here and would not on the incumbent.
+        assert!(
+            contains_ignore_case("\u{a7cc}", "\u{a7cd}"),
+            "Unicode version skew: rustc 1.91 pairs U+A7CC with U+A7CD, JDK 21 does not"
         );
     }
 

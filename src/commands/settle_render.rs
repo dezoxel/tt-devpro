@@ -25,7 +25,7 @@
 //! 4. **`$` in a Java regex also matches before a single final line terminator,
 //!    without consuming it.** The date-suffix strip therefore leaves a trailing
 //!    newline in place while still removing the date in front of it. See
-//!    [`strip_trailing_date`].
+//!    [`strip_date_suffix`].
 //!
 //! `groupBy(…).toSortedMap()` at `SettleRenderer.kt:18,51` is the one place in
 //! the codebase where key-sorted order is what the incumbent wants, so it maps to
@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 
 use chrono::{Datelike, NaiveDate, Weekday};
 
+use crate::service::normalizer::strip_date_suffix;
 use crate::fmt::{java_fmt, java_fmt_width};
 use crate::model::{ActionType, SettleAction};
 
@@ -45,11 +46,6 @@ use crate::model::{ActionType, SettleAction};
 /// descriptions. `SettleCommand.kt:495`.
 const NO_DESCRIPTION_TITLE: &str = "Development work";
 
-/// The three-letter month names of the date-suffix pattern, in the order the
-/// Kotlin alternation lists them. `SettleCommand.kt:484`, `BorrowerService.kt:145`.
-const MONTH_ABBREVIATIONS: [&[u8]; 12] = [
-    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
-];
 
 /// Minimum width of the project column. `SettleRenderer.kt:52`.
 const MIN_PROJECT_WIDTH: usize = 12;
@@ -122,7 +118,7 @@ pub fn clean_task_title(description: &str, chrono_project: &str) -> String {
     let without_suffix = description
         .strip_suffix(&project_suffix)
         .unwrap_or(description);
-    strip_trailing_date(without_suffix)
+    strip_date_suffix(without_suffix)
 }
 
 /// C12 at its primary site, `SettleCommand.kt:487-496`: the first description,
@@ -317,105 +313,8 @@ fn action_label(action: ActionType) -> String {
     title_case(name)
 }
 
-/// `Regex(", (Jan|…|Dec) \d{1,2} \d{4}$").replace(s, "")`, reproduced.
-///
-/// Three things a `regex`-crate translation gets wrong, all measured on JDK 21:
-///
-/// - Java's `$` without `MULTILINE` matches at end of input **and** just before a
-///   single final line terminator (`\n`, `\r\n`, `\r`, U+0085, U+2028, U+2029),
-///   and it does not consume it. `"Event, Sep 18 2026\n"` becomes `"Event\n"`, not
-///   `"Event"`. Two terminators in a row kill the match: `"…2026\n\n"` is left
-///   alone, because the date is no longer adjacent to the final terminator.
-/// - `\d` is ASCII-only by default: Arabic-Indic digits do not match.
-/// - `\d{1,2}` is greedy with backtracking, so the leftmost match wins — two
-///   digits are tried before one.
-///
-/// The crate is not a dependency of this project anyway, so this is a hand port
-/// rather than a choice between the two.
-fn strip_trailing_date(s: &str) -> String {
-    let (body, terminator) = split_final_line_terminator(s);
-    match date_suffix_start(body) {
-        Some(start) => {
-            let mut out = String::with_capacity(start + terminator.len());
-            out.push_str(&body[..start]);
-            out.push_str(terminator);
-            out
-        }
-        None => s.to_string(),
-    }
-}
 
-/// Split off a single trailing line terminator, the one Java's `$` is allowed to
-/// match in front of. `\r\n` counts as one.
-fn split_final_line_terminator(s: &str) -> (&str, &str) {
-    if let Some(body) = s.strip_suffix("\r\n") {
-        return (body, "\r\n");
-    }
-    for terminator in ["\n", "\r", "\u{85}", "\u{2028}", "\u{2029}"] {
-        if let Some(body) = s.strip_suffix(terminator) {
-            return (body, terminator);
-        }
-    }
-    (s, "")
-}
 
-/// Byte index at which a `, Mon D YYYY` suffix starts, or `None`.
-///
-/// Matched right to left, which is equivalent to Java's leftmost-match scan here
-/// because everything to the right of the day is fixed width: the only ambiguity
-/// is the day's one-or-two digits, and trying two first reproduces both the
-/// greedy quantifier and the leftmost start position.
-fn date_suffix_start(body: &str) -> Option<usize> {
-    let bytes = body.as_bytes();
-
-    // `\d{4}` at the very end.
-    let mut cursor = bytes.len().checked_sub(4)?;
-    if !bytes[cursor..].iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-
-    // ` ` before the year.
-    cursor = cursor.checked_sub(1)?;
-    if bytes[cursor] != b' ' {
-        return None;
-    }
-
-    for day_digits in [2usize, 1] {
-        let Some(day_start) = cursor.checked_sub(day_digits) else {
-            continue;
-        };
-        if !bytes[day_start..cursor].iter().all(u8::is_ascii_digit) {
-            continue;
-        }
-
-        // ` ` before the day.
-        let Some(space) = day_start.checked_sub(1) else {
-            continue;
-        };
-        if bytes[space] != b' ' {
-            continue;
-        }
-
-        // The three-letter month.
-        let Some(month_start) = space.checked_sub(3) else {
-            continue;
-        };
-        if !MONTH_ABBREVIATIONS.contains(&&bytes[month_start..space]) {
-            continue;
-        }
-
-        // `, ` before the month.
-        let Some(comma) = month_start.checked_sub(2) else {
-            continue;
-        };
-        if &bytes[comma..month_start] != b", " {
-            continue;
-        }
-
-        return Some(comma);
-    }
-    None
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1349,7 +1248,7 @@ mod tests {
         // at the end until the suffix has gone.
         assert_eq!(
             "AI Heads Sync, Sep 18 2026 - Practices - DevPro - Work",
-            strip_trailing_date("AI Heads Sync, Sep 18 2026 - Practices - DevPro - Work")
+            strip_date_suffix("AI Heads Sync, Sep 18 2026 - Practices - DevPro - Work")
         );
     }
 
@@ -1447,7 +1346,7 @@ mod tests {
             ("Event, Sep 18 2026\u{C}", "Event, Sep 18 2026\u{C}"),
         ];
         for (input, expected) in corpus {
-            assert_eq!(*expected, strip_trailing_date(input), "input {input:?}");
+            assert_eq!(*expected, strip_date_suffix(input), "input {input:?}");
         }
     }
 
@@ -1457,8 +1356,8 @@ mod tests {
     /// Measured on JDK 21: `"Event, Sep 18 2026\n"` → `"Event\n"`.
     #[test]
     fn a_trailing_newline_survives_the_date_strip_rather_than_being_eaten() {
-        assert_eq!("Event\n", strip_trailing_date("Event, Sep 18 2026\n"));
-        assert_ne!("Event", strip_trailing_date("Event, Sep 18 2026\n"));
+        assert_eq!("Event\n", strip_date_suffix("Event, Sep 18 2026\n"));
+        assert_ne!("Event", strip_date_suffix("Event, Sep 18 2026\n"));
         assert_eq!(
             "AI Heads Sync\n",
             task_title(
@@ -1474,7 +1373,7 @@ mod tests {
     fn two_trailing_newlines_defeat_the_date_strip() {
         assert_eq!(
             "Event, Sep 18 2026\n\n",
-            strip_trailing_date("Event, Sep 18 2026\n\n")
+            strip_date_suffix("Event, Sep 18 2026\n\n")
         );
     }
 
@@ -1494,7 +1393,7 @@ mod tests {
     fn jvm_case_1_a_bare_dated_description_loses_exactly_the_date() {
         assert_eq!(
             b"Event".as_slice(),
-            strip_trailing_date("Event, Apr 8 2026").as_bytes()
+            strip_date_suffix("Event, Apr 8 2026").as_bytes()
         );
     }
 
@@ -1504,7 +1403,7 @@ mod tests {
     fn jvm_case_2_a_trailing_lf_survives_as_its_own_byte() {
         assert_eq!(
             b"Event\n".as_slice(),
-            strip_trailing_date("Event, Apr 8 2026\n").as_bytes()
+            strip_date_suffix("Event, Apr 8 2026\n").as_bytes()
         );
     }
 
@@ -1515,7 +1414,7 @@ mod tests {
     fn jvm_case_3_a_trailing_crlf_survives_whole_not_split() {
         assert_eq!(
             b"Event\r\n".as_slice(),
-            strip_trailing_date("Event, Apr 8 2026\r\n").as_bytes()
+            strip_date_suffix("Event, Apr 8 2026\r\n").as_bytes()
         );
     }
 
@@ -1526,7 +1425,7 @@ mod tests {
     fn jvm_case_4_two_trailing_lfs_leave_the_date_in_place() {
         assert_eq!(
             b"Event, Apr 8 2026\n\n".as_slice(),
-            strip_trailing_date("Event, Apr 8 2026\n\n").as_bytes()
+            strip_date_suffix("Event, Apr 8 2026\n\n").as_bytes()
         );
     }
 
@@ -1577,7 +1476,7 @@ mod tests {
     fn non_ascii_digits_are_not_a_date() {
         assert_eq!(
             "Event, Sep \u{661}\u{668} 2026",
-            strip_trailing_date("Event, Sep \u{661}\u{668} 2026")
+            strip_date_suffix("Event, Sep \u{661}\u{668} 2026")
         );
     }
 
@@ -1585,11 +1484,11 @@ mod tests {
     /// to its left must still line up, which is what rejects a three-digit day.
     #[test]
     fn the_day_is_one_or_two_digits_and_three_is_rejected() {
-        assert_eq!("Event", strip_trailing_date("Event, Apr 8 2026"));
-        assert_eq!("Event", strip_trailing_date("Event, Apr 18 2026"));
+        assert_eq!("Event", strip_date_suffix("Event, Apr 8 2026"));
+        assert_eq!("Event", strip_date_suffix("Event, Apr 18 2026"));
         assert_eq!(
             "Event, Apr 123 2026",
-            strip_trailing_date("Event, Apr 123 2026")
+            strip_date_suffix("Event, Apr 123 2026")
         );
     }
 
@@ -1598,9 +1497,9 @@ mod tests {
     fn the_year_is_exactly_four_digits_at_the_very_end() {
         assert_eq!(
             "Event, Apr 8 20261",
-            strip_trailing_date("Event, Apr 8 20261")
+            strip_date_suffix("Event, Apr 8 20261")
         );
-        assert_eq!("Event, Apr 8 202", strip_trailing_date("Event, Apr 8 202"));
+        assert_eq!("Event, Apr 8 202", strip_date_suffix("Event, Apr 8 202"));
     }
 
     /// The month is one of exactly twelve three-letter names, case-sensitive.
@@ -1611,13 +1510,13 @@ mod tests {
         ] {
             assert_eq!(
                 "Event",
-                strip_trailing_date(&format!("Event, {month} 1 2026")),
+                strip_date_suffix(&format!("Event, {month} 1 2026")),
                 "{month}"
             );
         }
         for not_a_month in ["Jax", "sep", "SEP", "Sept"] {
             let input = format!("Event, {not_a_month} 1 2026");
-            assert_eq!(input, strip_trailing_date(&input), "{not_a_month}");
+            assert_eq!(input, strip_date_suffix(&input), "{not_a_month}");
         }
     }
 
@@ -1626,8 +1525,8 @@ mod tests {
     /// would panic on a careless slice.
     #[test]
     fn a_multibyte_title_before_the_date_is_sliced_safely() {
-        assert_eq!("Синк", strip_trailing_date("Синк, Sep 18 2026"));
-        assert_eq!("\u{1F600}", strip_trailing_date("\u{1F600}, Sep 18 2026"));
+        assert_eq!("Синк", strip_date_suffix("Синк, Sep 18 2026"));
+        assert_eq!("\u{1F600}", strip_date_suffix("\u{1F600}, Sep 18 2026"));
     }
 
     // -----------------------------------------------------------------------
