@@ -288,7 +288,7 @@ fn borrow_for_day(
         task_index += 1;
 
         // `:144-148` — C12's secondary site, textually identical to
-        // `SettleCommand.kt:489-491`. One function, called from both.
+        // `SettleCommand.kt:486,490,494-496`. One function, called from both.
         let clean_title = clean_task_title(task_description, &source_aggregate.chrono_project);
 
         // `:151-152` — the dedupe key is the *cleaned* title, and it is marked used

@@ -52,9 +52,9 @@ pub struct FallbackId {
 /// `Aggregator.kt:28-31`.
 ///
 /// `ids_by_name` is a plain `HashMap` and that is deliberate: Kotlin's
-/// `mutableMapOf` is a `LinkedHashMap`, but its only consumer
-/// (`SettleCommand.kt:483`, `projectIdMap[agg.devproProjectName]`) reads it by
-/// key and never iterates it, so no observable behaviour depends on the order.
+/// `mutableMapOf` is a `LinkedHashMap`, but its only consumers
+/// (`SettleCommand.kt:500,518,545`, `projectIdMap[…]`) read it by key and never
+/// iterate it, so no observable behaviour depends on the order.
 /// `fallbacks` is the half that *is* iterated — `SettleCommand.kt:476` prints one
 /// stderr warning per element — so it stays a `Vec` in encounter order.
 #[derive(Debug, Clone, PartialEq, Eq)]

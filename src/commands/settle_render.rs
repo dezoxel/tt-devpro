@@ -42,7 +42,7 @@ use crate::model::{ActionType, SettleAction};
 use crate::service::normalizer::strip_date_suffix;
 
 /// `"Development work"`, the C12 fallback when an aggregate carries no
-/// descriptions. `SettleCommand.kt:495`.
+/// descriptions. `SettleCommand.kt:498`.
 const NO_DESCRIPTION_TITLE: &str = "Development work";
 
 /// Minimum width of the project column. `SettleRenderer.kt:52`.
@@ -104,9 +104,9 @@ pub fn clean_chrono_entry(action: &SettleAction) -> String {
         .join("; ")
 }
 
-/// C12, the derivation itself. `SettleCommand.kt:489-491` and the textually
-/// identical `BorrowerService.kt:146-148`, collapsed into one function both sides
-/// call.
+/// C12, the derivation itself. `SettleCommand.kt:486,490,494-496` and the
+/// textually identical `BorrowerService.kt:144-148`, collapsed into one function
+/// both sides call.
 ///
 /// Strip a trailing `" - <chronoProject>"`, then strip a trailing `, Mon D YYYY`.
 /// Order matters: the borrower's own comment says "remove project suffix and date
@@ -119,7 +119,7 @@ pub fn clean_task_title(description: &str, chrono_project: &str) -> String {
     strip_date_suffix(without_suffix)
 }
 
-/// C12 at its primary site, `SettleCommand.kt:487-496`: the first description,
+/// C12 at its primary site, `SettleCommand.kt:493-499`: the first description,
 /// cleaned by [`clean_task_title`], or `"Development work"` when there are none.
 ///
 /// `BorrowerService` has no empty case — it always holds one description string —
@@ -262,9 +262,10 @@ pub(crate) fn title_case(name: &str) -> String {
 /// `date.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }` —
 /// `Monday`, `Tuesday`, … `java.time.DayOfWeek` names are the source strings.
 ///
-/// `SettleCommand.kt:341` prints this one in the day-by-day header and `:333`
-/// prints [`weekday_abbreviation`] three lines above it, off the same expression
-/// with a `.take(3)` on the end. One table, therefore, and not two that can drift.
+/// `SettleCommand.kt:360-362` prints this one in the day-by-day header and
+/// `:351-353` prints [`weekday_abbreviation`] nine lines above it, off the same
+/// expression with a `.take(3)` on the end. One table, therefore, and not two
+/// that can drift.
 pub(crate) fn weekday_name(date: NaiveDate) -> String {
     let name = match date.weekday() {
         Weekday::Mon => "MONDAY",
@@ -1186,14 +1187,14 @@ mod tests {
     // C12 — the task-title derivation
     // -----------------------------------------------------------------------
 
-    /// C12's first required case, `SettleCommand.kt:494-495`: no descriptions →
+    /// C12's first required case, `SettleCommand.kt:497-498`: no descriptions →
     /// `"Development work"`.
     #[test]
     fn empty_descriptions_yield_the_development_work_title() {
         assert_eq!("Development work", task_title(&[], "Any Project"));
     }
 
-    /// C12's second required case, `SettleCommand.kt:490`: a description ending in
+    /// C12's second required case, `SettleCommand.kt:490,495`: a description ending in
     /// `" - {chronoProject}"` loses the suffix.
     #[test]
     fn a_description_ending_in_the_project_suffix_loses_it() {
@@ -1206,7 +1207,7 @@ mod tests {
         );
     }
 
-    /// C12's third required case, `SettleCommand.kt:491`: the old description form
+    /// C12's third required case, `SettleCommand.kt:486,496`: the old description form
     /// `"Event, Sep 18 2026"` loses its date.
     #[test]
     fn a_description_in_the_old_dated_form_loses_its_date() {
@@ -1236,7 +1237,7 @@ mod tests {
     }
 
     /// Only the *first* description is used; the rest are dropped.
-    /// `SettleCommand.kt:489`.
+    /// `SettleCommand.kt:494`.
     #[test]
     fn only_the_first_description_becomes_the_title() {
         assert_eq!(

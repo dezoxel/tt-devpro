@@ -25,9 +25,9 @@
 //! **Three JVM behaviours this file reproduces rather than approximates.**
 //!
 //! 1. **`Double.toInt()` truncates where `TimeNormalizer` rounds.** C27 says both
-//!    are contracts and names all five sites; four of them are here
-//!    (`SettleCommand.kt:604,618,771,844,850` — the fifth is `:850`'s sibling in
-//!    the same expression). [`java_to_int`] is the truncating one, and
+//!    are contracts and names all five sites, and all five of them are here
+//!    (`SettleCommand.kt:604,618,771,844,850`). [`java_to_int`] is the truncating
+//!    one, and
 //!    [`crate::service::normalizer::round_to_quarter`] is the rounding one; a port
 //!    that unifies them passes everything except the tests written to separate
 //!    them.
@@ -90,7 +90,7 @@ const FULL_DAY_HOURS: f64 = 8.0;
 // Argument surface
 // ---------------------------------------------------------------------------
 
-/// `SettleCommand.kt:55-69`.
+/// `SettleCommand.kt:55-68`.
 ///
 /// `--from` and `--to` are `.convert { LocalDate.parse(it) }` with no default, so
 /// an unparseable value is a usage failure — the same ordering `api get-projects`
@@ -353,7 +353,7 @@ fn truncate_to_quarter_at_least_quarter(x: f64) -> f64 {
 ///
 /// The same arithmetic as [`truncate_to_quarter_at_least_quarter`] with the floor
 /// applied through Kotlin's `maxOf`, which *is* `Math.max`. Two spellings of one
-/// idea, four lines apart in the incumbent; collapsing them into one is the tidy-up
+/// idea, six lines apart in the incumbent; collapsing them into one is the tidy-up
 /// C27 exists to prevent, so both are here.
 fn truncate_to_quarter_max_quarter(x: f64) -> f64 {
     java_max(
@@ -366,7 +366,7 @@ fn truncate_to_quarter_max_quarter(x: f64) -> f64 {
 // C22 — the explicit range
 // ---------------------------------------------------------------------------
 
-/// `SettleCommand.kt:128-149`'s `ResolvedRange`.
+/// `SettleCommand.kt:115`'s `ResolvedRange`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedRange {
     pub from: NaiveDate,
@@ -383,7 +383,7 @@ pub struct ResolvedRange {
 /// contradict itself.
 ///
 /// The note is returned rather than printed so the two call sites
-/// (`SettleCommand.kt:98`, `:287`) can stay the only place a stream is chosen.
+/// (`SettleCommand.kt:99`, `:286`) can stay the only place a stream is chosen.
 pub fn resolve_range(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
@@ -694,7 +694,7 @@ pub fn renormalize_after_edit(actions: &[SettleAction]) -> Vec<SettleAction> {
 /// rather than one map for the whole range.
 pub type IdsByDay = HashMap<NaiveDate, HashMap<String, String>>;
 
-/// `SettleCommand.kt:483-575` — everything after the last network call.
+/// `SettleCommand.kt:483-575` — everything after the project ids are resolved.
 ///
 /// Three lists of proposals in one order that the caller then sorts: the real
 /// aggregates, then the fillers, then the borrowed entries. Fillers and borrowed
@@ -833,7 +833,7 @@ pub fn build_actions(
 // The interactive display
 // ---------------------------------------------------------------------------
 
-/// `showDraftTable` (`SettleCommand.kt:635-715`), returned as one block instead of
+/// `showDraftTable` (`SettleCommand.kt:635-711`), returned as one block instead of
 /// echoed line by line.
 ///
 /// Every width here is a `String.length`, i.e. UTF-16 code units, and so is the
@@ -925,7 +925,7 @@ fn max_width(
         .max(floor)
 }
 
-/// `if (s.length > w) s.take(w - 1) + "…" else s` — `SettleCommand.kt:680-684`.
+/// `if (s.length > w) s.take(w - 1) + "…" else s` — `SettleCommand.kt:680-682`.
 ///
 /// `take` counts UTF-16 code units and a surrogate pair is two of them, so cutting
 /// at `w - 1` can land between the halves of an astral character. Kotlin's `take`
@@ -1327,7 +1327,7 @@ pub fn update_request(action: &SettleAction) -> Result<UpdateWorklogRequest> {
     })
 }
 
-/// `applyAll` (`SettleCommand.kt:858-910`). **The only function here that writes to
+/// `applyAll` (`SettleCommand.kt:858-909`). **The only function here that writes to
 /// the portal**, and the one this run never executes (D4).
 ///
 /// Validation first, over the whole batch; then one call per action, each in its own
@@ -1415,7 +1415,7 @@ async fn apply_all(
 // The scan window
 // ---------------------------------------------------------------------------
 
-/// `SettleCommand.kt:195` — `today.minusDays(45)`. Named here because the number
+/// `SettleCommand.kt:197` — `today.minusDays(45)`. Named here because the number
 /// is the whole of the scan's lower bound and the project's own CLAUDE.md quotes
 /// it ("Scans the last 45 days").
 const SCAN_DAYS: u64 = 45;
@@ -1456,7 +1456,7 @@ fn next_month(first_of_month: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(year, month, 1).expect("the first of the next month is a date")
 }
 
-/// `LocalDate.parse(it.date.substring(0, 10))` — `SettleCommand.kt:222,446`.
+/// `LocalDate.parse(it.date.substring(0, 10))` — `SettleCommand.kt:223,445`.
 ///
 /// The portal's `date` is an ISO timestamp and only its date half is read. Kotlin's
 /// `substring` counts UTF-16 units and throws when the string is shorter; this
@@ -1509,7 +1509,7 @@ pub fn unfilled_days(
 ///
 /// C2: an entry is re-dated to the local day of its `start_time`, which is the
 /// only thing that makes the `cutoff + 1 day` fetch padding safe. `distinct()`
-/// then `sorted()` in Kotlin (`SettleCommand.kt:236-241`); the sort is total over
+/// then `sorted()` in Kotlin (`SettleCommand.kt:238-243`); the sort is total over
 /// dates, so the first-encounter order `distinct` preserves is not observable and
 /// a `Vec` with a membership test reproduces it either way.
 fn chrono_days(entries: &[crate::model::ChronoTimeEntry]) -> Result<Vec<NaiveDate>> {
@@ -1558,7 +1558,7 @@ struct Settle<'a> {
     today: NaiveDate,
 }
 
-/// `collectActions`' return (`SettleCommand.kt:265-268`).
+/// `collectActions`' return (`SettleCommand.kt:268-271`).
 struct CollectedActions {
     actions: Vec<SettleAction>,
     not_final: Vec<NaiveDate>,
@@ -1695,7 +1695,7 @@ impl Settle<'_> {
         })
     }
 
-    /// `prepareActions` (`SettleCommand.kt:411-577`) — the network half; the
+    /// `prepareActions` (`SettleCommand.kt:411-575`) — the network half; the
     /// arithmetic is [`build_actions`].
     ///
     /// D2's first and third facets live here. Project ids are resolved **per day**
@@ -1779,7 +1779,7 @@ impl Settle<'_> {
     /// D2's first facet: `getAssignedProjects` once per day that has proposals,
     /// resolving only the names that day actually needs.
     ///
-    /// `SettleCommand.kt:463-478` asks the portal for the assignments held on
+    /// `SettleCommand.kt:465-474` asks the portal for the assignments held on
     /// `from` and resolves the **union** of every name in the range against that one
     /// list. Measured: `--from 2026-08-01 --to 2026-08-15 --json` exits having
     /// printed nothing but `✗ Error: DevPro project 'Inveniam SOW #5' not found.`,
@@ -1904,7 +1904,7 @@ impl Settle<'_> {
         Ok(())
     }
 
-    /// `runBatchMode` (`SettleCommand.kt:151-182`). One question, three answers,
+    /// `runBatchMode` (`SettleCommand.kt:151-181`). One question, three answers,
     /// no loop — a separate surface from the day-by-day prompt and not a special
     /// case of it.
     async fn run_batch_mode(
@@ -2080,7 +2080,7 @@ pub fn json_body(actions: &[SettleAction]) -> Result<String> {
 // The entry point
 // ---------------------------------------------------------------------------
 
-/// `SettleCommand.run`'s two catch clauses (`SettleCommand.kt:104-109`).
+/// `SettleCommand.run`'s two catch clauses (`SettleCommand.kt:105-108`).
 ///
 /// `ApiException` gets its own prefix; everything else is `✗ Error: `. Both go to
 /// stderr in every mode.
@@ -2149,7 +2149,7 @@ fn explicit_range(args: &SettleArgs) -> bool {
 }
 
 /// The body of `SettleCommand.run` after the config has loaded
-/// (`SettleCommand.kt:88-102`), as one fallible unit so that the two catch clauses
+/// (`SettleCommand.kt:87-104`), as one fallible unit so that the two catch clauses
 /// have a single `Err` to look at.
 ///
 /// `session_cookie()` is inside it, which the incumbent's `getSessionCookie()` at
@@ -5642,7 +5642,7 @@ mod tests {
         assert_eq!(actions[0].aggregate.date, d("2026-09-18"));
     }
 
-    /// C2's padding on the explicit-range path. `SettleCommand.kt:424` fetches to
+    /// C2's padding on the explicit-range path. `SettleCommand.kt:421` fetches to
     /// `to.plusDays(1)` and the low end is not padded, because the two bounds do
     /// different jobs: the fetch runs on the UTC axis and every entry is then
     /// re-dated to its local day, so a late local evening filed under the next UTC

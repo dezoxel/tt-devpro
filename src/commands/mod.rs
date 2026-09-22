@@ -240,7 +240,7 @@ pub fn usage_error(usage: &str, messages: &[String]) -> String {
 // Kotlin's two ways of reading a number out of a string
 // ---------------------------------------------------------------------------
 //
-// `ApiCommand.kt:120` uses `String.toDouble()` and `SettleCommand.kt:766` uses
+// `ApiCommand.kt:120` uses `String.toDouble()` and `SettleCommand.kt:765` uses
 // `String.toDoubleOrNull()`. They are the same parser: `toDoubleOrNull` screens
 // the input against `ScreenFloatValueRegEx` and then calls `parseDouble` anyway,
 // and the screen was measured to accept exactly what `parseDouble` accepts.
@@ -311,7 +311,7 @@ fn parse_trimmed_double(trimmed: &str) -> Option<f64> {
     signed.parse::<f64>().ok()
 }
 
-/// Kotlin's `String.toDoubleOrNull()` — `SettleCommand.kt:766`, the `New hours:`
+/// Kotlin's `String.toDoubleOrNull()` — `SettleCommand.kt:765`, the `New hours:`
 /// prompt. Same accepted set as [`java_parse_double`], with `None` where that one
 /// returns its message, because the caller has its own: `Invalid. Must be >= 0.25`.
 pub fn kotlin_double_or_null(raw: &str) -> Option<f64> {
