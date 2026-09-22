@@ -1,3 +1,5 @@
+#![deny(warnings)]
+#![deny(clippy::all)]
 //! `tt-devpro` — settle Dev.Pro time reports from Chrono.
 //!
 //! Ports `Main.kt`, which is nine lines of `TtCli().subcommands(…).main(args)`
