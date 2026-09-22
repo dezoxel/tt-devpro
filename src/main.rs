@@ -417,6 +417,10 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
 
         if !options_ended && token.starts_with('-') && token.len() > 1 {
             let letters: Vec<char> = token[1..].chars().collect();
+            // What this cluster found before it failed, so that an unknown letter
+            // can take it back down with it — see the `None` arm.
+            let help_before_cluster = help_fired;
+            let satisfied_before_cluster = satisfied.len();
             let mut position = 0;
             while position < letters.len() {
                 let letter = letters[position];
@@ -426,6 +430,22 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
                         // `api get-projects -zd 2026-01-01` reports `-z` and stops:
                         // one message, not one per remaining letter.
                         messages.push(no_such_option(&typed, &suggest(&typed, &names)));
+                        // **An unknown letter cancels the whole cluster**, including
+                        // a help letter already found in it. `-hz` and `-h=x` both
+                        // answer `no such option` and exit 1 rather than printing
+                        // help, although `-h` came first — measured, all six rows of
+                        // `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`
+                        // plus the `-hz` probe beside them.
+                        //
+                        // The cancellation is cluster-local and it is specifically
+                        // the *unknown letter* that causes it. Separate tokens are
+                        // untouched (`-h -zz` prints help), other failures in the
+                        // same cluster are untouched (`api get-projects -hd` prints
+                        // help although `-d` has no value), and finalization is
+                        // untouched (`api create-worklog -z` still lists its five
+                        // missing options).
+                        help_fired = help_before_cluster;
+                        satisfied.truncate(satisfied_before_cluster);
                         break;
                     }
                     Some(option) if !option.takes_value => {
@@ -437,6 +457,16 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
                     Some(option) => {
                         // `api get-projects -dh` → `-d` takes the letter `h`, not a
                         // second flag: the rest of the cluster is the value.
+                        //
+                        // **The precondition is that the short takes a value.** Only
+                        // this arm swallows the rest of the cluster; under a flag the
+                        // scan keeps walking letter by letter, which is why `-h=x` is
+                        // read as the two letters `h` and `=` and answers
+                        // `no such option -=` rather than treating `=x` as a value.
+                        // Measured — `-h=x`, `-h=` and `api get-projects -dh=x`, the
+                        // last of which *does* swallow `h=x` because `-d` takes a
+                        // value. See
+                        // `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`.
                         let rest: String = letters[position + 1..].iter().collect();
                         let value = if rest.is_empty() {
                             index += 1;
@@ -826,6 +856,130 @@ mod tests {
             assert_eq!(rendered.code, 0, "{tokens:?}");
             assert_eq!(rendered.stderr, None, "{tokens:?}");
         }
+    }
+
+    /// `--help` is a flag, so an attached value is refused exactly as
+    /// `settle --json=yes` is, and help does **not** print. The four rows are all
+    /// four depths, because the thing they pin beyond the message is that the usage
+    /// line is the *deepest command reached* rather than the root's — a renderer
+    /// that reached for `ROOT_HELP` here passes on row one and fails on rows two to
+    /// four.
+    ///
+    /// Measured, all four:
+    /// `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`.
+    #[test]
+    fn an_attached_value_turns_help_into_an_ordinary_flag_error_at_every_depth() {
+        for (tokens, usage) in [
+            (
+                vec!["--help=x"],
+                "Usage: tt-devpro [<options>] <command> [<args>]...",
+            ),
+            (
+                vec!["settle", "--help=x"],
+                "Usage: tt-devpro settle [<options>]",
+            ),
+            (
+                vec!["api", "--help=x"],
+                "Usage: tt-devpro api [<options>] <command> [<args>]...",
+            ),
+            (
+                vec!["api", "get-projects", "--help=x"],
+                "Usage: tt-devpro api get-projects [<options>]",
+            ),
+        ] {
+            assert_eq!(
+                stderr_of(&tokens),
+                format!("{usage}\n\nError: option --help does not take a value\n"),
+                "{tokens:?}"
+            );
+        }
+    }
+
+    /// The neighbour that separates "attached" from "followed by": `--help x` is an
+    /// eager help plus an ordinary extra argument, and help still wins — exit 0,
+    /// help on stdout, nothing on stderr. An implementation that refused any value
+    /// near `--help` would answer the flag error here.
+    ///
+    /// Measured: `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`.
+    #[test]
+    fn a_separate_token_after_help_is_an_extra_argument_and_help_still_wins() {
+        let rendered = outcome(&["--help", "x"]);
+        assert_eq!(
+            rendered.stdout.as_deref(),
+            Some(format!("{ROOT_HELP}\n").as_str())
+        );
+        assert_eq!(rendered.stderr, None);
+        assert_eq!(rendered.code, 0);
+        assert_eq!(
+            stderr_of(&["x"]),
+            "Usage: tt-devpro [<options>] <command> [<args>]...\n\nError: no such subcommand x\n",
+            "the same token without the --help is the subcommand miss help suppressed"
+        );
+    }
+
+    /// The case that caught a real bug, and the reason `=` is not special.
+    ///
+    /// `-h` is a **flag**, so unlike a value-taking short it does not swallow the
+    /// rest of the cluster: the scan walks on to `=`, which no option claims, and
+    /// the answer is `no such option -=`. And an unknown letter **cancels the whole
+    /// cluster** — the help letter that came before it is taken back down with it,
+    /// so `-h=x` and `-hz` exit 1 rather than printing help.
+    ///
+    /// Three neighbours hold the cancellation to exactly that: it is cluster-local
+    /// (`-h -zz` prints help), it is specifically the unknown letter (`-hd` prints
+    /// help although `-d` is left without a value), and it does not reach
+    /// finalization (`api create-worklog -z` still lists its five missing options,
+    /// asserted in [`a_token_pass_error_cancels_the_argument_pass_but_not_the_missing_options`]).
+    ///
+    /// Measured: `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`
+    /// for `-h=x`, and the probes beside it for the rest.
+    #[test]
+    fn an_unknown_letter_cancels_its_whole_cluster_including_a_help_letter_before_it() {
+        assert_eq!(
+            stderr_of(&["-h=x"]),
+            "Usage: tt-devpro [<options>] <command> [<args>]...\n\nError: no such option -=\n",
+            "-h is a flag, so `=` is the next letter rather than the start of a value"
+        );
+        assert_eq!(
+            stderr_of(&["settle", "-h=x"]),
+            "Usage: tt-devpro settle [<options>]\n\nError: no such option -=\n"
+        );
+        assert_eq!(
+            stderr_of(&["-h="]),
+            "Usage: tt-devpro [<options>] <command> [<args>]...\n\nError: no such option -=\n"
+        );
+        assert_eq!(
+            stderr_of(&["-hz"]),
+            "Usage: tt-devpro [<options>] <command> [<args>]...\n\nError: no such option -z\n",
+            "nothing to do with `=`: any unknown letter cancels the help before it"
+        );
+
+        for tokens in [
+            vec!["-h", "-zz"],
+            vec!["-hh"],
+            vec!["settle", "--nosuchflag", "-h"],
+        ] {
+            let rendered = outcome(&tokens);
+            assert_eq!(
+                rendered.code, 0,
+                "{tokens:?}: a different token keeps its help"
+            );
+            assert_eq!(rendered.stderr, None, "{tokens:?}");
+        }
+
+        let rendered = outcome(&["api", "get-projects", "-hd"]);
+        assert_eq!(
+            rendered.stdout.as_deref(),
+            Some(format!("{GET_PROJECTS_HELP}\n").as_str()),
+            "`-d` is left without a value, and help still wins — only an unknown letter cancels"
+        );
+        assert_eq!(rendered.code, 0);
+
+        assert_eq!(
+            stderr_of(&["api", "get-projects", "-dh=x"]),
+            "Usage: tt-devpro api get-projects [<options>]\n\nError: invalid value for -d: h=x is not a date in YYYY-MM-DD form\n",
+            "and a short that does take a value swallows `h=x` whole, precondition included"
+        );
     }
 
     /// Measured: `api nosuchsub --help` prints `api`'s help and exits 0. The
