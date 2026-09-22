@@ -4,6 +4,7 @@
 //! in as their modules land.
 
 mod config;
+mod fmt;
 mod model;
 
 use clap::Parser;
