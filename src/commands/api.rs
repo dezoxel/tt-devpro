@@ -302,8 +302,8 @@ pub struct DeleteWorklogArgs {
 /// `ApiCommand.kt:65,98,144,192,216` — five catch clauses, all
 /// `catch (e: Exception) { echo("✗ Error: ${e.message}", err = true) }`.
 ///
-/// **This is deliberately not [`crate::commands::settle::report_failure`]'s two-armed
-/// shape.** `SettleCommand.kt:104-109` catches `ApiException` separately and prefixes
+/// **This is deliberately not `settle::report_failure`'s two-armed
+/// shape.** `SettleCommand.kt:105-108` catches `ApiException` separately and prefixes
 /// it `✗ API Error: `; the `api` subcommands have one catch clause apiece and print
 /// `✗ Error: ` for every exception, an `ApiException` included. So an expired cookie
 /// under `api get-projects` reads `✗ Error: Authentication failed. Session cookie
@@ -314,7 +314,7 @@ pub struct DeleteWorklogArgs {
 /// The `{error:#}` is anyhow's whole chain, where the incumbent's `e.message` is one
 /// message. They agree on everything this file can raise directly — an
 /// [`ApiError`](crate::api::portal::ApiError) arrives with no context on top of it, and
-/// [`tests::an_api_error_prints_its_own_message_under_the_plain_error_prefix`] pins
+/// `tests::an_api_error_prints_its_own_message_under_the_plain_error_prefix` pins
 /// that. They differ on a transport failure, where the outermost message alone would
 /// be `requesting https://…/contact/currentUser` with the refusal that caused it
 /// dropped — the same trade `settle.rs` documents and makes the same way.
@@ -1858,7 +1858,7 @@ mod tests {
     }
 
     /// `ApiCommand.kt:64-66` has **one** catch clause and it prints `✗ Error: `.
-    /// `SettleCommand.kt:104-106` has a second one that prints `✗ API Error: ` for
+    /// `SettleCommand.kt:105-106` has a second one that prints `✗ API Error: ` for
     /// exactly this error type. Reusing settle's two-armed renderer here would change
     /// the text of every `api` failure, and nothing but this test would notice.
     #[tokio::test]
@@ -2249,6 +2249,46 @@ mod tests {
 
         assert_eq!(outcome, Outcome::Failed);
         assert_eq!(io.err_text(), "\u{2717} Update failed");
+        assert!(
+            !io.out_text().contains("Updated successfully"),
+            "got:\n{}",
+            io.out_text()
+        );
+        let _ = portal.requests();
+    }
+
+    /// `ApiCommand.kt:176-182` echoes the header **before** the `try` at `:184`, so the
+    /// seven lines stand on stdout when the portal then refuses the write.
+    ///
+    /// This is the create path's `the_create_header_is_on_stdout_even_when_the_write_is_refused`
+    /// said again for update, and the symmetry is the point rather than the thoroughness:
+    /// the three write bodies are near-identical in the source, a reviewer found that
+    /// moving *this* `io.out` below the `await` passed the whole suite, and a mutation
+    /// round that only mutates the create path measures one branch of three.
+    #[tokio::test]
+    async fn the_update_header_is_on_stdout_even_when_the_write_is_refused() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            500,
+            "Internal Server Error",
+            "text/plain",
+            "boom",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            update_worklog_with(&stub_client(&portal.base_url), &update_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert!(
+            io.out_text().starts_with(
+                "Updating worklog: b8bbd5da-c47e-4166-9700-a788a8e6b8c7\n  Date: 2026-09-18"
+            ),
+            "got:\n{}",
+            io.out_text()
+        );
+        assert_eq!(io.err_text(), "\u{2717} Error: Server error (500): boom");
         let _ = portal.requests();
     }
 
@@ -2437,5 +2477,199 @@ mod tests {
             "the write gate has no 404 arm, so this is not `Resource not found.`"
         );
         let _ = portal.requests();
+    }
+
+    // -----------------------------------------------------------------------
+    // The five public entry points, on the half that needs no portal
+    // -----------------------------------------------------------------------
+    //
+    // Everything above drives a `*_with` against a stub, which leaves the public
+    // `run_*` wrappers — `connect()`, and the `Err` arm that carries D3 for a
+    // missing `~/.tt-cookie` — uncovered. That failure is network-free and is
+    // covered here.
+    //
+    // **The success half is deliberately not attempted.** A `run_*` builds its
+    // client against `portal::BASE_URL`, which is production, and a request with
+    // bad credentials is still a request to it. Nothing may point that constant
+    // elsewhere, so the wrappers' success path belongs to the step-6 differential
+    // run against the live portal and to nothing before it.
+
+    /// Serialises the tests that mutate process environment.
+    ///
+    /// `Cargo.toml` is frozen, so there is no `serial_test`; a `static` mutex is the
+    /// whole mechanism. Rust runs tests on parallel threads and the environment is
+    /// per-process, so an unguarded `set_var("HOME", …)` is visible to every other
+    /// test for as long as it stands. Audited today: `HOME` is read only by
+    /// `cookie::cookie_path`, `config::config_path` and `normalizer`'s default root,
+    /// and no test in this crate reaches any of the three — every one of them takes
+    /// its path or its client as a parameter. So the window this opens is empty
+    /// *today*, and the lock is what keeps that true when it stops being.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// An environment with no reachable session cookie, restored on drop.
+    ///
+    /// `HOME` points at an empty temporary directory, so `~/.tt-cookie` does not
+    /// exist, and `TT_COOKIE` is removed. C30 records that `dirs::home_dir()` reads
+    /// `$HOME` on Unix where the JVM's `user.home` does not — which is the divergence
+    /// that makes this test possible at all, and the reason it is worth keeping.
+    ///
+    /// Restoration happens in `Drop`, not at the end of the test body, so a panicking
+    /// assertion cannot leave the rest of the process with a fabricated `HOME`. The
+    /// lock is released after it, because fields drop after `Drop::drop` returns.
+    struct ScopedEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        home: Option<std::ffi::OsString>,
+        cookie: Option<std::ffi::OsString>,
+        _home_dir: tempfile::TempDir,
+    }
+
+    impl ScopedEnv {
+        fn without_a_cookie() -> Self {
+            // A test that panicked while holding the lock poisoned it; the data is
+            // `()`, so there is nothing to be suspicious of and the next test still
+            // needs the serialisation.
+            let lock = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let home = std::env::var_os("HOME");
+            let cookie = std::env::var_os(crate::cookie::COOKIE_ENV);
+            let home_dir = tempfile::tempdir().expect("a temporary home directory");
+
+            // SAFETY: edition 2024 makes these unsafe because they are not thread-safe
+            // against a concurrent reader. `ENV_LOCK` is held for the whole lifetime of
+            // this guard, and the audit in its doc comment is what establishes that no
+            // other test reads either variable.
+            unsafe {
+                std::env::set_var("HOME", home_dir.path());
+                std::env::remove_var(crate::cookie::COOKIE_ENV);
+            }
+
+            Self {
+                _lock: lock,
+                home,
+                cookie,
+                _home_dir: home_dir,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: as above — still under `ENV_LOCK`, which outlives this call.
+            unsafe {
+                match &self.home {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+                match &self.cookie {
+                    Some(value) => std::env::set_var(crate::cookie::COOKIE_ENV, value),
+                    None => std::env::remove_var(crate::cookie::COOKIE_ENV),
+                }
+            }
+        }
+    }
+
+    /// `cookie::resolve`'s message, under this file's prefix.
+    const MISSING_COOKIE: &str = "\u{2717} Error: No Dev.Pro session cookie found. Run 'make auth' on your host machine to create one.";
+
+    fn assert_cookie_failure(outcome: Outcome, io: &FakeConsole, which: &str) {
+        assert_eq!(
+            outcome,
+            Outcome::Failed,
+            "`api {which}` must fail without a cookie, and under D3 that is a non-zero exit"
+        );
+        assert_eq!(io.err_text(), MISSING_COOKIE, "`api {which}`");
+        assert!(
+            io.out.is_empty(),
+            "`api {which}` printed {:?} before failing — so it entered its body, which \
+             means it built a client and reached the network",
+            io.out
+        );
+    }
+
+    /// D3's headline case, through all five public wrappers.
+    ///
+    /// `getSessionCookie()` is called on the line after `runBlocking {` in every one of
+    /// them (`ApiCommand.kt:57,77,116,163,204`) and each opens its `try` one or two
+    /// lines later, so on the incumbent a missing `~/.tt-cookie` throws past Clikt's
+    /// single catch and prints a stack trace. Here it is an ordinary stderr line and a
+    /// non-zero code.
+    ///
+    /// **`io.out.is_empty()` is the "no request was issued" assertion.** Nothing here
+    /// can watch the wire — a `run_*` builds its client against production and no test
+    /// may let it — but `create_worklog_with`, `update_worklog_with` and
+    /// `delete_worklog_with` all print their header *before* the call, so an empty
+    /// stdout on those three is proof the body was never entered and therefore that
+    /// nothing was sent. The premise assertion in front of it is the real safety
+    /// interlock: if the `HOME` override ever stopped working, this test fails there
+    /// rather than firing five requests at the live portal.
+    #[tokio::test]
+    async fn every_public_entry_point_reports_a_missing_cookie_and_fails() {
+        let _env = ScopedEnv::without_a_cookie();
+        assert!(
+            crate::cookie::session_cookie().is_err(),
+            "the premise: with HOME moved and TT_COOKIE unset there is no cookie to find. \
+             If this fails, the overrides did not take and no run_* may be called."
+        );
+
+        let mut io = FakeConsole::default();
+        let outcome = run_get_projects(&get_projects_args(Some("2026-01-15")), &mut io).await;
+        assert_cookie_failure(outcome, &io, "get-projects");
+
+        let mut io = FakeConsole::default();
+        let outcome = run_get_worklogs(
+            &GetWorklogsArgs {
+                date: "2026-09-18".to_string(),
+            },
+            &mut io,
+        )
+        .await;
+        assert_cookie_failure(outcome, &io, "get-worklogs");
+
+        let mut io = FakeConsole::default();
+        let outcome = run_create_worklog(&create_args(), &mut io).await;
+        assert_cookie_failure(outcome, &io, "create-worklog");
+
+        let mut io = FakeConsole::default();
+        let outcome = run_update_worklog(&update_args(), &mut io).await;
+        assert_cookie_failure(outcome, &io, "update-worklog");
+
+        let mut io = FakeConsole::default();
+        let outcome = run_delete_worklog(
+            &DeleteWorklogArgs {
+                id: "wl-1".to_string(),
+            },
+            &mut io,
+        )
+        .await;
+        assert_cookie_failure(outcome, &io, "delete-worklog");
+    }
+
+    /// The cookie is read **before** the request body is built, so a run that is both
+    /// cookie-less and carrying an unparseable `--hours` reports the cookie.
+    ///
+    /// `ApiCommand.kt:116` precedes `:118-126`, and the two failures are one line apart
+    /// in the port — `connect()` in the wrapper, `create_request` in the body. A port
+    /// that hoisted the parse into the wrapper "to fail fast on bad arguments" would
+    /// report `For input string: "eight"` to an operator whose actual problem is an
+    /// expired session, and every other test here would still pass.
+    #[tokio::test]
+    async fn a_missing_cookie_is_reported_before_unparseable_hours_are() {
+        let _env = ScopedEnv::without_a_cookie();
+        assert!(crate::cookie::session_cookie().is_err(), "the premise");
+
+        let mut args = create_args();
+        args.hours = "eight".to_string();
+        let mut io = FakeConsole::default();
+
+        let outcome = run_create_worklog(&args, &mut io).await;
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(io.err_text(), MISSING_COOKIE);
+        assert!(
+            !io.err_text().contains("For input string"),
+            "the cookie is checked first: {}",
+            io.err_text()
+        );
     }
 }
