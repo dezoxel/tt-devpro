@@ -33,6 +33,34 @@ pub mod settle_window;
 
 use crate::service::normalizer::java_min;
 
+/// What a command body did, which under D3 is also what the process exits with.
+///
+/// The incumbent catches every error, prints its message to stderr and **exits 0**
+/// (C24). D3 keeps the message and changes the code, so a command that failed has
+/// to say so to `main` without printing a second time — every one of those messages
+/// is a measured byte sequence produced where the incumbent produces it, and an
+/// `anyhow::Error` travelling up to `main` would be rendered again in a shape
+/// nothing measured.
+///
+/// [`Failed`](Outcome::Failed) therefore means "the message is already on stderr".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Ok,
+    Failed,
+}
+
+impl Outcome {
+    /// The process exit code. `1` rather than `2`, which is C33's territory: clap
+    /// exits 2 on a usage failure and the incumbent exits 1, so `main` renders that
+    /// case itself and never reaches here.
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Outcome::Ok => 0,
+            Outcome::Failed => 1,
+        }
+    }
+}
+
 /// `java.time.LocalDate.parse`, which is `ISO_LOCAL_DATE` and is strict about every
 /// character. Measured on GraalVM JDK 21.0.11 (`~/.cache/tt-devpro-rewrite/measurements/jdk/parse-date.tsv`):
 /// `2026-1-15`, `2026-01-5`, `26-01-15`, `2026-01-15T00:00:00`, `" 2026-01-15"` and

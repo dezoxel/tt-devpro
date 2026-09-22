@@ -259,9 +259,13 @@ pub(crate) fn title_case(name: &str) -> String {
     }
 }
 
-/// `date.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }.take(3)`,
-/// `SettleRenderer.kt:56`. `java.time.DayOfWeek` names are the source strings.
-pub(crate) fn weekday_abbreviation(date: NaiveDate) -> String {
+/// `date.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }` —
+/// `Monday`, `Tuesday`, … `java.time.DayOfWeek` names are the source strings.
+///
+/// `SettleCommand.kt:341` prints this one in the day-by-day header and `:333`
+/// prints [`weekday_abbreviation`] three lines above it, off the same expression
+/// with a `.take(3)` on the end. One table, therefore, and not two that can drift.
+pub(crate) fn weekday_name(date: NaiveDate) -> String {
     let name = match date.weekday() {
         Weekday::Mon => "MONDAY",
         Weekday::Tue => "TUESDAY",
@@ -271,7 +275,15 @@ pub(crate) fn weekday_abbreviation(date: NaiveDate) -> String {
         Weekday::Sat => "SATURDAY",
         Weekday::Sun => "SUNDAY",
     };
-    title_case(name).chars().take(3).collect()
+    title_case(name)
+}
+
+/// [`weekday_name`] with Kotlin's `.take(3)` — `SettleRenderer.kt:56`.
+///
+/// `take(3)` counts UTF-16 units and these seven names are ASCII, so `chars()` is
+/// the same three units.
+pub(crate) fn weekday_abbreviation(date: NaiveDate) -> String {
+    weekday_name(date).chars().take(3).collect()
 }
 
 /// `a.action.name.lowercase().replaceFirstChar { it.uppercase() }`,

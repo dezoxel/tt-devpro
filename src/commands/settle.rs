@@ -50,21 +50,22 @@
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 
-use anyhow::{Result, anyhow, bail};
-use chrono::{Datelike, Local, NaiveDate};
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{Datelike, Days, Local, NaiveDate, Weekday};
 use clap::Args;
+use serde::Serialize;
 
 use crate::api::chrono::ChronoClient;
 use crate::api::portal::{ApiError, TtApiClient};
 use crate::commands::holidays::is_us_federal_holiday;
 use crate::commands::settle_render::{
-    action_label, clean_chrono_entry, entry_type, render_day_summary, task_title, title_case,
-    under_eight_days, weekday_abbreviation,
+    action_label, clean_chrono_entry, entry_type, render_day_summary, task_title,
+    under_eight_days, weekday_abbreviation, weekday_name,
 };
 use crate::commands::settle_window::{
     describe_not_final_days, last_settleable_day, nothing_to_settle_message, split_by_finality,
 };
-use crate::commands::{kotlin_double_or_null, parse_iso_date};
+use crate::commands::{Outcome, kotlin_double_or_null, parse_iso_date};
 use crate::config::Config;
 use crate::fmt::{java_dbl, java_fmt, java_fmt_width, pad_right, utf16_cmp, utf16_len};
 use crate::model::{
@@ -1392,4 +1393,742 @@ async fn apply_all(
         "\nDone! Created: {created}, Updated: {updated}, Errors: {errors}"
     ));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The scan window
+// ---------------------------------------------------------------------------
+
+/// `SettleCommand.kt:195` — `today.minusDays(45)`. Named here because the number
+/// is the whole of the scan's lower bound and the project's own CLAUDE.md quotes
+/// it ("Scans the last 45 days").
+const SCAN_DAYS: u64 = 45;
+
+/// Every month the closed interval `[start, end]` touches, as the first day of
+/// each, in chronological order.
+///
+/// `SettleCommand.kt:209-214` builds this with a `mutableSetOf` and a `while
+/// (!current.isAfter(cutoff))`, so the bound is inclusive and an interval whose
+/// ends sit in one month yields exactly one month. An inverted interval yields
+/// none, which is the Kotlin loop's behaviour too and is why
+/// [`PeriodBudgets::calculate_if_configured`] has its own empty-set fallback.
+///
+/// D2 adds the second caller: `prepareActions` fetched `normalView` once, for the
+/// range's first day, and now fetches one per month this returns.
+pub fn months_in_range(start: NaiveDate, end: NaiveDate) -> Vec<NaiveDate> {
+    let mut months = Vec::new();
+    let mut current = start.with_day(1).expect("every month has a first day");
+    while current <= end {
+        months.push(current);
+        current = next_month(current);
+    }
+    months
+}
+
+/// `LocalDate.plusMonths(1)` on a first-of-month date, where it cannot clamp.
+fn next_month(first_of_month: NaiveDate) -> NaiveDate {
+    let (year, month) = if first_of_month.month() == 12 {
+        (first_of_month.year() + 1, 1)
+    } else {
+        (first_of_month.year(), first_of_month.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(year, month, 1).expect("the first of the next month is a date")
+}
+
+/// `LocalDate.parse(it.date.substring(0, 10))` — `SettleCommand.kt:222,446`.
+///
+/// The portal's `date` is an ISO timestamp and only its date half is read. Kotlin's
+/// `substring` counts UTF-16 units and throws when the string is shorter; this
+/// takes the first ten `char`s and says so when there are not ten, which is the
+/// same outcome with a message instead of an index in it.
+fn detail_date(raw: &str) -> Result<NaiveDate> {
+    let head: String = raw.chars().take(10).collect();
+    if head.chars().count() < 10 {
+        bail!("the portal returned '{raw}', which is too short to hold a date");
+    }
+    parse_iso_date(&head).map_err(|message| anyhow!("{message}"))
+}
+
+/// The result of `findUnfilledDays` (`SettleCommand.kt:184-189`).
+///
+/// `not_final` is carried rather than dropped so an empty `unfilled_days` can tell
+/// "everything is settled" from "nothing was final enough to look at" — the two
+/// have different messages and only this field separates them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnfilledDays {
+    pub unfilled_days: Vec<NaiveDate>,
+    pub devpro_hours_by_day: HashMap<NaiveDate, f64>,
+    pub not_final: Vec<NaiveDate>,
+}
+
+/// C16's filter, lifted out of the fetch so it can be tested without a portal.
+///
+/// A day is offered when it has Chrono data, is logged under 8h in DevPro, is not
+/// a weekend and is not a US federal holiday. `devpro_hours_by_day` missing a day
+/// means zero hours, which is the common case — a day nobody has touched.
+///
+/// The comparison is `< 8.0` on the portal's own figure, not on a rounded one: a
+/// day logged at 7.99h is unfilled and a day at 8.0h is not.
+pub fn unfilled_days(
+    settleable: &[NaiveDate],
+    devpro_hours_by_day: &HashMap<NaiveDate, f64>,
+) -> Vec<NaiveDate> {
+    settleable
+        .iter()
+        .copied()
+        .filter(|day| {
+            let hours = devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
+            let weekend = matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+            hours < FULL_DAY_HOURS && !weekend && !is_us_federal_holiday(*day)
+        })
+        .collect()
+}
+
+/// The distinct local dates a batch of Chrono entries falls on, sorted.
+///
+/// C2: an entry is re-dated to the local day of its `start_time`, which is the
+/// only thing that makes the `cutoff + 1 day` fetch padding safe. `distinct()`
+/// then `sorted()` in Kotlin (`SettleCommand.kt:236-241`); the sort is total over
+/// dates, so the first-encounter order `distinct` preserves is not observable and
+/// a `Vec` with a membership test reproduces it either way.
+fn chrono_days(entries: &[crate::model::ChronoTimeEntry]) -> Result<Vec<NaiveDate>> {
+    let mut days: Vec<NaiveDate> = Vec::new();
+    for entry in entries {
+        let day = aggregator::entry_local_date(&entry.start_time, &Local)?;
+        if !days.contains(&day) {
+            days.push(day);
+        }
+    }
+    days.sort();
+    Ok(days)
+}
+
+// ---------------------------------------------------------------------------
+// The command, with its two clients
+// ---------------------------------------------------------------------------
+
+/// Everything `SettleCommand` holds between its methods once the arguments, the
+/// two clients and "today" are no longer read from global state.
+///
+/// `today` is a field rather than a `LocalDate.now()` at each of the four sites
+/// that needed it: the incumbent reads the clock five times in one run
+/// (`:77,131,133,192,313,331`) and a run crossing midnight between two of them
+/// would contradict itself. Reading it once is the same behaviour every other
+/// second of the day and is testable.
+struct Settle<'a> {
+    args: &'a SettleArgs,
+    config: &'a Config,
+    chrono_client: &'a ChronoClient,
+    tt_client: &'a TtApiClient,
+    normalizer: &'a TimeNormalizer,
+    today: NaiveDate,
+}
+
+/// `collectActions`' return (`SettleCommand.kt:265-268`).
+struct CollectedActions {
+    actions: Vec<SettleAction>,
+    not_final: Vec<NaiveDate>,
+}
+
+impl Settle<'_> {
+    /// C7's routing switch (`SettleCommand.kt:73`) — `json || dryRun ||
+    /// System.console() == null`. The progress lines go to stderr when it holds, so
+    /// that stdout carries only the JSON or the summary.
+    fn quiet(&self, io: &dyn Console) -> bool {
+        self.args.json || self.args.dry_run || !io.present()
+    }
+
+    /// `settleThrough` (`SettleCommand.kt:77`).
+    fn cutoff(&self) -> NaiveDate {
+        last_settleable_day(self.today, self.args.include_today)
+    }
+
+    /// True when the invocation named at least one end of a range, which is the
+    /// condition three separate places in the incumbent branch on.
+    fn explicit_range(&self) -> bool {
+        self.args.from.is_some() || self.args.to.is_some()
+    }
+
+    /// [`resolve_range`] against this run's clock, with the note echoed to stderr.
+    ///
+    /// The two call sites (`:98`, `:287`) are mutually exclusive per invocation, so
+    /// the note still fires at most once.
+    fn resolve_range(&self, io: &mut dyn Console) -> ResolvedRange {
+        let (range, note) = resolve_range(self.args.from, self.args.to, self.today, self.cutoff());
+        if let Some(note) = note {
+            io.err(&note);
+        }
+        range
+    }
+
+    /// One `normalView` per month, flattened into the `(worklog, date)` pairs
+    /// [`find_existing`] and the budget calculation both read.
+    ///
+    /// D2's second facet: `SettleCommand.kt:440-446` calls this once with the
+    /// range's **first day** as the period, so for a range spanning two months the
+    /// second month's worklogs are invisible, `findExisting` finds nothing and
+    /// every proposal there becomes a CREATE against a day that already holds a
+    /// worklog. The endpoint keys on the month and not the day — measured
+    /// 2026-09-22, `~/.cache/tt-devpro-rewrite/measurements/portal/normalview-keys-on-month.md`:
+    /// `period=2026-09-01`, `2026-09-18` and `2026-09-30` return byte-identical
+    /// bodies — so passing the first of each month is the same request the
+    /// incumbent makes on the single-month path that every baseline capture
+    /// exercises.
+    async fn existing_worklogs(&self, months: &[NaiveDate]) -> Result<Vec<(WorklogDetail, NaiveDate)>> {
+        let mut existing = Vec::new();
+        for month in months {
+            let view = self.tt_client.get_normal_view(&month.to_string()).await?;
+            for page in &view.page_list {
+                for day in &page.details_by_dates {
+                    let date = detail_date(&day.date)?;
+                    for worklog in &day.worklogs_details {
+                        existing.push((worklog.clone(), date));
+                    }
+                }
+            }
+        }
+        Ok(existing)
+    }
+
+    /// `findUnfilledDays` (`SettleCommand.kt:191-261`) — the 45-day scan.
+    async fn find_unfilled_days(&self, io: &mut dyn Console) -> Result<UnfilledDays> {
+        let quiet = self.quiet(io);
+        let cutoff = self.cutoff();
+        let range_start = self
+            .today
+            .checked_sub_days(Days::new(SCAN_DAYS))
+            .ok_or_else(|| anyhow!("date underflow: {SCAN_DAYS} days before {}", self.today))?;
+
+        // `:201`. Both ends are named: "last 45 days" said nothing about the upper
+        // one, which is precisely where this command used to be wrong.
+        io.echo(
+            &format!("Checking {range_start} to {cutoff} for unfilled days (<8h)..."),
+            quiet,
+        );
+
+        // C17, `:205`. The user is not needed here; the call is made so that a dead
+        // session fails before 45 days of months are fetched.
+        self.tt_client.get_current_user().await?;
+
+        let months = months_in_range(range_start, cutoff);
+        let mut devpro_hours_by_day: HashMap<NaiveDate, f64> = HashMap::new();
+        for month in &months {
+            let view = self.tt_client.get_normal_view(&month.to_string()).await?;
+            for page in &view.page_list {
+                for day in &page.details_by_dates {
+                    // `:223` — a plain `put`, so a date appearing in two months'
+                    // responses keeps the later one.
+                    devpro_hours_by_day.insert(detail_date(&day.date)?, day.logged_hours);
+                }
+            }
+        }
+
+        // C2's padding: `cutoff + 1 day` on the UTC axis, undone by re-dating every
+        // entry to its local day in `chrono_days`.
+        let fetch_end = cutoff
+            .succ_opt()
+            .ok_or_else(|| anyhow!("date overflow: the day after {cutoff}"))?;
+        let all_entries = self
+            .chrono_client
+            .get_time_entries(range_start, fetch_end)
+            .await?;
+        if all_entries.is_empty() {
+            // `:232` returns the hours it already has and an empty `notFinal`, so an
+            // empty Chrono says "all settled" rather than "held back".
+            return Ok(UnfilledDays {
+                unfilled_days: Vec::new(),
+                devpro_hours_by_day,
+                not_final: Vec::new(),
+            });
+        }
+
+        let days = chrono_days(&all_entries)?;
+        let window = split_by_finality(&days, self.today, self.args.include_today);
+        if !window.not_final.is_empty() {
+            // Always stderr (`:250`), in every mode.
+            io.err(&format!(
+                "\u{2139} Skipped (hours not final yet): {}",
+                describe_not_final_days(&window.not_final, self.today)
+            ));
+        }
+
+        Ok(UnfilledDays {
+            unfilled_days: unfilled_days(&window.settleable, &devpro_hours_by_day),
+            devpro_hours_by_day,
+            not_final: window.not_final,
+        })
+    }
+
+    /// `prepareActions` (`SettleCommand.kt:411-577`) — the network half; the
+    /// arithmetic is [`build_actions`].
+    ///
+    /// D2's first and third facets live here. Project ids are resolved **per day**
+    /// rather than once for `from`, because assignments exist per date and a range
+    /// spanning an assignment change dies today on the one name that is not in the
+    /// first day's list. Filler budgets come from
+    /// [`PeriodBudgets::calculate_if_configured`], which builds one map per billing
+    /// period the range spans instead of using the first period's for all of them.
+    async fn prepare_actions(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        io: &mut dyn Console,
+    ) -> Result<Vec<SettleAction>> {
+        let quiet = self.quiet(io);
+
+        io.echo(&format!("Fetching Chrono data ({from} to {to})..."), quiet);
+        let fetch_end = to
+            .succ_opt()
+            .ok_or_else(|| anyhow!("date overflow: the day after {to}"))?;
+        let entries = self.chrono_client.get_time_entries(from, fetch_end).await?;
+        if entries.is_empty() {
+            io.echo("No entries found in Chrono for this period.", quiet);
+            return Ok(Vec::new());
+        }
+
+        let raw_aggregates = aggregator::aggregate(&entries, self.config, Some(from), Some(to))?;
+        if raw_aggregates.is_empty() {
+            io.echo(
+                "No work entries to process (entries without project or duration are skipped).",
+                quiet,
+            );
+            return Ok(Vec::new());
+        }
+
+        let normalized = self.normalizer.normalize(&raw_aggregates);
+
+        let months = months_in_range(from, to);
+        let existing_worklogs = self.existing_worklogs(&months).await?;
+
+        let mut period_budgets = PeriodBudgets::calculate_if_configured(
+            &self.config.fillers,
+            &existing_worklogs,
+            from,
+            to,
+        );
+
+        let fillers = filler::generate_fillers(
+            &normalized,
+            &self.config.fillers,
+            self.config.max_synthetic_hours,
+            period_budgets.as_mut(),
+            &mut ThreadFillerRandom,
+        );
+
+        let borrowed = borrower::borrow_for_meeting_only_days(
+            &normalized,
+            &fillers,
+            self.chrono_client,
+            self.config,
+            self.config.max_synthetic_hours,
+            self.normalizer,
+        )
+        .await?;
+
+        let user = self.tt_client.get_current_user().await?;
+        let ids_by_day = self
+            .resolve_ids_per_day(&user.unique_id, &normalized, &fillers, &borrowed, io)
+            .await?;
+
+        build_actions(
+            &normalized,
+            &fillers,
+            &borrowed,
+            &ids_by_day,
+            &existing_worklogs,
+            self.config.max_synthetic_hours,
+        )
+    }
+
+    /// D2's first facet: `getAssignedProjects` once per day that has proposals,
+    /// resolving only the names that day actually needs.
+    ///
+    /// `SettleCommand.kt:463-478` asks the portal for the assignments held on
+    /// `from` and resolves the **union** of every name in the range against that one
+    /// list. Measured: `--from 2026-08-01 --to 2026-08-15 --json` exits having
+    /// printed nothing but `✗ Error: DevPro project 'Inveniam SOW #5' not found.`,
+    /// because `#5` is assigned later in the range and is in neither 08-01's list
+    /// nor `project_ids`. Per day, each name is asked of the list that was in force
+    /// when the work happened, and the whole class of failure goes away.
+    ///
+    /// **The fallback warnings are deduplicated across days.** The incumbent prints
+    /// one line per fallback for the whole run; resolving per day would otherwise
+    /// print the same line once per day the project appears on. For a single-day
+    /// range — which is every invocation the scan path makes, and every baseline
+    /// capture — the two are the same lines in the same order.
+    async fn resolve_ids_per_day(
+        &self,
+        contact_id: &str,
+        normalized: &[NormalizedAggregate],
+        fillers: &[FillerEntry],
+        borrowed: &[BorrowedEntry],
+        io: &mut dyn Console,
+    ) -> Result<IdsByDay> {
+        // `:470-472`'s order within a day: the real aggregates, then the fillers,
+        // then the borrowed entries, each distinct.
+        let mut names_by_day: Vec<(NaiveDate, Vec<String>)> = Vec::new();
+        for norm in normalized {
+            push_name(
+                &mut names_by_day,
+                norm.original.date,
+                &norm.original.devpro_project_name,
+            );
+        }
+        for entry in fillers {
+            push_name(&mut names_by_day, entry.date, &entry.devpro_project_name);
+        }
+        for entry in borrowed {
+            push_name(&mut names_by_day, entry.date, &entry.devpro_project_name);
+        }
+
+        let mut ids_by_day: IdsByDay = HashMap::new();
+        let mut fallbacks: Vec<aggregator::FallbackId> = Vec::new();
+        for (date, names) in &names_by_day {
+            let response = self
+                .tt_client
+                .get_assigned_projects(contact_id, &date.to_string())
+                .await?;
+            let resolution =
+                aggregator::resolve_project_ids(names, &response.projects, &self.config.project_ids)?;
+            for fallback in resolution.fallbacks {
+                if !fallbacks.contains(&fallback) {
+                    fallbacks.push(fallback);
+                }
+            }
+            ids_by_day.insert(*date, resolution.ids_by_name);
+        }
+
+        // `:475-481`. Always stderr: keeps `--json` stdout clean and stays visible in
+        // an interactive run. The glyph is a bare U+26A0 with one space, unlike the
+        // under-8h warning's U+26A0 U+FE0F with two.
+        for fallback in &fallbacks {
+            io.err(&format!(
+                "\u{26A0} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.tt-config.yaml. Check it still points at the right project.",
+                fallback.name, fallback.id
+            ));
+        }
+
+        Ok(ids_by_day)
+    }
+
+    /// `collectActions` (`SettleCommand.kt:278-295`), shared by JSON and dry-run.
+    ///
+    /// An explicit range is taken at face value and so reports no held-back days;
+    /// the scan path reports what the finality split dropped.
+    async fn collect_actions(&self, io: &mut dyn Console) -> Result<CollectedActions> {
+        if self.explicit_range() {
+            let range = self.resolve_range(io);
+            return Ok(CollectedActions {
+                actions: self.prepare_actions(range.from, range.to, io).await?,
+                not_final: Vec::new(),
+            });
+        }
+
+        let scan = self.find_unfilled_days(io).await?;
+        let mut actions = Vec::new();
+        for day in &scan.unfilled_days {
+            actions.extend(self.prepare_actions(*day, *day, io).await?);
+        }
+        Ok(CollectedActions {
+            actions,
+            not_final: scan.not_final,
+        })
+    }
+
+    /// `runJsonMode` (`SettleCommand.kt:297-305`).
+    ///
+    /// An empty scan emits `[]` and no message: the JSON *is* the answer, and a
+    /// human-readable "all settled" on stdout would be the C7 leak this mode exists
+    /// to avoid.
+    async fn run_json_mode(&self, io: &mut dyn Console) -> Result<()> {
+        let collected = self.collect_actions(io).await?;
+        io.out(&json_body(&collected.actions)?);
+        Ok(())
+    }
+
+    /// `runDryRunMode` (`SettleCommand.kt:307-323`).
+    async fn run_dry_run_mode(&self, io: &mut dyn Console) -> Result<()> {
+        let collected = self.collect_actions(io).await?;
+        if collected.actions.is_empty() {
+            // For an explicit range, empty can mean "no Chrono entries, or none
+            // mapped" — already said on stderr — rather than "settled", so the
+            // message stays neutral.
+            let message = if self.explicit_range() {
+                "No actions to settle for this range.".to_string()
+            } else {
+                nothing_to_settle_message(&collected.not_final, self.today)
+            };
+            io.out(&message);
+            return Ok(());
+        }
+        io.out(&render_day_summary(&collected.actions));
+        Ok(())
+    }
+
+    /// `runBatchMode` (`SettleCommand.kt:151-182`). One question, three answers,
+    /// no loop — a separate surface from the day-by-day prompt and not a special
+    /// case of it.
+    async fn run_batch_mode(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+        io: &mut dyn Console,
+    ) -> Result<()> {
+        let actions = self.prepare_actions(from, to, io).await?;
+        if actions.is_empty() {
+            return Ok(());
+        }
+
+        // C7: no console to prompt on, so the readable summary stands in. Without
+        // this the run falls through `readLine()` → `None` → `Cancelled.` and looks
+        // like a decision somebody made.
+        if !io.present() {
+            io.out(&render_day_summary(&actions));
+            return Ok(());
+        }
+
+        io.blank();
+        io.out(&draft_table(&actions));
+        let warning = under_eight_warning(&actions);
+        if let Some(text) = &warning {
+            io.out(text);
+        }
+        io.out(batch_prompt(warning.is_some()));
+
+        match batch_choice(read_choice(io).as_deref()) {
+            BatchChoice::Approve => apply_all(&actions, self.tt_client, io).await?,
+            BatchChoice::Cancel => io.out("Cancelled."),
+            BatchChoice::Unknown => io.out("Unknown option. Cancelled."),
+        }
+        Ok(())
+    }
+
+    /// `runDayByDayMode` (`SettleCommand.kt:325-409`) — the interactive loop.
+    ///
+    /// D4: the `[A]` branch writes to the live portal and this run never executes
+    /// it. Everything it depends on is reachable from the pure layer above.
+    async fn run_day_by_day_mode(&self, io: &mut dyn Console) -> Result<()> {
+        let scan = self.find_unfilled_days(io).await?;
+        if scan.unfilled_days.is_empty() {
+            io.out(&nothing_to_settle_message(&scan.not_final, self.today));
+            return Ok(());
+        }
+
+        // C7 again, and the reason this branch fetches every day up front: with no
+        // console there is nothing to answer the per-day prompt.
+        if !io.present() {
+            let mut all = Vec::new();
+            for day in &scan.unfilled_days {
+                all.extend(self.prepare_actions(*day, *day, io).await?);
+            }
+            io.out(&render_day_summary(&all));
+            return Ok(());
+        }
+
+        io.out(&format!("{} days to settle:", scan.unfilled_days.len()));
+        for day in &scan.unfilled_days {
+            let hours = scan.devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
+            // `:346` — `< 0.01`, not `== 0.0`: a day holding six minutes reads as
+            // empty in this listing.
+            let hours_info = if hours < 0.01 {
+                String::new()
+            } else {
+                format!(" ({}h)", java_fmt(hours, 1))
+            };
+            io.out(&format!(
+                "  {day} {}{hours_info}",
+                weekday_abbreviation(*day)
+            ));
+        }
+        io.blank();
+
+        for day in &scan.unfilled_days {
+            let devpro_hours = scan.devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
+            let current_hours = if devpro_hours < 0.01 {
+                "empty".to_string()
+            } else {
+                format!("{}h logged", java_fmt(devpro_hours, 1))
+            };
+            io.out(&format!(
+                "\u{2550}\u{2550}\u{2550} {day} {} ({current_hours}) \u{2550}\u{2550}\u{2550}",
+                weekday_name(*day)
+            ));
+
+            let actions = self.prepare_actions(*day, *day, io).await?;
+            if actions.is_empty() {
+                // The trailing `\n` is the incumbent's own: `echo` adds one more, so
+                // this is a line and then a blank line.
+                io.out("No entries for this day.\n");
+                continue;
+            }
+
+            let mut current = actions;
+            loop {
+                io.out(&draft_table(&current));
+                let warning = under_eight_warning(&current);
+                if let Some(text) = &warning {
+                    io.out(text);
+                }
+                io.out(day_prompt(warning.is_some()));
+
+                match day_choice(read_choice(io).as_deref()) {
+                    DayChoice::Approve => {
+                        apply_all(&current, self.tt_client, io).await?;
+                        io.blank();
+                        break;
+                    }
+                    DayChoice::Edit => current = edit_entry(&current, io),
+                    DayChoice::Delete => current = delete_entry(&current, io),
+                    DayChoice::Skip => {
+                        io.out("Skipped.\n");
+                        break;
+                    }
+                    // Both of these abandon every remaining day, not just this one.
+                    DayChoice::Cancel => {
+                        io.out("Cancelled.");
+                        return Ok(());
+                    }
+                    DayChoice::Unknown => {
+                        io.out("Unknown option. Cancelled.");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        io.out("Done! All unfilled days processed.");
+        Ok(())
+    }
+}
+
+/// Appends `name` under `date`, keeping both levels in first-encounter order and
+/// both free of duplicates — Kotlin's `.distinct()` on a list built in that order.
+fn push_name(slots: &mut Vec<(NaiveDate, Vec<String>)>, date: NaiveDate, name: &str) {
+    match slots.iter_mut().find(|(known, _)| *known == date) {
+        Some((_, names)) => {
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_string());
+            }
+        }
+        None => slots.push((date, vec![name.to_string()])),
+    }
+}
+
+/// C29 — `Json { prettyPrint = true }.encodeToString(ListSerializer(...))`.
+///
+/// kotlinx-serialization's pretty printer indents with **four** spaces and
+/// `serde_json`'s `PrettyFormatter` defaults to two, so the formatter is
+/// constructed rather than taken from `to_string_pretty`. Verified against
+/// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out`, whose second line opens
+/// with four spaces and whose third with eight.
+///
+/// The field-level part of C29 is on the model: kotlinx omits a property that
+/// equals its declared default, which `SettleAction`'s `skip_serializing_if`
+/// attributes reproduce.
+pub fn json_body(actions: &[SettleAction]) -> Result<String> {
+    let mut buffer = Vec::new();
+    let mut serializer = serde_json::Serializer::with_formatter(
+        &mut buffer,
+        serde_json::ser::PrettyFormatter::with_indent(b"    "),
+    );
+    actions
+        .serialize(&mut serializer)
+        .context("encoding the proposed actions as JSON")?;
+    String::from_utf8(buffer).context("the JSON encoder produced invalid UTF-8")
+}
+
+// ---------------------------------------------------------------------------
+// The entry point
+// ---------------------------------------------------------------------------
+
+/// `SettleCommand.run`'s two catch clauses (`SettleCommand.kt:104-109`).
+///
+/// `ApiException` gets its own prefix; everything else is `✗ Error: `. Both go to
+/// stderr in every mode.
+///
+/// The `{error:#}` is anyhow's whole chain joined with `: ` rather than the
+/// outermost message alone. For the one error path that is captured — the D2
+/// crash, `~/.cache/tt-devpro-rewrite/baseline/settle-range-aug-json.err`, which
+/// carries the project-resolution message and its list of available projects — the
+/// two renderings are the same string, because that error is a `bail!` with no
+/// context on top of it. They differ where the port adds context the incumbent has
+/// no counterpart for, a failed HTTP request being the case: the outermost message
+/// alone would be `requesting http://localhost:9247/api/time-entries` with the
+/// refusal that caused it dropped.
+fn report_failure(error: &anyhow::Error, io: &mut dyn Console) {
+    match error.downcast_ref::<ApiError>() {
+        Some(api) => io.err(&format!("\u{2717} API Error: {api}")),
+        None => io.err(&format!("\u{2717} Error: {error:#}")),
+    }
+}
+
+/// The body of `SettleCommand.run` after the config has loaded
+/// (`SettleCommand.kt:88-102`), as one fallible unit so that the two catch clauses
+/// have a single `Err` to look at.
+///
+/// `session_cookie()` is inside it, which the incumbent's `getSessionCookie()` at
+/// `:86` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
+/// raw stack trace out of Clikt. D3 names that as a fix: the same message on
+/// stderr and a non-zero code, which is what the *expired*-cookie path already did.
+async fn dispatch(
+    args: &SettleArgs,
+    config: &Config,
+    today: NaiveDate,
+    io: &mut dyn Console,
+) -> Result<()> {
+    let chrono_client = ChronoClient::new(&config.chrono_api)?;
+    let tt_client = TtApiClient::new(crate::cookie::session_cookie()?)?;
+    // Walks the knowledge base for `Calendar` directories, so it is built once per
+    // run and not once per day of a 45-day scan.
+    let normalizer = TimeNormalizer::new();
+
+    let settle = Settle {
+        args,
+        config,
+        chrono_client: &chrono_client,
+        tt_client: &tt_client,
+        normalizer: &normalizer,
+        today,
+    };
+
+    // `:90-102`, in order: `--json` wins over `--dry-run`, an explicit range wins
+    // over the scan, and the scan is the default.
+    if args.json {
+        settle.run_json_mode(io).await
+    } else if args.dry_run {
+        settle.run_dry_run_mode(io).await
+    } else if settle.explicit_range() {
+        let range = settle.resolve_range(io);
+        settle.run_batch_mode(range.from, range.to, io).await
+    } else {
+        settle.run_day_by_day_mode(io).await
+    }
+}
+
+/// `tt-devpro settle`.
+///
+/// D3: the message goes to stderr exactly where the incumbent puts it, and the
+/// process exits non-zero instead of zero. Returning [`Outcome`] rather than a
+/// `Result` is what keeps `main` from rendering the same failure a second time in
+/// a shape nothing measured.
+pub async fn run(args: &SettleArgs, io: &mut dyn Console) -> Outcome {
+    // `:81-87` — the config's own catch, whose message has no `Error: ` in it.
+    let config = match crate::config::load() {
+        Ok(config) => config,
+        Err(error) => {
+            io.err(&format!("\u{2717} {error:#}"));
+            return Outcome::Failed;
+        }
+    };
+
+    // `LocalDate.now()`, read once. See [`Settle`].
+    let today = Local::now().date_naive();
+
+    match dispatch(args, &config, today, io).await {
+        Ok(()) => Outcome::Ok,
+        Err(error) => {
+            report_failure(&error, io);
+            Outcome::Failed
+        }
+    }
 }
