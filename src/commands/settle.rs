@@ -5414,9 +5414,18 @@ mod tests {
         let _ = (portal.requests(), chrono.requests());
     }
 
-    /// `--dry-run` reads and never writes. The assertion is on the method of every
-    /// request that reached the stub, which is the only statement that stays true
-    /// however the summary is rendered.
+    /// `--dry-run` reads and never writes. That assertion is on the method of every
+    /// request that reached the stub, which is the only statement about writing
+    /// that stays true however the summary is rendered.
+    ///
+    /// The second assertion is what separates this mode from `--json`, and it is
+    /// deliberately at the mode level rather than the rendering level. `Deep work`
+    /// is the entry's description, so it appears in the JSON payload too, and
+    /// routing `DryRun` to `run_json_mode` used to satisfy everything else here.
+    /// What cannot be true of both modes is the shape of the whole of stdout:
+    /// `--json` emits exactly one JSON document and `--dry-run` emits a table for a
+    /// human, so the pin is "this does not parse as JSON" — which still says
+    /// nothing about which columns the summary has, or in what order.
     #[tokio::test]
     async fn a_dry_run_issues_reads_only_and_renders_the_day_summary() {
         let chrono =
@@ -5451,6 +5460,11 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(io.out_text().contains("Deep work"), "{}", io.out_text());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&io.out_text()).is_err(),
+            "--dry-run's stdout is a summary for a human, not a JSON document: {}",
+            io.out_text()
+        );
         let _ = chrono.requests();
     }
 
@@ -5757,6 +5771,196 @@ mod tests {
                 .iter()
                 .map(|r| (&r.method, &r.target))
                 .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// The batch prompt with a console actually present — the case the test above
+    /// deliberately does not cover, and which nothing covered at all.
+    ///
+    /// Every piece the glue is made of is tested on its own: `batch_prompt`,
+    /// `read_choice`, `batch_choice` and `apply_all`. The wiring between them —
+    /// `run_batch_mode`'s `match` on `batch_choice`, the incumbent's `when` at
+    /// `SettleCommand.kt:176-180` — was executed by no test, so any of the three
+    /// outcomes could have been attached to the wrong branch. These three tests are
+    /// the absent-console fixture with a typed answer in place of the absent
+    /// console, and one more canned portal answer where a write is expected.
+    ///
+    /// `c` is the answer that must not write. The killing assertion is the one on
+    /// stdout rather than the one on the stub's methods: a `Cancel` arm wired to
+    /// `apply_all` would POST to a server that has already served its three canned
+    /// answers and exited, so the write is refused rather than captured, and
+    /// `apply_all` counts a refusal instead of propagating it. What such an arm
+    /// cannot do is leave `Cancelled.` as the last line of stdout.
+    #[tokio::test]
+    async fn the_batch_prompt_cancels_on_c_without_reaching_the_write_path() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Deep work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let args = SettleArgs {
+            from: Some(d("2026-09-15")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::typing(&["c"]);
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("[A]pprove / [C]ancel: "),
+            "the prompt is the point of this branch: {out}"
+        );
+        assert!(
+            out.ends_with("\nCancelled."),
+            "`c` ends the run on the cancel line with nothing after it: {out}"
+        );
+        assert!(
+            !out.contains("Unknown option."),
+            "`c` is a known answer: {out}"
+        );
+        assert!(
+            !out.contains("Done! Created:"),
+            "a cancelled batch writes nothing and so tallies nothing: {out}"
+        );
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// `SettleCommand.kt:179`, the `else` arm — an answer that is neither `a` nor
+    /// `c`. `batch_choice` maps it to `Unknown`, which prints its own line and,
+    /// like `Cancel`, writes nothing. The difference between the two is the whole
+    /// of what this pins, and since both end in `Cancelled.` the assertion is on
+    /// the entire last line, not a suffix.
+    #[tokio::test]
+    async fn the_batch_prompt_treats_an_unknown_letter_as_its_own_cancellation() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Deep work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let args = SettleArgs {
+            from: Some(d("2026-09-15")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::typing(&["x"]);
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.ends_with("\nUnknown option. Cancelled."),
+            "an unknown letter says so before it cancels: {out}"
+        );
+        assert!(
+            !out.contains("Done! Created:"),
+            "and it writes nothing either: {out}"
+        );
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// `a` on the batch prompt, the one answer that writes — the branch D4 keeps
+    /// out of every real run, driven here against a stub process and never a
+    /// portal.
+    ///
+    /// The stdout assertions come **before** `portal.requests()` on purpose:
+    /// `requests` joins the server thread and blocks until all four canned answers
+    /// have been consumed, so an `Approve` arm that stopped writing would hang here
+    /// rather than fail. The tally line fails it first.
+    #[tokio::test]
+    async fn approving_the_batch_prompt_posts_the_worklog_it_drew() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Deep work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+            crate::api::stub::json_200("true"),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let args = SettleArgs {
+            from: Some(d("2026-09-15")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::typing(&["a"]);
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            !out.contains("Cancelled."),
+            "`a` is not a cancellation: {out}"
+        );
+        assert!(
+            out.ends_with("\nDone! Created: 1, Updated: 0, Errors: 0"),
+            "one create, tallied: {out}"
+        );
+        assert_eq!(io.err_text(), "", "nothing was rejected");
+
+        let requests = portal.requests();
+        assert_eq!(requests.len(), 4, "three reads and the one write");
+        assert_eq!(requests[3].method, "POST", "{:?}", requests[3].target);
+        assert!(
+            requests[3].target.ends_with("/worklog/create"),
+            "{}",
+            requests[3].target
+        );
+        let body = &requests[3].body;
+        assert!(
+            body.contains("\"worklogDate\":\"2026-09-15\""),
+            "the day the table drew: {body}"
+        );
+        assert!(
+            body.contains("\"projectUniqueId\":\"id-alpha\""),
+            "the id resolved from the assigned-projects list: {body}"
+        );
+        assert!(
+            body.contains("\"duration\":8.0"),
+            "the hours that were posted are the normalized ones the table showed, \
+             not the one tracked hour Chrono returned: {body}"
+        );
+        assert!(
+            !body.contains("\"uniqueId\""),
+            "a create carries no worklog id: {body}"
         );
         let _ = chrono.requests();
     }
