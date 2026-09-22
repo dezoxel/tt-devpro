@@ -2101,7 +2101,7 @@ fn report_failure(error: &anyhow::Error, io: &mut dyn Console) {
     }
 }
 
-/// Which of the four modes an invocation selects.
+/// Which of the four modes an invocation selects — C34.
 ///
 /// The incumbent has no such type: its four arms are the four branches of one `if`
 /// chain inside `SettleCommand.run` (`SettleCommand.kt:91-104`). Naming the choice
@@ -2115,9 +2115,9 @@ enum Mode {
     DayByDay,
 }
 
-/// The incumbent's mode precedence (`SettleCommand.kt:91-104`), as a function of
-/// the arguments alone: `--json` wins over `--dry-run`, an explicit range wins over
-/// the scan, and the scan is the default.
+/// C34, the incumbent's mode precedence (`SettleCommand.kt:91-104`), as a function
+/// of the arguments alone: `--json` wins over `--dry-run`, an explicit range wins
+/// over the scan, and the scan is the default.
 ///
 /// Pure on purpose. `dispatch` builds both clients from [`crate::api::portal::BASE_URL`]
 /// and `~/.tt-cookie` inline, so the chain that used to live there could not be
@@ -2142,7 +2142,8 @@ fn mode(args: &SettleArgs) -> Mode {
 /// `:283`, `:317`).
 ///
 /// It is an `or`: one end is enough, because `resolveRange` defaults the other
-/// (C22). Free rather than a method so that [`mode`] needs no [`Settle`].
+/// (C22). C34's third branch is this predicate; free rather than a method so that
+/// [`mode`] needs no [`Settle`].
 fn explicit_range(args: &SettleArgs) -> bool {
     args.from.is_some() || args.to.is_some()
 }
@@ -2176,8 +2177,13 @@ async fn dispatch(
         today,
     };
 
-    // `:91-104`. The precedence itself lives in `mode`, which is where it is
-    // tested; this is only the wiring from a named mode to the run that serves it.
+    // `:91-104`. The precedence itself is C34 and lives in `mode`, which is where
+    // it is tested; this is only the wiring from a named mode to the run that
+    // serves it. That wiring has no unit-test seam — the two clients above are
+    // built from `BASE_URL` and `~/.tt-cookie` inline — and it is not meant to
+    // have one: the differential parity harness covers it live, where the
+    // `settle-dryrun-and-json` case passes both flags and expects JSON, so these
+    // two arms cannot be exchanged unnoticed.
     match mode(args) {
         Mode::Json => settle.run_json_mode(io).await,
         Mode::DryRun => settle.run_dry_run_mode(io).await,
@@ -2504,24 +2510,25 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Mode precedence (`SettleCommand.kt:91-104`)
+    // C34 — mode precedence (`SettleCommand.kt:91-104`)
     // -----------------------------------------------------------------------
     //
-    // The four-way choice carries no number of its own in "Behavioural contracts
-    // — the parity oracle". Its numbered neighbours are C7, whose `quiet`
-    // predicate is the same `--json || --dry-run` pair, and C22, which owns the
-    // explicit range; each test below cites the one it borders.
+    // `--json` beats `--dry-run`, an explicit range beats the scan, the scan is
+    // the default. Do not read this off C7 or C22: C7 owns the `quiet` predicate,
+    // which merely happens to be built from the same pair of flags, and C22 owns
+    // how a range is resolved, not which mode was chosen.
     //
-    // It is also the one rule the differential parity harness cannot reach: every
-    // argv that harness is allowed to run carries `--dry-run` or `--json`, so
-    // `Batch` and `DayByDay` are never taken there and only one of the three
-    // precedence edges is exercised. Recorded as limitation 3 in
-    // `~/.cache/tt-devpro-rewrite/parity/README.md`, "What this instrument CANNOT
-    // establish". These tests are that coverage, and they are why `mode` is a
-    // function of `SettleArgs` alone.
+    // The differential parity harness cannot establish C34: every argv it is
+    // allowed to run carries `--dry-run` or `--json`, so `Batch` and `DayByDay`
+    // are never taken there and only one of the three precedence edges — `--json`
+    // over `--dry-run`, its `settle-dryrun-and-json` case — is exercised.
+    // Recorded as limitation 3 in `~/.cache/tt-devpro-rewrite/parity/README.md`,
+    // "What this instrument CANNOT establish". These tests are the other two
+    // edges and the default, and they are why `mode` is a function of
+    // `SettleArgs` alone.
 
-    /// C7's `--json || --dry-run` pair, first half. `SettleCommand.kt:91-93`:
-    /// `--json` on its own routes to `runJsonMode`.
+    /// C34's first branch. `SettleCommand.kt:91-93`: `--json` on its own routes
+    /// to `runJsonMode`.
     #[test]
     fn json_alone_selects_json_mode() {
         let args = SettleArgs {
@@ -2531,7 +2538,7 @@ mod tests {
         assert_eq!(mode(&args), Mode::Json);
     }
 
-    /// C7's pair, second half. `SettleCommand.kt:94-96`: `--dry-run` on its own
+    /// C34's second branch. `SettleCommand.kt:94-96`: `--dry-run` on its own
     /// routes to `runDryRunMode`, not to the interactive scan.
     #[test]
     fn dry_run_alone_selects_dry_run_mode() {
@@ -2542,10 +2549,10 @@ mod tests {
         assert_eq!(mode(&args), Mode::DryRun);
     }
 
-    /// C7, and the first of the three precedence edges.
-    /// `SettleCommand.kt:91-96`: the `--json` test comes first, so both flags
-    /// together are JSON. The incumbent's own `--dry-run` help text says it —
-    /// "(--json wins if both are given)". Swap the two branches and this fails.
+    /// C34's first precedence edge. `SettleCommand.kt:91-96`: the `--json` test
+    /// comes first, so both flags together are JSON. The incumbent's own
+    /// `--dry-run` help text says it — "(--json wins if both are given)". Swap the
+    /// two branches and this fails.
     #[test]
     fn json_wins_over_dry_run_when_both_are_given() {
         let args = SettleArgs {
@@ -2556,7 +2563,8 @@ mod tests {
         assert_eq!(mode(&args), Mode::Json);
     }
 
-    /// C7 against C22. `SettleCommand.kt:91-99`: the `--json` test is
+    /// C34's first edge again, with C22's range present. `SettleCommand.kt:91-99`:
+    /// the `--json` test is
     /// unconditional, not "JSON unless a range was named". Without this case a
     /// port could guard the first branch with `json && !explicit_range(args)` and
     /// still pass `json_wins_over_dry_run_when_both_are_given`, because that one
@@ -2573,8 +2581,9 @@ mod tests {
         assert_eq!(mode(&args), Mode::Json);
     }
 
-    /// C22 yielding to C7. `SettleCommand.kt:94-99`: the `--dry-run` test is
-    /// reached before the range test, so a dry run over a named range is still a
+    /// C34's second precedence edge. `SettleCommand.kt:94-99`: the `--dry-run`
+    /// test is reached before the range test, so a dry run over a named range is
+    /// still a
     /// dry run and still writes nothing. Hoist the range branch above it and this
     /// fails — with `Batch`, which applies worklogs.
     #[test]
@@ -2588,8 +2597,8 @@ mod tests {
         assert_eq!(mode(&args), Mode::DryRun);
     }
 
-    /// C22, and the second precedence edge, held as a contrast so the swap is
-    /// visible in one place. `SettleCommand.kt:97-104`: the same arguments minus
+    /// C34's third precedence edge, held as a contrast so the swap is visible in
+    /// one place. `SettleCommand.kt:97-104`: the same arguments minus
     /// the range ends fall through to `runDayByDayMode`. Exchange the last two
     /// branches and both halves fail at once.
     #[test]
@@ -2604,7 +2613,8 @@ mod tests {
         assert_eq!(mode(&ranged), Mode::Batch);
     }
 
-    /// C22. `SettleCommand.kt:97` is `from != null || to != null`, so one end is
+    /// C34's third branch, whose condition is C22's. `SettleCommand.kt:97` is
+    /// `from != null || to != null`, so one end is
     /// enough — `resolveRange` defaults `--to` to the cutoff. Turn the `||` into
     /// an `&&` and this is the first of the three tests that catches it.
     #[test]
@@ -2616,7 +2626,8 @@ mod tests {
         assert_eq!(mode(&args), Mode::Batch);
     }
 
-    /// C22, the other end. `SettleCommand.kt:97`, same `||`: a lone `--to` is a
+    /// C34's third branch, the other end. `SettleCommand.kt:97`, same `||`: a
+    /// lone `--to` is a
     /// range too, with `--from` defaulting to the 1st of the month. An `&&` fails
     /// here as well, and a port that only checked `from` fails here and nowhere
     /// else.
@@ -2629,7 +2640,8 @@ mod tests {
         assert_eq!(mode(&args), Mode::Batch);
     }
 
-    /// C22, both ends. `SettleCommand.kt:97`: the ordinary spelling, and the one
+    /// C34's third branch, both ends. `SettleCommand.kt:97`: the ordinary
+    /// spelling, and the one
     /// case an exclusive-or would let through while still passing the two
     /// single-end tests above.
     #[test]
@@ -2642,8 +2654,9 @@ mod tests {
         assert_eq!(mode(&args), Mode::Batch);
     }
 
-    /// C7 by contrast, and the third precedence edge: the default is the one
-    /// interactive mode. `SettleCommand.kt:101-104` — no flag and no range end
+    /// C34's default branch, which is the one interactive mode — and therefore
+    /// the only one C7 calls non-quiet. `SettleCommand.kt:101-104` — no flag and
+    /// no range end
     /// falls all the way through to `runDayByDayMode`, which prompts. Any branch
     /// rewritten to catch the bare invocation fails here.
     #[test]
@@ -2652,7 +2665,7 @@ mod tests {
         assert_eq!(mode(&args), Mode::DayByDay);
     }
 
-    /// C1, not C22. `--include-today` moves the cutoff (`SettleCommand.kt:77`)
+    /// C1, not C34. `--include-today` moves the cutoff (`SettleCommand.kt:77`)
     /// and is absent from the routing switch at `:91-104`, so it must not reach
     /// the mode choice. A port that wrote `explicit_range(args) ||
     /// args.include_today` — plausible, since both concern which days are in
