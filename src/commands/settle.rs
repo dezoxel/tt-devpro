@@ -1409,9 +1409,14 @@ const SCAN_DAYS: u64 = 45;
 ///
 /// `SettleCommand.kt:209-214` builds this with a `mutableSetOf` and a `while
 /// (!current.isAfter(cutoff))`, so the bound is inclusive and an interval whose
-/// ends sit in one month yields exactly one month. An inverted interval yields
-/// none, which is the Kotlin loop's behaviour too and is why
-/// [`PeriodBudgets::calculate_if_configured`] has its own empty-set fallback.
+/// ends sit in one month yields exactly one month.
+///
+/// **An inverted interval is not automatically empty**, which a test caught this
+/// comment claiming. The loop starts at `start.withDayOfMonth(1)`, so `[09-20,
+/// 09-10]` still yields September — the walk is empty only once that first-of-month
+/// date is itself past `end`, i.e. when the inversion crosses a month boundary.
+/// That is why [`PeriodBudgets::calculate_if_configured`] carries its own
+/// empty-set fallback rather than relying on this one never returning nothing.
 ///
 /// D2 adds the second caller: `prepareActions` fetched `normalView` once, for the
 /// range's first day, and now fetches one per month this returns.
@@ -1492,9 +1497,22 @@ pub fn unfilled_days(
 /// dates, so the first-encounter order `distinct` preserves is not observable and
 /// a `Vec` with a membership test reproduces it either way.
 fn chrono_days(entries: &[crate::model::ChronoTimeEntry]) -> Result<Vec<NaiveDate>> {
+    chrono_days_in_zone(entries, &Local)
+}
+
+/// The body of [`chrono_days`] with the zone as a parameter.
+///
+/// The same move as [`aggregator::aggregate_in_zone`], for the same reason: the
+/// incumbent reads `ZoneId.systemDefault()` inline, production goes on passing
+/// `Local` through [`chrono_days`], and a C2 test gets to assert a fixed offset
+/// instead of asserting whatever zone the machine running it happens to sit in.
+fn chrono_days_in_zone<Tz: chrono::TimeZone>(
+    entries: &[crate::model::ChronoTimeEntry],
+    zone: &Tz,
+) -> Result<Vec<NaiveDate>> {
     let mut days: Vec<NaiveDate> = Vec::new();
     for entry in entries {
-        let day = aggregator::entry_local_date(&entry.start_time, &Local)?;
+        let day = aggregator::entry_local_date(&entry.start_time, zone)?;
         if !days.contains(&day) {
             days.push(day);
         }
@@ -2130,5 +2148,1772 @@ pub async fn run(args: &SettleArgs, io: &mut dyn Console) -> Outcome {
             report_failure(&error, io);
             Outcome::Failed
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+
+    use chrono::FixedOffset;
+
+    use super::*;
+    use crate::model::{ChronoProject, ChronoTimeEntry};
+
+    // -----------------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------------
+
+    fn d(text: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a test date")
+    }
+
+    /// UTC-4, the zone the live Chrono data was recorded in. Fixed so that a C2
+    /// assertion is about the rule and not about the machine running it.
+    fn edt() -> FixedOffset {
+        FixedOffset::west_opt(4 * 3600).expect("UTC-4 is a valid offset")
+    }
+
+    /// A [`Console`] that keeps what was written and hands out canned input.
+    ///
+    /// `present` defaults to **true**, the interactive case, because the
+    /// non-interactive one is the exception each test that needs it names.
+    struct FakeConsole {
+        out: Vec<String>,
+        err: Vec<String>,
+        input: VecDeque<String>,
+        present: bool,
+    }
+
+    impl FakeConsole {
+        fn new() -> Self {
+            FakeConsole {
+                out: Vec::new(),
+                err: Vec::new(),
+                input: VecDeque::new(),
+                present: true,
+            }
+        }
+
+        /// Canned answers, consumed in order. Running out is EOF, which is what a
+        /// closed stdin is, so a test that under-feeds the loop exercises the EOF
+        /// contract rather than hanging.
+        fn typing(lines: &[&str]) -> Self {
+            let mut console = FakeConsole::new();
+            console.input = lines.iter().map(|line| (*line).to_string()).collect();
+            console
+        }
+
+        fn absent(mut self) -> Self {
+            self.present = false;
+            self
+        }
+
+        fn out_text(&self) -> String {
+            self.out.join("\n")
+        }
+
+        fn err_text(&self) -> String {
+            self.err.join("\n")
+        }
+    }
+
+    impl Console for FakeConsole {
+        fn out(&mut self, line: &str) {
+            self.out.push(line.to_string());
+        }
+
+        fn err(&mut self, line: &str) {
+            self.err.push(line.to_string());
+        }
+
+        fn read_line(&mut self) -> Option<String> {
+            self.input.pop_front()
+        }
+
+        fn present(&self) -> bool {
+            self.present
+        }
+    }
+
+    /// A [`SettleAction`] builder, since the struct has thirteen fields and a test
+    /// varies two of them.
+    ///
+    /// `normalized_hours` follows `total_hours` unless a test separates them, which
+    /// is what the `orig→norm` column in [`draft_table`] keys off.
+    struct Row {
+        date: NaiveDate,
+        devpro_project: String,
+        chrono_project: String,
+        title: String,
+        total_hours: f64,
+        normalized_hours: f64,
+        is_meeting: bool,
+        is_filler: bool,
+        is_borrowed: bool,
+        is_manually_fixed: bool,
+        source_date: Option<NaiveDate>,
+        project_id: String,
+        action: ActionType,
+        existing_worklog_id: Option<String>,
+        descriptions: Option<Vec<String>>,
+    }
+
+    impl Row {
+        fn new(date: &str, devpro_project: &str, hours: f64) -> Self {
+            Row {
+                date: d(date),
+                devpro_project: devpro_project.to_string(),
+                chrono_project: "Work - DevPro - Work".to_string(),
+                title: "Development".to_string(),
+                total_hours: hours,
+                normalized_hours: hours,
+                is_meeting: false,
+                is_filler: false,
+                is_borrowed: false,
+                is_manually_fixed: false,
+                source_date: None,
+                project_id: "id-1".to_string(),
+                action: ActionType::Create,
+                existing_worklog_id: None,
+                descriptions: None,
+            }
+        }
+
+        fn title(mut self, title: &str) -> Self {
+            self.title = title.to_string();
+            self
+        }
+
+        fn chrono_project(mut self, project: &str) -> Self {
+            self.chrono_project = project.to_string();
+            self
+        }
+
+        fn original(mut self, hours: f64) -> Self {
+            self.total_hours = hours;
+            self
+        }
+
+        fn meeting(mut self) -> Self {
+            self.is_meeting = true;
+            self
+        }
+
+        fn filler(mut self) -> Self {
+            self.is_filler = true;
+            self.chrono_project = "[filler]".to_string();
+            self
+        }
+
+        fn borrowed(mut self, source: &str) -> Self {
+            self.is_borrowed = true;
+            self.chrono_project = "[borrowed]".to_string();
+            self.source_date = Some(d(source));
+            self
+        }
+
+        fn fixed(mut self) -> Self {
+            self.is_manually_fixed = true;
+            self
+        }
+
+        fn project_id(mut self, id: &str) -> Self {
+            self.project_id = id.to_string();
+            self
+        }
+
+        fn action(mut self, action: ActionType) -> Self {
+            self.action = action;
+            self
+        }
+
+        /// Separates `normalized_hours` from the aggregate's `total_hours`, which is
+        /// what the `orig→norm` column keys off and what makes two actions sharing
+        /// one aggregate distinguishable.
+        fn normalized(mut self, hours: f64) -> Self {
+            self.normalized_hours = hours;
+            self
+        }
+
+        fn descriptions(mut self, descriptions: &[&str]) -> Self {
+            self.descriptions = Some(descriptions.iter().map(|t| (*t).to_string()).collect());
+            self
+        }
+
+        fn build(self) -> SettleAction {
+            let descriptions = self
+                .descriptions
+                .unwrap_or_else(|| vec![self.title.clone()]);
+            SettleAction {
+                aggregate: DayProjectAggregate {
+                    date: self.date,
+                    chrono_project: self.chrono_project,
+                    total_hours: self.total_hours,
+                    descriptions,
+                    devpro_project_name: self.devpro_project,
+                    billability: "Billable".to_string(),
+                    max_hours: None,
+                },
+                normalized_hours: self.normalized_hours,
+                is_meeting: self.is_meeting,
+                is_filler: self.is_filler,
+                is_borrowed: self.is_borrowed,
+                source_date: self.source_date,
+                task_title: self.title,
+                devpro_project_id: self.project_id,
+                action: self.action,
+                existing_worklog_id: self.existing_worklog_id,
+                is_manually_fixed: self.is_manually_fixed,
+            }
+        }
+    }
+
+    fn hours(actions: &[SettleAction]) -> Vec<f64> {
+        actions.iter().map(|a| a.normalized_hours).collect()
+    }
+
+    fn worklog(unique_id: &str, project_id: &str, title: &str) -> WorklogDetail {
+        WorklogDetail {
+            unique_id: unique_id.to_string(),
+            project_unique_id: project_id.to_string(),
+            project_short_name: "Some Project".to_string(),
+            task_title: title.to_string(),
+            billability: "Billable".to_string(),
+            logged_hours: 4.0,
+            is_deletable: true,
+            expense_type: None,
+        }
+    }
+
+    fn chrono_entry(id: i64, start: &str) -> ChronoTimeEntry {
+        ChronoTimeEntry {
+            id,
+            description: Some("Work".to_string()),
+            start_time: start.to_string(),
+            end_time: None,
+            duration: Some(3600),
+            project: Some(ChronoProject {
+                id: 1,
+                name: "Work - DevPro - Work".to_string(),
+                color: "#000".to_string(),
+                aspect: None,
+            }),
+            aspect: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Kotlin's string-to-number conversions
+    // -----------------------------------------------------------------------
+
+    /// `Character.isWhitespace` counts U+001C..U+001F and Rust's `White_Space`
+    /// does not, so a `str::trim` port leaves them on and the answer stops being
+    /// recognised.
+    #[test]
+    fn kotlin_trim_strips_the_four_information_separators() {
+        assert_eq!(kotlin_trim("\u{001C}\u{001D}a\u{001E}\u{001F}"), "a");
+        assert!(
+            !"\u{001C}a".trim().is_empty() && "\u{001C}a".trim() == "\u{001C}a",
+            "the premise: Rust's own trim leaves U+001C on"
+        );
+    }
+
+    /// The other direction, and the one with teeth: Rust counts U+00A0, U+2007 and
+    /// U+202F as whitespace and Java does not.
+    #[test]
+    fn kotlin_trim_keeps_the_three_no_break_spaces() {
+        assert_eq!(kotlin_trim("\u{00A0}a"), "\u{00A0}a");
+        assert_eq!(kotlin_trim("\u{2007}a"), "\u{2007}a");
+        assert_eq!(kotlin_trim("\u{202F}a"), "\u{202F}a");
+    }
+
+    /// The consequence, spelled out: a line pasted with a no-break space before the
+    /// `a` cancels every remaining day under the incumbent. A `str::trim` port
+    /// approves and writes the worklogs instead.
+    #[test]
+    fn a_no_break_space_before_the_approval_cancels_instead_of_approving() {
+        let typed = kotlin_trim("\u{00A0}a").to_lowercase();
+        assert_eq!(day_choice(Some(&typed)), DayChoice::Unknown);
+        assert_eq!(day_choice(Some(&"\u{001C}a".trim().to_lowercase())), DayChoice::Unknown);
+        assert_eq!(day_choice(Some(&kotlin_trim("\u{001C}a").to_lowercase())), DayChoice::Approve);
+    }
+
+    /// `Character.digit(c, 10)` reads every Unicode decimal digit, not only ASCII.
+    #[test]
+    fn to_int_or_null_reads_non_ascii_decimal_digits() {
+        assert_eq!(to_int_or_null("\u{0663}"), Some(3), "Arabic-Indic three");
+        assert_eq!(to_int_or_null("\u{FF11}\u{FF12}"), Some(12), "fullwidth twelve");
+        assert_eq!(to_int_or_null("\u{1D7CE}"), Some(0), "mathematical bold zero");
+    }
+
+    /// Mixing scripts is allowed — `Character.digit` is per character and nothing
+    /// checks that two digits came from one block.
+    #[test]
+    fn to_int_or_null_accepts_digits_from_two_different_blocks_in_one_number() {
+        assert_eq!(to_int_or_null("1\u{0662}"), Some(12));
+    }
+
+    /// Kotlin accumulates negatively against the negative limit, so `Int.MIN_VALUE`
+    /// parses and its positive counterpart does not.
+    #[test]
+    fn to_int_or_null_accepts_int_min_and_rejects_everything_past_the_bounds() {
+        assert_eq!(to_int_or_null("-2147483648"), Some(i32::MIN));
+        assert_eq!(to_int_or_null("2147483647"), Some(i32::MAX));
+        assert_eq!(to_int_or_null("2147483648"), None);
+        assert_eq!(to_int_or_null("-2147483649"), None);
+    }
+
+    /// A number far past any integer width is `null`, not an overflow: the check
+    /// fires inside the loop, before the accumulator itself could wrap.
+    #[test]
+    fn to_int_or_null_returns_none_for_a_twenty_digit_number_rather_than_overflowing() {
+        assert_eq!(to_int_or_null("99999999999999999999"), None);
+        assert_eq!(to_int_or_null("-99999999999999999999"), None);
+    }
+
+    /// The caller has already trimmed, and Kotlin does not trim again — so the
+    /// forms `str::parse` would also reject, plus the space it would not.
+    #[test]
+    fn to_int_or_null_rejects_a_leading_space_a_bare_sign_an_empty_string_and_a_decimal() {
+        assert_eq!(to_int_or_null(" 3"), None);
+        assert_eq!(to_int_or_null("3 "), None);
+        assert_eq!(to_int_or_null("+"), None);
+        assert_eq!(to_int_or_null("-"), None);
+        assert_eq!(to_int_or_null(""), None);
+        assert_eq!(to_int_or_null("3.0"), None);
+        assert_eq!(to_int_or_null("3a"), None);
+    }
+
+    /// Both signs are accepted, which is the one thing `str::parse` agrees on.
+    #[test]
+    fn to_int_or_null_takes_an_explicit_plus_sign() {
+        assert_eq!(to_int_or_null("+7"), Some(7));
+        assert_eq!(to_int_or_null("-7"), Some(-7));
+    }
+
+    /// `Double.toInt()` truncates toward zero. `roundToInt()`, which C27 pairs it
+    /// with, would give 4 and -4 here.
+    #[test]
+    fn java_to_int_truncates_toward_zero_rather_than_rounding() {
+        assert_eq!(java_to_int(3.9), 3);
+        assert_eq!(java_to_int(-3.9), -3);
+        assert_eq!(java_to_int(0.9999), 0);
+    }
+
+    /// The width is the point: `.toInt()` is a narrowing conversion to 32 bits, so
+    /// a port that reads it as `i64` is wrong by 2^32 on a value out of range.
+    #[test]
+    fn java_to_int_saturates_at_thirty_two_bits_not_sixty_four() {
+        assert_eq!(java_to_int(1e18), i32::MAX);
+        assert_eq!(java_to_int(-1e18), i32::MIN);
+        assert_ne!(i64::from(java_to_int(1e18)), 1_000_000_000_000_000_000_i64);
+    }
+
+    #[test]
+    fn java_to_int_maps_nan_to_zero() {
+        assert_eq!(java_to_int(f64::NAN), 0);
+    }
+
+    /// C27's whole point at the two `coerceAtLeast` sites: the value is truncated to
+    /// a quarter, never rounded to one. `round_to_quarter(0.74)` is 0.75.
+    #[test]
+    fn truncate_to_quarter_at_least_quarter_truncates_where_the_normalizer_rounds() {
+        assert_eq!(truncate_to_quarter_at_least_quarter(0.74), 0.5);
+        assert_eq!(
+            crate::service::normalizer::round_to_quarter(0.74),
+            0.75,
+            "the premise: the normalizer's rounding site gives the other answer"
+        );
+        assert_eq!(truncate_to_quarter_at_least_quarter(3.99), 3.75);
+    }
+
+    #[test]
+    fn truncate_to_quarter_at_least_quarter_floors_at_one_quarter() {
+        assert_eq!(truncate_to_quarter_at_least_quarter(0.24), QUARTER_HOUR);
+        assert_eq!(truncate_to_quarter_at_least_quarter(0.0), QUARTER_HOUR);
+        assert_eq!(truncate_to_quarter_at_least_quarter(-5.0), QUARTER_HOUR);
+        assert_eq!(truncate_to_quarter_at_least_quarter(0.25), QUARTER_HOUR);
+    }
+
+    /// The second spelling, four lines away in the incumbent, with the same two
+    /// behaviours. Both are kept because C27 names both sites.
+    #[test]
+    fn truncate_to_quarter_max_quarter_truncates_and_floors_the_same_way() {
+        assert_eq!(truncate_to_quarter_max_quarter(0.74), 0.5);
+        assert_eq!(truncate_to_quarter_max_quarter(3.99), 3.75);
+        assert_eq!(truncate_to_quarter_max_quarter(0.24), QUARTER_HOUR);
+        assert_eq!(truncate_to_quarter_max_quarter(-5.0), QUARTER_HOUR);
+    }
+
+    // -----------------------------------------------------------------------
+    // C22 — the explicit range
+    // -----------------------------------------------------------------------
+
+    /// `LocalDate.now().withDayOfMonth(1)`, and not "45 days back" — the two
+    /// coincide for no month.
+    #[test]
+    fn an_unspecified_from_is_the_first_of_the_month_today_falls_in() {
+        let (range, note) = resolve_range(None, Some(d("2026-09-20")), d("2026-09-22"), d("2026-09-21"));
+        assert_eq!(range.from, d("2026-09-01"));
+        assert_eq!(note, None);
+    }
+
+    /// The upper default is the cutoff, which under `--include-today` is today and
+    /// otherwise yesterday. A port defaulting to `today` settles an unfinished day.
+    #[test]
+    fn an_unspecified_to_is_the_cutoff_and_not_today() {
+        let (range, _) = resolve_range(Some(d("2026-09-01")), None, d("2026-09-22"), d("2026-09-21"));
+        assert_eq!(range.to, d("2026-09-21"));
+
+        let (included, _) =
+            resolve_range(Some(d("2026-09-01")), None, d("2026-09-22"), d("2026-09-22"));
+        assert_eq!(included.to, d("2026-09-22"));
+    }
+
+    /// C22's rule: an explicit range is honoured verbatim and the note is
+    /// non-blocking. A port that clamped `to` to the cutoff would pass every other
+    /// test here.
+    #[test]
+    fn a_to_past_the_cutoff_is_honoured_and_carries_the_stderr_note() {
+        let (range, note) =
+            resolve_range(Some(d("2026-09-01")), Some(d("2026-09-30")), d("2026-09-22"), d("2026-09-21"));
+        assert_eq!(range.to, d("2026-09-30"));
+        assert_eq!(
+            note.as_deref(),
+            Some("\u{2139} Range ends 2026-09-30, past the last completed day (2026-09-21) \u{2014} those days' hours aren't final.")
+        );
+    }
+
+    /// The boundary. `>` and not `>=`, so the cutoff itself is silent.
+    #[test]
+    fn a_to_exactly_on_the_cutoff_produces_no_note() {
+        let (_, note) =
+            resolve_range(None, Some(d("2026-09-21")), d("2026-09-22"), d("2026-09-21"));
+        assert_eq!(note, None);
+    }
+
+    /// The comparison is against the cutoff, not today. Under `--include-today` the
+    /// two are the same date, and a port comparing with `today` would announce that
+    /// the range runs past the last completed day about the very day the flag just
+    /// made settleable.
+    #[test]
+    fn under_include_today_a_to_of_today_produces_no_note() {
+        let (range, note) =
+            resolve_range(None, Some(d("2026-09-22")), d("2026-09-22"), d("2026-09-22"));
+        assert_eq!(range.to, d("2026-09-22"));
+        assert_eq!(note, None);
+
+        let (_, without_the_flag) =
+            resolve_range(None, Some(d("2026-09-22")), d("2026-09-22"), d("2026-09-21"));
+        assert!(without_the_flag.is_some(), "the premise: without the flag the same date is noted");
+    }
+
+    // -----------------------------------------------------------------------
+    // C13 — CREATE vs UPDATE
+    // -----------------------------------------------------------------------
+
+    /// C13 matches on `(date, projectId)` and **not** on the title, so a day
+    /// already holding any worklog for the project becomes an UPDATE of it.
+    #[test]
+    fn a_worklog_on_the_same_day_and_project_matches_whatever_it_is_called() {
+        let existing = vec![(worklog("w-1", "p-1", "Something else entirely"), d("2026-09-15"))];
+        let found = find_existing(d("2026-09-15"), "p-1", &existing);
+        assert_eq!(found.map(|w| w.unique_id.as_str()), Some("w-1"));
+    }
+
+    #[test]
+    fn a_worklog_on_another_day_or_another_project_is_not_a_match() {
+        let existing = vec![
+            (worklog("w-1", "p-1", "Development"), d("2026-09-15")),
+            (worklog("w-2", "p-2", "Development"), d("2026-09-16")),
+        ];
+        assert!(find_existing(d("2026-09-16"), "p-1", &existing).is_none());
+        assert!(find_existing(d("2026-09-15"), "p-2", &existing).is_none());
+    }
+
+    /// `firstOrNull`, in the order the portal listed them — a day holding two
+    /// worklogs for one project updates the first and leaves the second alone.
+    #[test]
+    fn the_first_match_wins_when_a_day_holds_two_worklogs_for_one_project() {
+        let existing = vec![
+            (worklog("w-first", "p-1", "Morning"), d("2026-09-15")),
+            (worklog("w-second", "p-1", "Afternoon"), d("2026-09-15")),
+        ];
+        let found = find_existing(d("2026-09-15"), "p-1", &existing);
+        assert_eq!(found.map(|w| w.unique_id.as_str()), Some("w-first"));
+    }
+
+    #[test]
+    fn an_empty_worklog_list_matches_nothing() {
+        assert!(find_existing(d("2026-09-15"), "p-1", &[]).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // The scan window
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_range_inside_one_month_yields_that_month_once() {
+        assert_eq!(
+            months_in_range(d("2026-09-03"), d("2026-09-28")),
+            vec![d("2026-09-01")]
+        );
+    }
+
+    /// The `while (!current.isAfter(cutoff))` bound is inclusive, so a range ending
+    /// on the first of a month still includes that month — which under D2 is the
+    /// difference between fetching its worklogs and not.
+    #[test]
+    fn the_end_of_the_range_is_inclusive_down_to_the_first_of_its_month() {
+        assert_eq!(
+            months_in_range(d("2026-01-15"), d("2026-02-01")),
+            vec![d("2026-01-01"), d("2026-02-01")]
+        );
+    }
+
+    /// The 45-day scan crosses a year boundary every December, and `plusMonths` has
+    /// to roll the year with it.
+    #[test]
+    fn a_range_spanning_a_year_boundary_yields_every_month_in_order() {
+        assert_eq!(
+            months_in_range(d("2025-11-20"), d("2026-02-03")),
+            vec![
+                d("2025-11-01"),
+                d("2025-12-01"),
+                d("2026-01-01"),
+                d("2026-02-01")
+            ]
+        );
+    }
+
+    /// An inversion inside one month still yields that month, because the loop
+    /// starts at the *first* of `start`'s month and 09-01 is not after 09-10. Only
+    /// an inversion that crosses a month boundary walks zero times.
+    ///
+    /// This is the assertion that corrected `months_in_range`'s own doc comment,
+    /// which claimed every inverted interval was empty.
+    #[test]
+    fn an_inversion_inside_one_month_still_yields_that_month() {
+        assert_eq!(
+            months_in_range(d("2026-09-20"), d("2026-09-10")),
+            vec![d("2026-09-01")]
+        );
+    }
+
+    /// The genuinely empty case: `start`'s first-of-month is past `end`.
+    #[test]
+    fn an_inversion_across_a_month_boundary_yields_no_months() {
+        assert!(months_in_range(d("2026-09-20"), d("2026-08-31")).is_empty());
+        assert!(months_in_range(d("2026-09-01"), d("2026-08-31")).is_empty());
+    }
+
+    /// Only the date half of the portal's ISO timestamp is read; the time, the
+    /// offset and anything after them are ignored.
+    #[test]
+    fn detail_date_reads_the_date_half_of_the_portal_timestamp_and_ignores_the_rest() {
+        assert_eq!(
+            detail_date("2026-09-15T00:00:00.000Z").expect("a date"),
+            d("2026-09-15")
+        );
+        assert_eq!(detail_date("2026-09-15").expect("a date"), d("2026-09-15"));
+        assert_eq!(
+            detail_date("2026-09-15T22:30:00+03:00").expect("a date"),
+            d("2026-09-15")
+        );
+    }
+
+    /// Kotlin's `substring(0, 10)` throws here; this says so instead of indexing
+    /// out of range, and the message carries what arrived.
+    #[test]
+    fn a_portal_date_too_short_to_hold_a_date_is_an_error_naming_what_arrived() {
+        let error = detail_date("2026-09").expect_err("too short");
+        assert!(
+            error.to_string().contains("2026-09"),
+            "the message names the value: {error}"
+        );
+    }
+
+    /// `LocalDate.parse` is strict `ISO_LOCAL_DATE`, so a single-digit month is a
+    /// failure rather than a lenient parse — the head here is `2026-9-15T`.
+    #[test]
+    fn a_portal_date_whose_head_is_not_strict_iso_is_an_error() {
+        assert!(detail_date("2026-9-15T00:00:00Z").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // C16 — which days are offered
+    // -----------------------------------------------------------------------
+
+    /// The comparison is `< 8.0` on the portal's own figure. A day at exactly 8h is
+    /// settled; a hundredth under is not.
+    #[test]
+    fn a_day_at_exactly_eight_hours_is_settled_and_a_hundredth_under_is_not() {
+        let days = vec![d("2026-09-15"), d("2026-09-16")];
+        let mut logged = HashMap::new();
+        logged.insert(d("2026-09-15"), 8.0);
+        logged.insert(d("2026-09-16"), 7.99);
+        assert_eq!(unfilled_days(&days, &logged), vec![d("2026-09-16")]);
+    }
+
+    /// A day nobody has touched is missing from the portal's map, which is zero
+    /// hours and therefore unfilled — the common case, and the one an
+    /// `unwrap_or(8.0)` style default would silently drop.
+    #[test]
+    fn a_day_the_portal_never_mentioned_counts_as_zero_hours_and_is_offered() {
+        let days = vec![d("2026-09-15")];
+        assert_eq!(unfilled_days(&days, &HashMap::new()), vec![d("2026-09-15")]);
+    }
+
+    /// 2026-09-19 is a Saturday and 2026-09-20 a Sunday. Neither is ever offered,
+    /// whatever the portal says about them.
+    #[test]
+    fn weekends_are_never_offered_even_at_zero_hours() {
+        let days = vec![d("2026-09-18"), d("2026-09-19"), d("2026-09-20"), d("2026-09-21")];
+        assert_eq!(
+            unfilled_days(&days, &HashMap::new()),
+            vec![d("2026-09-18"), d("2026-09-21")]
+        );
+    }
+
+    /// 2026-09-07 is Labor Day. The holiday predicate is consulted for the same
+    /// reason the weekend test is: neither day is expected to hold eight hours.
+    #[test]
+    fn a_us_federal_holiday_is_never_offered() {
+        let days = vec![d("2026-09-04"), d("2026-09-07"), d("2026-09-08")];
+        assert_eq!(
+            unfilled_days(&days, &HashMap::new()),
+            vec![d("2026-09-04"), d("2026-09-08")]
+        );
+    }
+
+    /// The input order is kept — the day-by-day listing prints these in the order
+    /// this returns them.
+    #[test]
+    fn the_offered_days_keep_the_order_they_arrived_in() {
+        let days = vec![d("2026-09-18"), d("2026-09-15"), d("2026-09-16")];
+        assert_eq!(unfilled_days(&days, &HashMap::new()), days);
+    }
+
+    // -----------------------------------------------------------------------
+    // C2 — an entry belongs to its local day
+    // -----------------------------------------------------------------------
+
+    /// 04:30Z on the 16th is 00:30 on the 16th in UTC-4, and 23:30 on the 15th one
+    /// hour earlier. The padding that fetches `cutoff + 1 day` on the UTC axis is
+    /// safe only because of this re-dating.
+    #[test]
+    fn an_entry_is_dated_by_its_local_day_and_not_by_its_utc_day() {
+        let entries = vec![
+            chrono_entry(1, "2026-09-16T03:30:00Z"),
+            chrono_entry(2, "2026-09-16T04:30:00Z"),
+        ];
+        assert_eq!(
+            chrono_days_in_zone(&entries, &edt()).expect("dates"),
+            vec![d("2026-09-15"), d("2026-09-16")]
+        );
+    }
+
+    /// `distinct()` — several entries on one local day yield it once.
+    #[test]
+    fn several_entries_on_one_local_day_yield_that_day_once() {
+        let entries = vec![
+            chrono_entry(1, "2026-09-16T13:00:00Z"),
+            chrono_entry(2, "2026-09-16T15:00:00Z"),
+            chrono_entry(3, "2026-09-16T17:00:00Z"),
+        ];
+        assert_eq!(
+            chrono_days_in_zone(&entries, &edt()).expect("dates"),
+            vec![d("2026-09-16")]
+        );
+    }
+
+    /// `sorted()` after `distinct()`, so the caller's finality split works on an
+    /// ordered list however the entries arrived.
+    #[test]
+    fn the_local_days_come_back_sorted_whatever_order_the_entries_arrived_in() {
+        let entries = vec![
+            chrono_entry(1, "2026-09-18T13:00:00Z"),
+            chrono_entry(2, "2026-09-14T13:00:00Z"),
+            chrono_entry(3, "2026-09-16T13:00:00Z"),
+        ];
+        assert_eq!(
+            chrono_days_in_zone(&entries, &edt()).expect("dates"),
+            vec![d("2026-09-14"), d("2026-09-16"), d("2026-09-18")]
+        );
+    }
+
+    /// A numeric offset, which `Instant.parse` accepts on JDK 12+ and 956 of the
+    /// live window's entries carry. 01:00+03:00 is 22:00Z the day before, which in
+    /// UTC-4 is the 17th.
+    #[test]
+    fn a_start_time_with_a_numeric_offset_is_read_and_re_dated() {
+        let entries = vec![chrono_entry(1, "2026-09-18T01:00:00+03:00")];
+        assert_eq!(
+            chrono_days_in_zone(&entries, &edt()).expect("dates"),
+            vec![d("2026-09-17")]
+        );
+    }
+
+    /// A malformed `start_time` is an error naming the value, not a silently
+    /// dropped day — a dropped day is a day nobody settles.
+    #[test]
+    fn an_unparseable_start_time_is_an_error_naming_the_value() {
+        let entries = vec![chrono_entry(1, "not a timestamp")];
+        let error = chrono_days_in_zone(&entries, &edt()).expect_err("unparseable");
+        assert!(
+            error.to_string().contains("not a timestamp"),
+            "the message names the value: {error}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C14 — the final adjustment to exactly 8h
+    // -----------------------------------------------------------------------
+
+    /// `< 0.01` on the absolute difference: a day already at 7.995h is left alone,
+    /// and one at 7.98h is not.
+    #[test]
+    fn a_day_within_a_hundredth_of_eight_hours_is_left_alone() {
+        let day = vec![Row::new("2026-09-15", "A", 7.995).build()];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![7.995]);
+
+        let short = vec![Row::new("2026-09-15", "A", 7.98).build()];
+        assert_ne!(
+            hours(&adjust_to_eight_hours(&short, 4.0)),
+            vec![7.98],
+            "a fiftieth short is past the tolerance and gets adjusted"
+        );
+    }
+
+    /// The largest non-synthetic scalable entry absorbs the whole difference, and
+    /// the others are untouched.
+    #[test]
+    fn the_largest_non_synthetic_scalable_entry_absorbs_the_difference() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 2.0).build(),
+            Row::new("2026-09-15", "B", 3.0).build(),
+            Row::new("2026-09-15", "M", 1.0).meeting().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![2.0, 5.0, 1.0]);
+    }
+
+    /// `maxByOrNull` returns the **first** maximum. Rust's `max_by` returns the
+    /// last, which would move the second 3.0 instead of the first — invisible on
+    /// every day whose entries differ, and wrong on every day two of them tie.
+    #[test]
+    fn a_tie_between_the_two_largest_entries_is_broken_by_the_first() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 3.0).build(),
+            Row::new("2026-09-15", "B", 3.0).build(),
+            Row::new("2026-09-15", "M", 1.0).meeting().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![4.0, 3.0, 1.0]);
+    }
+
+    /// Neither a meeting nor a manually fixed entry is a candidate, so a day
+    /// holding one of each plus one ordinary entry moves only the ordinary one.
+    #[test]
+    fn meetings_and_manually_fixed_entries_never_scale() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 3.0).meeting().build(),
+            Row::new("2026-09-15", "F", 2.0).fixed().build(),
+            Row::new("2026-09-15", "W", 1.0).build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![3.0, 2.0, 3.0]);
+    }
+
+    /// A synthetic entry moves only when there is no real one to move.
+    #[test]
+    fn a_synthetic_entry_moves_only_when_no_real_entry_can() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 4.0).meeting().build(),
+            Row::new("2026-09-15", "F", 2.0).filler().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![4.0, 4.0]);
+    }
+
+    /// ...and then only inside what is left of the synthetic cap. Here the day is
+    /// 3h short and the cap has 1h left, so the day ends at 6h and the under-8h
+    /// warning is what reports it.
+    #[test]
+    fn a_synthetic_entry_moves_only_inside_the_remaining_cap() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 3.0).meeting().build(),
+            Row::new("2026-09-15", "F", 2.0).filler().build(),
+        ];
+        let adjusted = adjust_to_eight_hours(&day, 3.0);
+        assert_eq!(hours(&adjusted), vec![3.0, 3.0]);
+        assert_eq!(
+            adjusted.iter().map(|a| a.normalized_hours).sum::<f64>(),
+            6.0,
+            "the cap wins over the 8h target"
+        );
+    }
+
+    /// The cap already spent and the day short: nothing moves at all.
+    #[test]
+    fn a_short_day_whose_synthetic_cap_is_spent_stays_short() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 3.0).meeting().build(),
+            Row::new("2026-09-15", "F", 4.0).filler().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![3.0, 4.0]);
+    }
+
+    /// A borrowed entry counts against the same cap a filler does. A port checking
+    /// only `is_filler` would find 2h of budget left here and lengthen the day.
+    #[test]
+    fn a_borrowed_entry_counts_against_the_synthetic_cap_exactly_as_a_filler_does() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 2.0).meeting().build(),
+            Row::new("2026-09-15", "F", 2.0).filler().build(),
+            Row::new("2026-09-15", "B", 2.0).borrowed("2026-09-14").build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![2.0, 2.0, 2.0]);
+    }
+
+    /// Nothing scalable at all — the day is left exactly as it arrived rather than
+    /// having a meeting stretched.
+    #[test]
+    fn a_day_with_nothing_scalable_is_untouched() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 3.0).meeting().build(),
+            Row::new("2026-09-15", "N", 2.0).meeting().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![3.0, 2.0]);
+    }
+
+    /// An over-full day shrinks the largest **without** consulting the budget: the
+    /// `diff > 0` guard is what makes the cap a floor on growth only. The remaining
+    /// budget here is negative and the entry still moves.
+    #[test]
+    fn an_over_full_day_shrinks_the_largest_without_consulting_the_synthetic_cap() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 4.0).meeting().build(),
+            Row::new("2026-09-15", "F", 6.0).filler().build(),
+        ];
+        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![4.0, 4.0]);
+    }
+
+    /// The adjustment itself is truncated to a quarter, so a gap smaller than a
+    /// quarter cannot be closed and the day stays short of 8h. A port rounding here
+    /// would report a tidy 8.0 the portal never receives.
+    #[test]
+    fn a_sub_quarter_gap_stays_open_because_the_adjustment_truncates() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 2.0).build(),
+            Row::new("2026-09-15", "B", 3.0).build(),
+            Row::new("2026-09-15", "M", 2.9).meeting().build(),
+        ];
+        let adjusted = adjust_to_eight_hours(&day, 4.0);
+        assert_eq!(hours(&adjusted), vec![2.0, 3.0, 2.9]);
+        assert!(
+            adjusted.iter().map(|a| a.normalized_hours).sum::<f64>() < 8.0,
+            "the day is still short, by less than a quarter"
+        );
+    }
+
+    /// `groupBy` then `.values.flatten()`: the output is grouped by date in
+    /// first-encounter order, **not** in the input's interleaved order, and each
+    /// day is adjusted against its own total.
+    #[test]
+    fn interleaved_days_come_back_grouped_by_date_in_first_encounter_order() {
+        let actions = vec![
+            Row::new("2026-09-15", "A", 3.0).build(),
+            Row::new("2026-09-16", "B", 2.0).build(),
+            Row::new("2026-09-15", "C", 3.0).build(),
+        ];
+        let adjusted = adjust_to_eight_hours(&actions, 4.0);
+        let dates: Vec<NaiveDate> = adjusted.iter().map(|a| a.aggregate.date).collect();
+        assert_eq!(
+            dates,
+            vec![d("2026-09-15"), d("2026-09-15"), d("2026-09-16")]
+        );
+        assert_eq!(hours(&adjusted), vec![5.0, 3.0, 8.0]);
+    }
+
+    #[test]
+    fn an_empty_action_list_adjusts_to_an_empty_action_list() {
+        assert!(adjust_to_eight_hours(&[], 4.0).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // C15 — redistribution after an edit or a delete
+    // -----------------------------------------------------------------------
+
+    /// Scalable entries are scaled into what the fixed ones leave, proportionally.
+    #[test]
+    fn scalable_entries_scale_into_what_the_fixed_entries_leave() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 2.0).meeting().build(),
+            Row::new("2026-09-15", "A", 2.0).build(),
+            Row::new("2026-09-15", "B", 6.0).build(),
+        ];
+        assert_eq!(hours(&renormalize_after_edit(&day)), vec![2.0, 1.5, 4.5]);
+    }
+
+    /// A residual of at least 0.125 goes to the largest scaled entry, and on a tie
+    /// the stable `sortedByDescending` leaves the **earliest** of the maxima first —
+    /// the same first-wins rule `maxByOrNull` has, reached another way.
+    #[test]
+    fn the_residual_goes_to_the_earliest_of_the_tied_maxima() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 1.0).meeting().build(),
+            Row::new("2026-09-15", "A", 1.0).build(),
+            Row::new("2026-09-15", "B", 1.0).build(),
+            Row::new("2026-09-15", "C", 1.0).build(),
+        ];
+        let result = renormalize_after_edit(&day);
+        assert_eq!(hours(&result), vec![1.0, 2.5, 2.25, 2.25]);
+        assert_eq!(result.iter().map(|a| a.normalized_hours).sum::<f64>(), 8.0);
+    }
+
+    /// Below an eighth of an hour the residual is left on the table and the day
+    /// ends short. `>= 0.125`, so this is the open side of that boundary.
+    #[test]
+    fn a_residual_below_an_eighth_of_an_hour_is_left_on_the_table() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 1.15).meeting().build(),
+            Row::new("2026-09-15", "A", 4.0).build(),
+        ];
+        let result = renormalize_after_edit(&day);
+        assert_eq!(hours(&result), vec![1.15, 6.75]);
+        assert!(
+            result.iter().map(|a| a.normalized_hours).sum::<f64>() < 8.0,
+            "the tenth of an hour is not redistributed"
+        );
+    }
+
+    /// The scale truncates rather than rounds, and so does the residual pass — a
+    /// rounding port lands on 7.25 here and a truncating one on 7.0.
+    #[test]
+    fn the_scale_truncates_rather_than_rounds_even_after_the_residual_pass() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 0.85).meeting().build(),
+            Row::new("2026-09-15", "A", 4.0).build(),
+        ];
+        assert_eq!(hours(&renormalize_after_edit(&day)), vec![0.85, 7.0]);
+    }
+
+    /// `targetHours <= 0` is not a rounding case: with nothing left to scale into,
+    /// every scalable entry is set to a flat 0.25 and the day ends **over** 8h.
+    #[test]
+    fn when_fixed_entries_already_reach_eight_hours_every_scalable_entry_drops_to_a_flat_quarter() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 8.0).meeting().build(),
+            Row::new("2026-09-15", "A", 3.0).build(),
+            Row::new("2026-09-15", "B", 2.0).build(),
+        ];
+        let result = renormalize_after_edit(&day);
+        assert_eq!(hours(&result), vec![8.0, 0.25, 0.25]);
+        assert!(
+            result.iter().map(|a| a.normalized_hours).sum::<f64>() > FULL_DAY_HOURS,
+            "the day deliberately ends over 8h"
+        );
+    }
+
+    /// A manually fixed entry holds its hours here exactly as a meeting does.
+    #[test]
+    fn a_manually_fixed_entry_holds_its_hours_through_the_redistribution() {
+        let day = vec![
+            Row::new("2026-09-15", "F", 5.0).fixed().build(),
+            Row::new("2026-09-15", "A", 1.0).build(),
+        ];
+        assert_eq!(hours(&renormalize_after_edit(&day)), vec![5.0, 3.0]);
+    }
+
+    /// Nothing scalable: the list comes back as it went in, and the caller's redraw
+    /// plus the warning is what tells the operator why.
+    #[test]
+    fn no_scalable_entry_means_the_list_comes_back_untouched() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 3.0).meeting().build(),
+            Row::new("2026-09-15", "F", 2.0).fixed().build(),
+        ];
+        assert_eq!(renormalize_after_edit(&day), day);
+    }
+
+    /// The `associateBy { it.aggregate }` trap, ported as written: the map is keyed
+    /// by a **value**, so two actions sharing an aggregate collapse onto the last
+    /// one that claimed the key. A port mapping the scaled entries back by index
+    /// would leave the first at 2.0.
+    #[test]
+    fn two_actions_built_from_one_aggregate_collapse_onto_the_last_scaled_value() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).normalized(2.0).build(),
+            Row::new("2026-09-15", "A", 4.0).normalized(6.0).build(),
+        ];
+        assert_eq!(
+            day[0].aggregate, day[1].aggregate,
+            "the premise: the two actions share one aggregate value"
+        );
+        assert_eq!(hours(&renormalize_after_edit(&day)), vec![6.0, 6.0]);
+    }
+
+    /// Two actions whose aggregates differ by one field do **not** collapse, which
+    /// is what makes the test above an assertion about equality rather than about
+    /// the loop.
+    #[test]
+    fn two_actions_with_different_aggregates_keep_their_own_scaled_values() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).normalized(2.0).build(),
+            Row::new("2026-09-15", "B", 4.0).normalized(6.0).build(),
+        ];
+        assert_eq!(hours(&renormalize_after_edit(&day)), vec![2.0, 6.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The tail of prepareActions
+    // -----------------------------------------------------------------------
+
+    fn normalized(date: &str, devpro: &str, hours: f64, descriptions: &[&str]) -> NormalizedAggregate {
+        NormalizedAggregate {
+            original: DayProjectAggregate {
+                date: d(date),
+                chrono_project: "Work - DevPro - Work".to_string(),
+                total_hours: hours,
+                descriptions: descriptions.iter().map(|t| (*t).to_string()).collect(),
+                devpro_project_name: devpro.to_string(),
+                billability: "Billable".to_string(),
+                max_hours: None,
+            },
+            normalized_hours: hours,
+            is_meeting: false,
+        }
+    }
+
+    fn filler_entry(date: &str, devpro: &str, hours: f64) -> FillerEntry {
+        FillerEntry {
+            date: d(date),
+            devpro_project_name: devpro.to_string(),
+            task_title: "Internal work".to_string(),
+            billability: "NonBillable".to_string(),
+            hours,
+        }
+    }
+
+    fn borrowed_entry(date: &str, source: &str, devpro: &str, hours: f64) -> BorrowedEntry {
+        BorrowedEntry {
+            date: d(date),
+            source_date: d(source),
+            devpro_project_name: devpro.to_string(),
+            task_title: "Borrowed work".to_string(),
+            billability: "Billable".to_string(),
+            hours,
+        }
+    }
+
+    /// Every name on every day resolves to the same id map.
+    fn ids(days: &[&str], names: &[(&str, &str)]) -> IdsByDay {
+        let mut by_day = HashMap::new();
+        for day in days {
+            let mut map = HashMap::new();
+            for (name, id) in names {
+                map.insert((*name).to_string(), (*id).to_string());
+            }
+            by_day.insert(d(day), map);
+        }
+        by_day
+    }
+
+    /// The three lists are built in order and the whole is then sorted by
+    /// `(date, devproProjectName)`.
+    #[test]
+    fn the_three_kinds_of_proposal_are_sorted_by_date_then_project_name() {
+        let actions = build_actions(
+            &[normalized("2026-09-16", "Zeta", 4.0, &["Work"])],
+            &[filler_entry("2026-09-15", "Alpha", 2.0)],
+            &[borrowed_entry("2026-09-15", "2026-09-14", "Beta", 2.0)],
+            &ids(
+                &["2026-09-15", "2026-09-16"],
+                &[("Zeta", "z"), ("Alpha", "a"), ("Beta", "b")],
+            ),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+
+        let order: Vec<(NaiveDate, &str)> = actions
+            .iter()
+            .map(|a| (a.aggregate.date, a.aggregate.devpro_project_name.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                (d("2026-09-15"), "Alpha"),
+                (d("2026-09-15"), "Beta"),
+                (d("2026-09-16"), "Zeta")
+            ]
+        );
+    }
+
+    /// The markers are the strings `clean_chrono_entry` keys its display off, so
+    /// they are load-bearing rather than decorative; a borrowed entry also carries
+    /// the day it came from.
+    #[test]
+    fn a_filler_carries_the_filler_marker_and_a_borrowed_entry_its_marker_and_source_date() {
+        let actions = build_actions(
+            &[],
+            &[filler_entry("2026-09-15", "Alpha", 4.0)],
+            &[borrowed_entry("2026-09-15", "2026-09-14", "Beta", 4.0)],
+            &ids(&["2026-09-15"], &[("Alpha", "a"), ("Beta", "b")]),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+
+        assert_eq!(actions[0].aggregate.chrono_project, "[filler]");
+        assert!(actions[0].is_filler && !actions[0].is_borrowed);
+        assert_eq!(actions[0].source_date, None);
+
+        assert_eq!(actions[1].aggregate.chrono_project, "[borrowed]");
+        assert!(actions[1].is_borrowed && !actions[1].is_filler);
+        assert_eq!(actions[1].source_date, Some(d("2026-09-14")));
+    }
+
+    /// C12 at its primary site: the first description with the project suffix
+    /// stripped, and `"Development work"` when there are none.
+    #[test]
+    fn a_real_aggregates_title_is_the_first_description_cleaned() {
+        let actions = build_actions(
+            &[
+                normalized("2026-09-15", "Alpha", 4.0, &["Refactoring - Work - DevPro - Work"]),
+                normalized("2026-09-15", "Beta", 4.0, &[]),
+            ],
+            &[],
+            &[],
+            &ids(&["2026-09-15"], &[("Alpha", "a"), ("Beta", "b")]),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+        assert_eq!(actions[0].task_title, "Refactoring");
+        assert_eq!(actions[1].task_title, "Development work");
+    }
+
+    /// A day already holding a worklog for the project becomes an UPDATE carrying
+    /// that worklog's id; a day that does not is a CREATE with none.
+    #[test]
+    fn an_existing_worklog_turns_the_proposal_into_an_update_carrying_its_id() {
+        let existing = vec![(worklog("w-1", "a", "Anything"), d("2026-09-15"))];
+        let actions = build_actions(
+            &[
+                normalized("2026-09-15", "Alpha", 4.0, &["Work"]),
+                normalized("2026-09-15", "Beta", 4.0, &["Work"]),
+            ],
+            &[],
+            &[],
+            &ids(&["2026-09-15"], &[("Alpha", "a"), ("Beta", "b")]),
+            &existing,
+            8.0,
+        )
+        .expect("every name has an id");
+        assert_eq!(actions[0].action, ActionType::Update);
+        assert_eq!(actions[0].existing_worklog_id.as_deref(), Some("w-1"));
+        assert_eq!(actions[1].action, ActionType::Create);
+        assert_eq!(actions[1].existing_worklog_id, None);
+    }
+
+    /// The incumbent writes `projectIdMap[name]!!` here. A message naming the name
+    /// and the day beats a panic, and under D2 the day is half the answer.
+    #[test]
+    fn a_name_with_no_id_for_that_day_is_an_error_naming_both_the_name_and_the_day() {
+        let error = build_actions(
+            &[normalized("2026-09-16", "Alpha", 4.0, &["Work"])],
+            &[],
+            &[],
+            &ids(&["2026-09-15"], &[("Alpha", "a")]),
+            &[],
+            8.0,
+        )
+        .expect_err("the id map has no 2026-09-16");
+        let message = error.to_string();
+        assert!(message.contains("Alpha"), "names the project: {message}");
+        assert!(message.contains("2026-09-16"), "names the day: {message}");
+    }
+
+    /// The sort is stable, so two proposals on one project keep the order the three
+    /// lists put them in — the real aggregate before the filler.
+    #[test]
+    fn the_sort_is_stable_so_two_proposals_on_one_project_keep_their_order() {
+        let actions = build_actions(
+            &[normalized("2026-09-15", "Alpha", 4.0, &["Real work"])],
+            &[filler_entry("2026-09-15", "Alpha", 4.0)],
+            &[],
+            &ids(&["2026-09-15"], &[("Alpha", "a")]),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+        assert_eq!(actions[0].task_title, "Real work");
+        assert!(actions[1].is_filler);
+    }
+
+    /// `String.compareTo` compares UTF-16 code units, so a supplementary character
+    /// — whose leading surrogate is 0xD800 — sorts **before** U+FF3A. Code-point
+    /// order, which `str::cmp` gives, is the opposite.
+    #[test]
+    fn the_project_name_sort_is_javas_utf16_order_and_not_code_point_order() {
+        let astral = "\u{10000}A";
+        let halfwidth = "\u{FF3A}B";
+        assert!(
+            astral > halfwidth,
+            "the premise: Rust's own ordering puts the astral name second"
+        );
+
+        let actions = build_actions(
+            &[
+                normalized("2026-09-15", halfwidth, 4.0, &["Work"]),
+                normalized("2026-09-15", astral, 4.0, &["Work"]),
+            ],
+            &[],
+            &[],
+            &ids(&["2026-09-15"], &[(halfwidth, "h"), (astral, "s")]),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+        assert_eq!(actions[0].aggregate.devpro_project_name, astral);
+        assert_eq!(actions[1].aggregate.devpro_project_name, halfwidth);
+    }
+
+    /// `build_actions` runs the C14 adjustment before it sorts, so what comes out
+    /// already totals 8h for the day.
+    #[test]
+    fn build_actions_adjusts_the_day_to_eight_hours_before_sorting() {
+        let actions = build_actions(
+            &[
+                normalized("2026-09-15", "Alpha", 2.0, &["Work"]),
+                normalized("2026-09-15", "Beta", 3.0, &["Work"]),
+            ],
+            &[],
+            &[],
+            &ids(&["2026-09-15"], &[("Alpha", "a"), ("Beta", "b")]),
+            &[],
+            8.0,
+        )
+        .expect("every name has an id");
+        assert_eq!(hours(&actions), vec![2.0, 6.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // C25 — the draft table
+    // -----------------------------------------------------------------------
+
+    fn table_lines(actions: &[SettleAction]) -> Vec<String> {
+        draft_table(actions).lines().map(|l| l.to_string()).collect()
+    }
+
+    /// Every column has a floor, so a table of short cells still lines up with one
+    /// of long ones. The header is the floors laid end to end.
+    #[test]
+    fn every_column_is_at_least_its_floor_width() {
+        let lines = table_lines(&[Row::new("2026-09-15", "A", 8.0)
+            .chrono_project("CP")
+            .title("T")
+            .build()]);
+        assert_eq!(
+            lines[0],
+            "Date       | Chrono Project | Chrono Entry | DevPro Project | DevPro Task | Type     | Hours         | Action"
+        );
+    }
+
+    /// The separator is exactly as long as the header, and a row holding a
+    /// non-ASCII cell is exactly that long too — because every width and every pad
+    /// counts UTF-16 units. A port padding by `String::len` would push this row
+    /// eleven bytes past the separator and break the column rules for every
+    /// Cyrillic project name in the live config.
+    #[test]
+    fn a_row_with_a_non_ascii_cell_still_lines_up_with_the_header() {
+        let wide = "Проект Альфа Бета";
+        let lines = table_lines(&[Row::new("2026-09-15", wide, 8.0).build()]);
+        let header = &lines[0];
+        let separator = &lines[1];
+        let row = &lines[2];
+
+        assert_eq!(separator.chars().count(), utf16_len(header));
+        assert!(separator.chars().all(|c| c == '-'));
+        assert_eq!(utf16_len(row), utf16_len(header));
+        assert_ne!(
+            row.len(),
+            utf16_len(row),
+            "the premise: this row's byte length is not its display width"
+        );
+    }
+
+    /// The Chrono-entry column caps at 50 units and the cell is then cut to 49 plus
+    /// `…`. The width comes off the *untruncated* text, which is what makes the cap
+    /// and the cut two separate rules.
+    #[test]
+    fn the_chrono_entry_column_caps_at_fifty_and_the_cell_is_cut_to_fortynine_plus_an_ellipsis() {
+        let long = "A".repeat(60);
+        let lines = table_lines(&[
+            Row::new("2026-09-15", "P", 8.0)
+                .descriptions(&[&long])
+                .build(),
+        ]);
+        let expected_cell = format!("{}\u{2026}", "A".repeat(49));
+        assert_eq!(utf16_len(&expected_cell), 50);
+        assert!(
+            lines[2].contains(&expected_cell),
+            "the row holds the cut cell: {}",
+            lines[2]
+        );
+        assert!(!lines[2].contains(&long), "and not the whole description");
+    }
+
+    /// An entry whose hours changed shows both figures joined by U+2192; one whose
+    /// hours are within a hundredth of the original shows a single figure.
+    #[test]
+    fn an_entry_whose_hours_changed_shows_the_original_and_the_normalized_figure() {
+        let changed = table_lines(&[
+            Row::new("2026-09-15", "P", 8.0).original(6.0).build(),
+        ]);
+        assert!(changed[2].contains(" 6.00\u{2192} 8.00"), "{}", changed[2]);
+
+        let unchanged = table_lines(&[Row::new("2026-09-15", "P", 8.0).build()]);
+        assert!(!unchanged[2].contains('\u{2192}'), "{}", unchanged[2]);
+        assert!(unchanged[2].contains(" 8.00"), "{}", unchanged[2]);
+    }
+
+    /// C25 in the hours column. Java's `%.2f` is HALF_UP on the shortest decimal
+    /// representation, so 0.125 renders `0.13`; Rust's own `{:.2}` gives `0.12`.
+    /// `originalHours` is the raw Chrono total and is not quantized, so this is the
+    /// column where the two formatters actually meet.
+    #[test]
+    fn the_hours_column_rounds_half_up_the_way_java_does() {
+        let lines = table_lines(&[Row::new("2026-09-15", "P", 0.125).build()]);
+        assert!(lines[2].contains(" 0.13"), "{}", lines[2]);
+        assert_eq!(
+            format!("{:>5.2}", 0.125_f64),
+            " 0.12",
+            "the premise: Rust's own formatter disagrees"
+        );
+        assert_eq!(
+            lines.last().expect("a total line"),
+            "Total: 0.13 \u{2192} 0.13 hours, 1 entries"
+        );
+    }
+
+    /// The total line sums both columns and counts the rows.
+    #[test]
+    fn the_total_line_sums_both_hour_columns_and_counts_the_entries() {
+        let lines = table_lines(&[
+            Row::new("2026-09-15", "A", 4.0).original(3.0).build(),
+            Row::new("2026-09-15", "B", 4.0).original(2.0).build(),
+        ]);
+        assert_eq!(
+            lines.last().expect("a total line"),
+            "Total: 5.00 \u{2192} 8.00 hours, 2 entries"
+        );
+    }
+
+    /// No rows at all is a header of minimum widths and a zero total, not a panic —
+    /// the `?: floor` arm every caller rules out.
+    #[test]
+    fn an_empty_table_is_a_header_of_minimum_widths_and_a_zero_total() {
+        let lines = table_lines(&[]);
+        // Header, separator, no rows, separator again, total — the second separator
+        // is pushed unconditionally, so an empty table is four lines and not three.
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].len(), lines[1].len());
+        assert_eq!(lines[1], lines[2]);
+        assert_eq!(lines[3], "Total: 0.00 \u{2192} 0.00 hours, 0 entries");
+    }
+
+    /// The type column reads off `is_meeting` alone, so a borrowed meeting is still
+    /// `Meeting`, and the action column title-cases the enum name.
+    #[test]
+    fn the_type_and_action_columns_read_off_the_flags_they_are_named_for() {
+        let lines = table_lines(&[
+            Row::new("2026-09-15", "A", 4.0)
+                .borrowed("2026-09-14")
+                .meeting()
+                .action(ActionType::Update)
+                .build(),
+        ]);
+        assert!(lines[2].contains("Meeting"), "{}", lines[2]);
+        assert!(lines[2].ends_with("Update"), "{}", lines[2]);
+    }
+
+    // -----------------------------------------------------------------------
+    // The under-8h warning
+    // -----------------------------------------------------------------------
+
+    /// The glyph is U+26A0 U+FE0F followed by **two** spaces. The `project_ids`
+    /// fallback warning is a bare U+26A0 and one space; normalising the two to one
+    /// string breaks byte parity against the captures.
+    #[test]
+    fn the_under_eight_warning_carries_the_emoji_variation_selector_and_two_spaces() {
+        let text = under_eight_warning(&[Row::new("2026-09-15", "A", 6.0).build()])
+            .expect("a short day warns");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "");
+        assert_eq!(
+            lines[1],
+            "\u{26A0}\u{FE0F}  WARNING: Some days don't reach 8h due to borrowed+filler cap:"
+        );
+        assert_eq!(lines[2], "  2026-09-15: 6.00h (need 2.00h more)");
+    }
+
+    /// A full day produces no warning at all, so the prompt keeps its plain form.
+    #[test]
+    fn a_full_day_produces_no_under_eight_warning() {
+        assert_eq!(under_eight_warning(&[Row::new("2026-09-15", "A", 8.0).build()]), None);
+    }
+
+    /// The epsilon boundary `under_eight_days` applies: 7.99 is not short, 7.98 is.
+    #[test]
+    fn a_day_at_seven_ninety_nine_is_not_short_and_one_at_seven_ninety_eight_is() {
+        assert_eq!(under_eight_warning(&[Row::new("2026-09-15", "A", 7.99).build()]), None);
+        assert!(under_eight_warning(&[Row::new("2026-09-15", "A", 7.98).build()]).is_some());
+    }
+
+    /// Each short day gets its own line, in date order.
+    #[test]
+    fn every_short_day_gets_its_own_line_in_date_order() {
+        let text = under_eight_warning(&[
+            Row::new("2026-09-16", "A", 5.0).build(),
+            Row::new("2026-09-15", "B", 7.0).build(),
+        ])
+        .expect("both days are short");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[2], "  2026-09-15: 7.00h (need 1.00h more)");
+        assert_eq!(lines[3], "  2026-09-16: 5.00h (need 3.00h more)");
+    }
+
+    // -----------------------------------------------------------------------
+    // C15 — the dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_five_day_letters_map_to_the_five_branches() {
+        assert_eq!(day_choice(Some("a")), DayChoice::Approve);
+        assert_eq!(day_choice(Some("e")), DayChoice::Edit);
+        assert_eq!(day_choice(Some("d")), DayChoice::Delete);
+        assert_eq!(day_choice(Some("s")), DayChoice::Skip);
+        assert_eq!(day_choice(Some("c")), DayChoice::Cancel);
+    }
+
+    /// A bare Enter is **not** a re-prompt and not a skip: it abandons every
+    /// remaining day with `Unknown option. Cancelled.` A port that looped on a typo
+    /// is friendlier and is a different program.
+    #[test]
+    fn a_bare_enter_at_the_day_prompt_is_unknown_and_abandons_every_remaining_day() {
+        assert_eq!(day_choice(Some("")), DayChoice::Unknown);
+        assert_eq!(day_choice(Some("yes")), DayChoice::Unknown);
+        assert_eq!(day_choice(Some("A")), DayChoice::Unknown, "the caller lowercases first");
+    }
+
+    /// EOF and `c` reach the same branch, which is the one that prints `Cancelled.`
+    /// without the `Unknown option.` in front of it.
+    #[test]
+    fn eof_and_the_letter_c_both_cancel_through_the_same_branch() {
+        assert_eq!(day_choice(None), DayChoice::Cancel);
+        assert_eq!(batch_choice(None), BatchChoice::Cancel);
+    }
+
+    /// The batch prompt has no edit, no delete and no skip. `e` is `Edit` at one
+    /// prompt and `Unknown` — which cancels — at the other.
+    #[test]
+    fn the_batch_prompt_has_no_edit_delete_or_skip() {
+        assert_eq!(batch_choice(Some("a")), BatchChoice::Approve);
+        assert_eq!(batch_choice(Some("e")), BatchChoice::Unknown);
+        assert_eq!(batch_choice(Some("d")), BatchChoice::Unknown);
+        assert_eq!(batch_choice(Some("s")), BatchChoice::Unknown);
+        assert_eq!(day_choice(Some("e")), DayChoice::Edit, "the premise: the other prompt takes it");
+    }
+
+    /// Both prompt texts change when the warning fired — `[A]pprove` becomes
+    /// `[A]pprove anyway`, so the operator is told what they are approving.
+    #[test]
+    fn both_prompts_say_approve_anyway_once_the_warning_has_fired() {
+        assert_eq!(day_prompt(false), "\n[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all: ");
+        assert_eq!(
+            day_prompt(true),
+            "\n[A]pprove anyway / [E]dit / [D]elete / [S]kip / [C]ancel all: "
+        );
+        assert_eq!(batch_prompt(false), "\n[A]pprove / [C]ancel: ");
+        assert_eq!(batch_prompt(true), "\n[A]pprove anyway / [C]ancel: ");
+    }
+
+    /// `read_choice` trims with Java's rules and lowercases; `read_entry` trims only.
+    /// The missing `lowercase` is what makes `B` an invalid entry number rather than
+    /// a way back.
+    #[test]
+    fn the_outer_prompt_lowercases_its_line_and_the_inner_one_does_not() {
+        let mut outer = FakeConsole::typing(&["  A  "]);
+        assert_eq!(read_choice(&mut outer).as_deref(), Some("a"));
+
+        let mut inner = FakeConsole::typing(&["  B  "]);
+        assert_eq!(read_entry(&mut inner).as_deref(), Some("B"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The entry-number prompt
+    // -----------------------------------------------------------------------
+
+    /// `b`, an empty line and EOF all go back — and the empty line is the opposite
+    /// of what it means one prompt out, where it cancels the whole run.
+    #[test]
+    fn b_an_empty_line_and_eof_all_go_back_from_the_entry_prompt() {
+        assert_eq!(entry_selection(Some("b"), 3), EntrySelection::GoBack);
+        assert_eq!(entry_selection(Some(""), 3), EntrySelection::GoBack);
+        assert_eq!(entry_selection(None, 3), EntrySelection::GoBack);
+        assert_eq!(
+            day_choice(Some("")),
+            DayChoice::Unknown,
+            "the premise: the same empty line cancels at the outer prompt"
+        );
+    }
+
+    /// The listing is one-based and both ends are closed.
+    #[test]
+    fn the_entry_numbers_are_one_based_and_both_ends_are_closed() {
+        assert_eq!(entry_selection(Some("1"), 3), EntrySelection::Chosen(0));
+        assert_eq!(entry_selection(Some("3"), 3), EntrySelection::Chosen(2));
+        assert_eq!(entry_selection(Some("0"), 3), EntrySelection::Invalid);
+        assert_eq!(entry_selection(Some("4"), 3), EntrySelection::Invalid);
+    }
+
+    /// `toIntOrNull` reads every Unicode decimal digit here too.
+    #[test]
+    fn a_non_ascii_digit_selects_an_entry() {
+        assert_eq!(entry_selection(Some("\u{0663}"), 3), EntrySelection::Chosen(2));
+    }
+
+    /// The inner prompt does not lowercase, so `B` falls through to `toIntOrNull`,
+    /// fails, and becomes `Invalid entry number.` rather than a way back.
+    #[test]
+    fn an_uppercase_b_is_not_a_way_back_but_an_invalid_entry_number() {
+        assert_eq!(entry_selection(Some("B"), 3), EntrySelection::Invalid);
+        assert_eq!(
+            entry_selection(Some("b"), 3),
+            EntrySelection::GoBack,
+            "the premise: only the lowercase letter goes back"
+        );
+    }
+
+    /// `toIntOrNull()?.minus(1)` is Kotlin `Int` arithmetic, which wraps. A
+    /// `checked_sub` port would take a different branch and a plain `-` would panic
+    /// in a debug build.
+    #[test]
+    fn int_min_wraps_to_int_max_and_is_then_rejected_as_out_of_range() {
+        assert_eq!(entry_selection(Some("-2147483648"), 3), EntrySelection::Invalid);
+        assert_eq!(entry_selection(Some("-1"), 3), EntrySelection::Invalid);
+    }
+
+    // -----------------------------------------------------------------------
+    // C15 — edit and delete
+    // -----------------------------------------------------------------------
+
+    /// The two gates count different sets. A day of one meeting, one manually fixed
+    /// entry and one ordinary entry refuses `[E]` — the redistribution would have
+    /// nothing left to absorb it — and allows `[D]`.
+    #[test]
+    fn edit_refuses_a_day_whose_only_scalable_entry_is_one_while_delete_accepts_it() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 2.0).meeting().build(),
+            Row::new("2026-09-15", "F", 3.0).fixed().build(),
+            Row::new("2026-09-15", "W", 3.0).build(),
+        ];
+
+        let mut edit_io = FakeConsole::new();
+        assert_eq!(edit_entry(&day, &mut edit_io), day);
+        assert!(
+            edit_io
+                .out_text()
+                .contains("\u{2717} Cannot edit: need at least 2 work entries to redistribute hours."),
+            "{}",
+            edit_io.out_text()
+        );
+
+        let mut delete_io = FakeConsole::typing(&["1"]);
+        let after = delete_entry(&day, &mut delete_io);
+        assert_eq!(after.len(), 2, "delete went ahead on the same day");
+    }
+
+    #[test]
+    fn a_day_of_nothing_but_meetings_can_be_neither_edited_nor_deleted_from() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 4.0).meeting().build(),
+            Row::new("2026-09-15", "N", 4.0).meeting().build(),
+        ];
+
+        let mut edit_io = FakeConsole::new();
+        assert_eq!(edit_entry(&day, &mut edit_io), day);
+        assert!(edit_io.out_text().contains("No editable entries (meetings cannot be edited)."));
+
+        let mut delete_io = FakeConsole::new();
+        assert_eq!(delete_entry(&day, &mut delete_io), day);
+        assert!(delete_io.out_text().contains("No deletable entries (meetings cannot be deleted)."));
+    }
+
+    #[test]
+    fn delete_refuses_a_day_holding_a_single_deletable_entry() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 4.0).meeting().build(),
+            Row::new("2026-09-15", "W", 4.0).build(),
+        ];
+        let mut io = FakeConsole::new();
+        assert_eq!(delete_entry(&day, &mut io), day);
+        assert!(io.out_text().contains("\u{2717} Cannot delete: need at least 2 work entries."));
+    }
+
+    /// The chosen entry is marked manually fixed and its hours are **truncated** to
+    /// a quarter — 2.6 becomes 2.5, not 2.75 — and the rest redistribute around it.
+    #[test]
+    fn edit_marks_the_chosen_entry_fixed_and_truncates_the_hours_that_were_typed() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).build(),
+            Row::new("2026-09-15", "B", 4.0).build(),
+        ];
+        let mut io = FakeConsole::typing(&["1", "2.6"]);
+        let result = edit_entry(&day, &mut io);
+
+        assert_eq!(hours(&result), vec![2.5, 5.5]);
+        assert!(result[0].is_manually_fixed);
+        assert!(!result[1].is_manually_fixed);
+        assert!(io.out_text().contains("Current: 4.00h. New hours: "), "{}", io.out_text());
+    }
+
+    /// A value under a quarter and one that will not parse at all share a message,
+    /// and both leave the day exactly as it was.
+    #[test]
+    fn edit_refuses_a_value_below_a_quarter_and_an_unparseable_one_with_one_message() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).build(),
+            Row::new("2026-09-15", "B", 4.0).build(),
+        ];
+
+        for typed in ["0.1", "not a number", "0"] {
+            let mut io = FakeConsole::typing(&["1", typed]);
+            assert_eq!(edit_entry(&day, &mut io), day, "input {typed} changed the day");
+            assert!(
+                io.out_text().contains("Invalid. Must be >= 0.25"),
+                "input {typed}: {}",
+                io.out_text()
+            );
+        }
+    }
+
+    /// The 8h floor `deleteEntry` does not have: the edit is refused, the minimum
+    /// is named, and the day comes back untouched.
+    #[test]
+    fn edit_backs_out_when_the_result_would_fall_under_eight_hours_and_names_the_minimum() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 0.77).meeting().build(),
+            Row::new("2026-09-15", "A", 4.0).build(),
+            Row::new("2026-09-15", "B", 4.0).build(),
+        ];
+        let mut io = FakeConsole::typing(&["1", "0.25"]);
+        assert_eq!(edit_entry(&day, &mut io), day);
+        let text = io.out_text();
+        assert!(
+            text.contains("\u{2717} Cannot set 0.25h \u{2014} would result in 7.77h total (< 8h)"),
+            "{text}"
+        );
+        assert!(text.contains("  Minimum for this entry: 0.48h"), "{text}");
+    }
+
+    /// An empty hours line — and EOF, which is what a closed stdin gives — leaves
+    /// the day alone without a message.
+    #[test]
+    fn an_empty_hours_line_or_eof_leaves_the_day_alone() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).build(),
+            Row::new("2026-09-15", "B", 4.0).build(),
+        ];
+
+        let mut empty = FakeConsole::typing(&["1", ""]);
+        assert_eq!(edit_entry(&day, &mut empty), day);
+        assert!(!empty.out_text().contains("Invalid"), "{}", empty.out_text());
+
+        let mut eof = FakeConsole::typing(&["1"]);
+        assert_eq!(edit_entry(&day, &mut eof), day);
+    }
+
+    /// `b` at the entry prompt backs out before anything is asked about hours.
+    #[test]
+    fn going_back_from_the_entry_prompt_leaves_the_day_alone() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).build(),
+            Row::new("2026-09-15", "B", 4.0).build(),
+        ];
+        let mut io = FakeConsole::typing(&["b"]);
+        assert_eq!(edit_entry(&day, &mut io), day);
+        assert!(!io.out_text().contains("Current:"), "{}", io.out_text());
+    }
+
+    /// An out-of-range number is refused by name, and the listing marks a manually
+    /// fixed entry with `*` — a marker only the edit listing then explains.
+    #[test]
+    fn the_listing_marks_a_manually_fixed_entry_with_a_star_and_rejects_a_bad_number() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).title("Fixed one").fixed().build(),
+            Row::new("2026-09-15", "B", 2.0).title("Loose one").build(),
+            Row::new("2026-09-15", "C", 2.0).title("Other one").build(),
+        ];
+        let mut io = FakeConsole::typing(&["9"]);
+        assert_eq!(edit_entry(&day, &mut io), day);
+        let text = io.out_text();
+        assert!(text.contains("  1.* A: Fixed one (4.00h)"), "{text}");
+        assert!(text.contains("  2.  B: Loose one (2.00h)"), "{text}");
+        assert!(text.contains("  (* = manually fixed, won't scale)"), "{text}");
+        assert!(text.contains("Invalid entry number."), "{text}");
+    }
+
+    /// Delete removes exactly the chosen entry, says which, and redistributes.
+    #[test]
+    fn delete_removes_exactly_the_chosen_entry_and_redistributes_the_rest() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).title("Keep me").build(),
+            Row::new("2026-09-15", "B", 4.0).title("Drop me").build(),
+        ];
+        let mut io = FakeConsole::typing(&["2"]);
+        let result = delete_entry(&day, &mut io);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].task_title, "Keep me");
+        assert_eq!(result[0].normalized_hours, 8.0);
+        assert!(io.out_text().contains("\u{2713} Deleted: Drop me"), "{}", io.out_text());
+    }
+
+    /// Delete has **no** 8h floor: dropping an entry can leave the day short, the
+    /// next redraw shows the warning, and `[A]pprove anyway` is the answer. Making
+    /// this consistent with `editEntry` would remove a deliberate escape hatch.
+    #[test]
+    fn delete_may_leave_the_day_under_eight_hours_and_does_it_anyway() {
+        let day = vec![
+            Row::new("2026-09-15", "M", 0.77).meeting().build(),
+            Row::new("2026-09-15", "A", 4.0).title("Keep me").build(),
+            Row::new("2026-09-15", "B", 3.0).title("Drop me").build(),
+        ];
+        let mut io = FakeConsole::typing(&["2"]);
+        let result = delete_entry(&day, &mut io);
+
+        assert_eq!(hours(&result), vec![0.77, 7.0]);
+        let total: f64 = result.iter().map(|a| a.normalized_hours).sum();
+        assert!(total < FULL_DAY_HOURS, "the day is left at {total}h");
+        assert!(under_eight_warning(&result).is_some(), "and the redraw will say so");
+    }
+
+    /// The delete listing carries the same `*` marker and no explanation of it.
+    #[test]
+    fn the_delete_listing_marks_a_fixed_entry_but_does_not_explain_the_marker() {
+        let day = vec![
+            Row::new("2026-09-15", "A", 4.0).title("Fixed one").fixed().build(),
+            Row::new("2026-09-15", "B", 4.0).title("Loose one").build(),
+        ];
+        let mut io = FakeConsole::typing(&["b"]);
+        assert_eq!(delete_entry(&day, &mut io), day);
+        let text = io.out_text();
+        assert!(text.contains("  1.* A: Fixed one (4.00h)"), "{text}");
+        assert!(!text.contains("(* = manually fixed"), "{text}");
     }
 }
