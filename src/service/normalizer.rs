@@ -298,7 +298,17 @@ fn java_math_round(a: f64) -> i64 {
 }
 
 /// `kotlin.comparisons.maxOf(Double, Double)` is `Math.max`, which propagates NaN and
-/// orders `-0.0` below `0.0`. `f64::max` does neither.
+/// orders `-0.0` below `0.0`. `f64::max` does neither: it returns the *other* operand
+/// on NaN, and on two zeroes it is documented to return either one.
+///
+/// Measured on GraalVM JDK 21.0.11 — the toolchain `install.sh` builds the incumbent
+/// with — rather than recalled (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`).
+///
+/// Neither clause is reachable from this module's two call sites: both pass
+/// `HOUR_INCREMENT` as `a` and a `round_to_quarter` result as `b`, and
+/// `round_to_quarter` panics on NaN before `java_max` could see one. The
+/// transcription is kept and tested anyway, because the function is *named* as a JDK
+/// method and the next caller will take that at face value.
 fn java_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         return f64::NAN;
@@ -307,6 +317,41 @@ fn java_max(a: f64, b: f64) -> f64 {
         return if a.is_sign_negative() { b } else { a };
     }
     if a > b { a } else { b }
+}
+
+/// `kotlin.math.min(Double, Double)` is `Math.min` — the sibling of [`java_max`], and
+/// the one whose divergence is live rather than defensive.
+///
+/// `f64::min` disagrees twice, both measured on GraalVM JDK 21.0.11
+/// (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`): it discards NaN and hands back
+/// the other operand, and it is documented to return either operand when both are
+/// zero.
+///
+/// The NaN clause is reachable from a single config line. `min_hours`, `max_hours` and
+/// `max_synthetic_hours` all come from `~/.tt-config.yaml`, and the two YAML parsers
+/// agree exactly on which special floats they accept — kaml 0.57.0's
+/// `YamlScalar.toDouble()` takes nine literals (`.inf`, `.Inf`, `.INF`, `-.inf`,
+/// `-.Inf`, `-.INF`, `.nan`, `.NaN`, `.NAN`, read off its bytecode) and `serde_yaml`
+/// 0.9 parses all nine to the same values. So a `max_synthetic_hours: .nan` reaches
+/// the arithmetic on both sides: the incumbent computes NaN, fails
+/// `>= HOUR_INCREMENT`, and emits nothing, while a port built on `f64::min` would hand
+/// back the real gap and fill or borrow a whole day.
+///
+/// Lives here rather than in `filler.rs` and `borrower.rs`, which both used to carry
+/// their own copy — identical in behaviour but written differently, which is how two
+/// copies of a measured divergence start to drift.
+///
+/// The signed-zero test is `b.is_sign_negative()` where the JDK compares raw bits;
+/// inside the `a == 0.0 && b == 0.0` guard the two are the same predicate, and this
+/// spelling matches [`java_max`] directly above.
+pub fn java_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        return a;
+    }
+    if a == 0.0 && b == 0.0 && b.is_sign_negative() {
+        return b;
+    }
+    if a <= b { a } else { b }
 }
 
 fn sum_hours(entries: &[NormalizedAggregate]) -> f64 {
@@ -1420,5 +1465,57 @@ mod tests {
             result[0].original.chrono_project,
             "Operations - DevPro - Work"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The two JDK float primitives this module owns
+    // -----------------------------------------------------------------------
+
+    /// `Math.max`'s two departures from `f64::max`. Every expected value here was read
+    /// off GraalVM JDK 21.0.11, not derived.
+    ///
+    /// This test was written because the whole body of `java_max` could be replaced by
+    /// `a.max(b)` and all 490 tests still passed — measured, not suspected. The
+    /// clauses are unreachable from `normalize_day` (see the note on the function), so
+    /// nothing else in the suite can see the difference.
+    #[test]
+    fn java_max_propagates_nan_and_orders_the_zeroes_where_f64_max_does_neither() {
+        assert!(java_max(f64::NAN, 1.0).is_nan());
+        assert!(java_max(1.0, f64::NAN).is_nan());
+        // The divergence itself, so a port written on `f64::max` cannot pass.
+        assert_eq!(f64::NAN.max(1.0), 1.0);
+
+        assert!(java_max(0.0, -0.0).is_sign_positive());
+        assert!(java_max(-0.0, 0.0).is_sign_positive());
+        assert!(java_max(-0.0, -0.0).is_sign_negative());
+        assert!(java_max(0.0, 0.0).is_sign_positive());
+
+        assert_eq!(java_max(-3.0, 2.0), 2.0);
+        assert_eq!(java_max(0.25, 0.25), 0.25);
+    }
+
+    /// `Math.min`'s two departures from `f64::min`, same probe, same JDK. This is the
+    /// reachable one: `max_synthetic_hours: .nan` parses on both sides, so the answer
+    /// below decides whether a day gets silently filled to 8h or left alone.
+    ///
+    /// The `f64::min` assertions are the point — they pin the divergence rather than
+    /// the agreement, so a port that "simplifies" `java_min` back to `a.min(b)` fails
+    /// here instead of in production.
+    #[test]
+    fn java_min_propagates_nan_and_orders_the_zeroes_where_f64_min_does_neither() {
+        assert!(java_min(f64::NAN, 1.0).is_nan());
+        assert!(java_min(1.0, f64::NAN).is_nan());
+        assert_eq!(f64::NAN.min(1.0), 1.0);
+        assert_eq!(1.0_f64.min(f64::NAN), 1.0);
+
+        assert!(java_min(0.0, -0.0).is_sign_negative());
+        assert!(java_min(-0.0, 0.0).is_sign_negative());
+        assert!(java_min(-0.0, -0.0).is_sign_negative());
+        assert!(java_min(0.0, 0.0).is_sign_positive());
+
+        assert_eq!(java_min(1.0, 2.0), 1.0);
+        assert_eq!(java_min(2.0, 1.0), 1.0);
+        assert_eq!(java_min(-3.0, 2.0), -3.0);
+        assert_eq!(java_min(0.25, 0.0), 0.0);
     }
 }
