@@ -18,9 +18,12 @@
 //! in Rust does nothing of the kind on its own.
 
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate};
 use clap::Args;
 
+use crate::api::portal::TtApiClient;
+use crate::commands::Outcome;
+use crate::commands::settle::Console;
 use crate::fmt::java_dbl;
 use crate::model::{CreateWorklogRequest, NormalViewResponse, Project, UpdateWorklogRequest};
 
@@ -278,6 +281,254 @@ pub struct UpdateWorklogArgs {
 pub struct DeleteWorklogArgs {
     /// Worklog uniqueId to delete.
     pub id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Execution
+// ---------------------------------------------------------------------------
+//
+// Each subcommand is two functions, the split `settle.rs` already uses: a public
+// `run_*` that reads the environment and builds the client, and a `*_with` that
+// takes the client it is handed. The seam exists so that a stub origin can stand in
+// for the portal — three of these five mutate live worklogs other people read, so a
+// test against a stub is the only coverage their network path will ever get.
+//
+// **The cookie moves inside the fallible unit**, exactly as `settle::dispatch` moves
+// it. `getSessionCookie()` is called on the line after `runBlocking {` in all five
+// subcommands (`ApiCommand.kt:57,77,116,163,204`) and each one opens its `try` one
+// or two lines later, so a missing `~/.tt-cookie` throws past Clikt's only catch and
+// prints a stack trace. D3 turns that into an ordinary message and a non-zero code.
+
+/// `ApiCommand.kt:65,98,144,192,216` — five catch clauses, all
+/// `catch (e: Exception) { echo("✗ Error: ${e.message}", err = true) }`.
+///
+/// **This is deliberately not [`crate::commands::settle::report_failure`]'s two-armed
+/// shape.** `SettleCommand.kt:104-109` catches `ApiException` separately and prefixes
+/// it `✗ API Error: `; the `api` subcommands have one catch clause apiece and print
+/// `✗ Error: ` for every exception, an `ApiException` included. So an expired cookie
+/// under `api get-projects` reads `✗ Error: Authentication failed. Session cookie
+/// expired — run 'make auth'.` and under `settle` reads `✗ API Error: …`, on the same
+/// error object. Unifying the two prefixes would be a one-line tidy-up that changes
+/// the text of the most commonly hit failure this command has.
+///
+/// The `{error:#}` is anyhow's whole chain, where the incumbent's `e.message` is one
+/// message. They agree on everything this file can raise directly — an
+/// [`ApiError`](crate::api::portal::ApiError) arrives with no context on top of it, and
+/// [`tests::an_api_error_prints_its_own_message_under_the_plain_error_prefix`] pins
+/// that. They differ on a transport failure, where the outermost message alone would
+/// be `requesting https://…/contact/currentUser` with the refusal that caused it
+/// dropped — the same trade `settle.rs` documents and makes the same way.
+fn report_failure(error: &anyhow::Error, io: &mut dyn Console) {
+    io.err(&format!("\u{2717} Error: {error:#}"));
+}
+
+/// The one place a command body's result becomes an exit code.
+///
+/// D3: a failure exits non-zero, and the message is already on stderr — either
+/// through [`report_failure`] here, or, for a write the portal declined, through the
+/// `✗ Create failed` line the body itself printed. Returning [`Outcome`] rather than
+/// an error is what stops `main` rendering the same failure a second time.
+fn outcome_of(result: Result<Outcome>, io: &mut dyn Console) -> Outcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            report_failure(&error, io);
+            Outcome::Failed
+        }
+    }
+}
+
+/// `TtApiClient(getSessionCookie())`, as one fallible step.
+fn connect() -> Result<TtApiClient> {
+    TtApiClient::new(crate::cookie::session_cookie()?)
+}
+
+/// `ApiGetProjectsCommand.run` (`ApiCommand.kt:56-67`).
+pub async fn run_get_projects(args: &GetProjectsArgs, io: &mut dyn Console) -> Outcome {
+    // `.default(LocalDate.now())` at `:54`, read once so that a run that straddles
+    // midnight queries and prints the same date.
+    let today = Local::now().date_naive();
+    let result = match connect() {
+        Ok(client) => get_projects_with(&client, args, today, io).await,
+        Err(error) => Err(error),
+    };
+    outcome_of(result, io)
+}
+
+/// `ApiCommand.kt:60-63`.
+///
+/// C8: the date is queried **and** printed, and it is the same date in both places.
+/// The contact id comes from `getCurrentUser()` at `:60` — there is no configured
+/// id — and `assignedProjectsOnDate` takes the date as `dateFrom`, which is the whole
+/// reason this command exists in its date-scoped form. `today` is a parameter rather
+/// than a clock read, because a test that cannot fix today can only assert the shape
+/// of the header and not the date in it.
+async fn get_projects_with(
+    client: &TtApiClient,
+    args: &GetProjectsArgs,
+    today: NaiveDate,
+    io: &mut dyn Console,
+) -> Result<Outcome> {
+    let date = args.date.unwrap_or(today);
+    let user = client.get_current_user().await?;
+    let response = client
+        .get_assigned_projects(&user.unique_id, &date.to_string())
+        .await?;
+    io.out(&render_assigned_projects(date, &response.projects));
+    Ok(Outcome::Ok)
+}
+
+/// `ApiGetWorklogsCommand.run` (`ApiCommand.kt:76-100`).
+pub async fn run_get_worklogs(args: &GetWorklogsArgs, io: &mut dyn Console) -> Outcome {
+    let result = match connect() {
+        Ok(client) => get_worklogs_with(&client, args, io).await,
+        Err(error) => Err(error),
+    };
+    outcome_of(result, io)
+}
+
+/// `ApiCommand.kt:80-96`.
+///
+/// **`--date` is not converted and not validated** (`:74` has no `.convert`), so the
+/// text goes to `getNormalView` exactly as typed and the portal decides what a period
+/// is. `get-projects` parses its `--date` and this one does not; the asymmetry is the
+/// incumbent's.
+///
+/// The empty check is the one place the extracted renderer needs help: the Kotlin
+/// loop body runs zero times for a response with no days, so **nothing** is echoed,
+/// while [`render_worklogs`] returns an empty string that `io.out` would turn into a
+/// blank line.
+async fn get_worklogs_with(
+    client: &TtApiClient,
+    args: &GetWorklogsArgs,
+    io: &mut dyn Console,
+) -> Result<Outcome> {
+    let response = client.get_normal_view(&args.date).await?;
+    let body = render_worklogs(&response);
+    if !body.is_empty() {
+        io.out(&body);
+    }
+    Ok(Outcome::Ok)
+}
+
+/// `ApiCreateWorklogCommand.run` (`ApiCommand.kt:115-146`).
+pub async fn run_create_worklog(args: &CreateWorklogArgs, io: &mut dyn Console) -> Outcome {
+    let result = match connect() {
+        Ok(client) => create_worklog_with(&client, args, io).await,
+        Err(error) => Err(error),
+    };
+    outcome_of(result, io)
+}
+
+/// `ApiCommand.kt:118-145`, in the incumbent's order, which is load-bearing twice.
+///
+/// **The request is built first** (`:118-126`), and `hours.toDouble()` at `:123` is
+/// inside that construction — so an unparseable `--hours` ends the command before the
+/// header at `:128` has printed a single line. A port that echoed first would leave a
+/// six-line header on stdout in front of the failure.
+///
+/// **The header is printed before the call** and is therefore on stdout even when the
+/// write then fails.
+///
+/// **`checkStatus` tests `status == HttpStatusCode.OK`** (`TtApiClient.kt:65`), not
+/// `isSuccess()`, and `:137-142` *reads* the boolean it returns. So a 201 — the other
+/// status a create plausibly answers with — prints `✗ Create failed` on stderr, and
+/// under D3 that is a non-zero exit. The incumbent prints the same line and exits 0;
+/// the line is where the incumbent puts it and only the code changes.
+async fn create_worklog_with(
+    client: &TtApiClient,
+    args: &CreateWorklogArgs,
+    io: &mut dyn Console,
+) -> Result<Outcome> {
+    let request = create_request(args)?;
+
+    io.out(&render_create_worklog_header(
+        &args.date,
+        &args.project_id,
+        &args.task,
+        &args.hours,
+        &args.billability,
+        &args.expense_type,
+    ));
+
+    if client.create_worklog(&request).await? {
+        io.out("\u{2713} Created successfully!");
+        Ok(Outcome::Ok)
+    } else {
+        io.err("\u{2717} Create failed");
+        Ok(Outcome::Failed)
+    }
+}
+
+/// `ApiUpdateWorklogCommand.run` (`ApiCommand.kt:162-194`).
+pub async fn run_update_worklog(args: &UpdateWorklogArgs, io: &mut dyn Console) -> Outcome {
+    let result = match connect() {
+        Ok(client) => update_worklog_with(&client, args, io).await,
+        Err(error) => Err(error),
+    };
+    outcome_of(result, io)
+}
+
+/// `ApiCommand.kt:165-193`. The same five-step shape as the create path, with
+/// `:186-190`'s two messages naming the other verb — `✓ Updated successfully!` and
+/// `✗ Update failed`. The two bodies are near-identical in the source and their only
+/// visible differences are the endpoint, the header and these two words.
+async fn update_worklog_with(
+    client: &TtApiClient,
+    args: &UpdateWorklogArgs,
+    io: &mut dyn Console,
+) -> Result<Outcome> {
+    let request = update_request(args)?;
+
+    io.out(&render_update_worklog_header(
+        &args.id,
+        &args.date,
+        &args.project_id,
+        &args.task,
+        &args.hours,
+        &args.billability,
+        &args.expense_type,
+    ));
+
+    if client.update_worklog(&request).await? {
+        io.out("\u{2713} Updated successfully!");
+        Ok(Outcome::Ok)
+    } else {
+        io.err("\u{2717} Update failed");
+        Ok(Outcome::Failed)
+    }
+}
+
+/// `ApiDeleteWorklogCommand.run` (`ApiCommand.kt:203-218`).
+pub async fn run_delete_worklog(args: &DeleteWorklogArgs, io: &mut dyn Console) -> Outcome {
+    let result = match connect() {
+        Ok(client) => delete_worklog_with(&client, args, io).await,
+        Err(error) => Err(error),
+    };
+    outcome_of(result, io)
+}
+
+/// `ApiCommand.kt:206-217`. One header line, the call, one verdict.
+///
+/// The `== 200` gate bites harder here than on the two creates: `204 No Content` is
+/// the ordinary answer to a DELETE, and it comes back as `✗ Delete failed` on a
+/// worklog that is gone. That is the incumbent's behaviour and it is reproduced; it
+/// is also the reason the standing procedure after a write is to verify with
+/// `api get-worklogs` rather than to trust the line.
+async fn delete_worklog_with(
+    client: &TtApiClient,
+    args: &DeleteWorklogArgs,
+    io: &mut dyn Console,
+) -> Result<Outcome> {
+    io.out(&render_delete_worklog_header(&args.id));
+
+    if client.delete_worklog(&args.id).await? {
+        io.out("\u{2713} Deleted successfully!");
+        Ok(Outcome::Ok)
+    } else {
+        io.err("\u{2717} Delete failed");
+        Ok(Outcome::Failed)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1349,5 +1600,842 @@ mod tests {
             let error = parse_hours(raw).expect_err("this port refuses it");
             assert_eq!(error.to_string(), format!("For input string: \"{raw}\""));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The five command bodies, against a stub origin
+    // -----------------------------------------------------------------------
+    //
+    // Three of the five write to the live portal, so the stub is not a convenience
+    // here — it is the only oracle their network path can have. The stub replays
+    // canned responses in arrival order and ignores the query string, so a claim
+    // about *which* date was asked for is made against `requests()[n].target` and
+    // never against the ids that came back.
+    //
+    // **The D5 notice does not come through [`FakeConsole`].**
+    // `portal::report_and_raise` writes the two-line "session expired" instruction
+    // straight to `std::io::stderr()`, which is what D5 changed it to; only the
+    // `ApiException` that follows it reaches a [`Console`]. So the 401 test below
+    // asserts on the message and leaves the notice to `portal.rs`'s own tests, and
+    // running it prints those two lines into the test harness's stderr.
+
+    /// A [`Console`] that keeps what was written.
+    ///
+    /// `read_line` panics: no `api` subcommand prompts, and a port that grew a
+    /// confirmation prompt on a destructive write should fail loudly rather than
+    /// silently read EOF and carry on.
+    #[derive(Default)]
+    struct FakeConsole {
+        out: Vec<String>,
+        err: Vec<String>,
+    }
+
+    impl FakeConsole {
+        fn out_text(&self) -> String {
+            self.out.join("\n")
+        }
+
+        fn err_text(&self) -> String {
+            self.err.join("\n")
+        }
+    }
+
+    impl Console for FakeConsole {
+        fn out(&mut self, line: &str) {
+            self.out.push(line.to_string());
+        }
+
+        fn err(&mut self, line: &str) {
+            self.err.push(line.to_string());
+        }
+
+        fn read_line(&mut self) -> Option<String> {
+            panic!("no `api` subcommand reads from stdin");
+        }
+
+        fn present(&self) -> bool {
+            true
+        }
+    }
+
+    /// The same construction `settle.rs`'s tests use: a real client against a stub
+    /// origin, with the C31 bounds supplied so a test that means to fail fast does
+    /// not wait fifteen seconds to do it.
+    fn stub_client(base_url: &str) -> TtApiClient {
+        TtApiClient::with_base_url(
+            "session=test",
+            base_url,
+            crate::api::REQUEST_TIMEOUT,
+            crate::api::CONNECT_TIMEOUT,
+        )
+        .expect("a client against the stub")
+    }
+
+    /// A port that is bound long enough to learn its number and then closed, so that
+    /// a connect against it is refused immediately. This is the transport failure the
+    /// incumbent has no counterpart message for.
+    fn closed_origin() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a spare port");
+        let port = listener.local_addr().expect("the spare port").port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn user_body(unique_id: &str) -> String {
+        serde_json::to_string(&crate::model::CurrentUser {
+            unique_id: unique_id.to_string(),
+            full_name: "Yurii Buchchenko".to_string(),
+            email: "yurii.buchchenko@dev.pro".to_string(),
+        })
+        .expect("a currentUser body")
+    }
+
+    fn projects_body(contact: &str, projects: &[(&str, &str)]) -> String {
+        serde_json::to_string(&crate::model::AssignedProjectsResponse {
+            unique_id: contact.to_string(),
+            projects: projects
+                .iter()
+                .map(|(id, name)| project(name, id))
+                .collect(),
+        })
+        .expect("an assignedProjectsOnDate body")
+    }
+
+    fn worklogs_body(days: Vec<DateDetails>) -> String {
+        serde_json::to_string(&response(days)).expect("a normalView body")
+    }
+
+    fn get_projects_args(date: Option<&str>) -> GetProjectsArgs {
+        GetProjectsArgs {
+            date: date
+                .map(|text| NaiveDate::parse_from_str(text, "%Y-%m-%d").expect("a test date")),
+        }
+    }
+
+    fn some_day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 9, 21).expect("a real date")
+    }
+
+    // -- get-projects --------------------------------------------------------
+
+    /// `ApiCommand.kt:60-61`. There is no configured contact id anywhere in this
+    /// tool: the id in the `assignedProjectsOnDate` path is the one `getCurrentUser`
+    /// just answered with. Both halves are asserted, because a port that hardcoded an
+    /// id would still make one request and still print a plausible list.
+    #[tokio::test]
+    async fn the_contact_id_comes_from_current_user_and_the_two_reads_go_out_in_that_order() {
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("contact-77")),
+            crate::api::stub::json_200(&projects_body("contact-77", &[("id-a", "Alpha")])),
+        ]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            get_projects_with(
+                &stub_client(&portal.base_url),
+                &get_projects_args(Some("2026-09-21")),
+                some_day(),
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Ok);
+        let requests = portal.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].target, "/contact/currentUser");
+        assert!(
+            requests[1]
+                .target
+                .starts_with("/contact/contact-77/assignedProjectsOnDate"),
+            "the id must be the one currentUser answered with: {}",
+            requests[1].target
+        );
+        assert_eq!(
+            io.out_text(),
+            "Assigned projects as of 2026-09-21 (1):\n  Alpha: id-a"
+        );
+    }
+
+    /// C8, as the one assertion that ties the two halves together: the date in the
+    /// header and the date on the wire are the same date. The regression this guards
+    /// is in the project's own CLAUDE.md — the command passed a hardcoded
+    /// `2025-01-01` while printing something else, and reported a 2025 assignment set
+    /// as the current one.
+    #[tokio::test]
+    async fn the_date_the_header_prints_is_the_date_that_went_out_as_date_from() {
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("contact-77")),
+            crate::api::stub::json_200(&projects_body("contact-77", &[])),
+        ]);
+        let mut io = FakeConsole::default();
+
+        get_projects_with(
+            &stub_client(&portal.base_url),
+            &get_projects_args(Some("2026-01-15")),
+            some_day(),
+            &mut io,
+        )
+        .await
+        .expect("the stub answers both reads");
+
+        assert!(
+            io.out_text()
+                .starts_with("Assigned projects as of 2026-01-15 "),
+            "got:\n{}",
+            io.out_text()
+        );
+        assert!(
+            portal.requests()[1].target.contains("dateFrom=2026-01-15"),
+            "the queried date must be the printed one"
+        );
+    }
+
+    /// `.default(LocalDate.now())` at `:54`. With no `--date` the query carries
+    /// today, not a fixed date and not an empty parameter — the two shapes a port
+    /// reaches for when it forgets the default.
+    #[tokio::test]
+    async fn an_absent_date_option_queries_today_rather_than_a_fixed_one() {
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("contact-77")),
+            crate::api::stub::json_200(&projects_body("contact-77", &[])),
+        ]);
+        let mut io = FakeConsole::default();
+        let today = NaiveDate::from_ymd_opt(2026, 3, 4).expect("a real date");
+
+        get_projects_with(
+            &stub_client(&portal.base_url),
+            &get_projects_args(None),
+            today,
+            &mut io,
+        )
+        .await
+        .expect("the stub answers both reads");
+
+        assert!(
+            portal.requests()[1].target.contains("dateFrom=2026-03-04"),
+            "today must reach the wire zero-padded"
+        );
+        assert!(
+            io.out_text()
+                .starts_with("Assigned projects as of 2026-03-04 "),
+            "got:\n{}",
+            io.out_text()
+        );
+    }
+
+    /// An empty assignment list is an answer, not a failure: `  (none)` on stdout and
+    /// a zero exit. A port that treated "nothing assigned" as an error would invert
+    /// the exit code on the day the portal is right.
+    #[tokio::test]
+    async fn an_empty_assignment_list_is_a_successful_run_that_says_none() {
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("c")),
+            crate::api::stub::json_200(&projects_body("c", &[])),
+        ]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            get_projects_with(
+                &stub_client(&portal.base_url),
+                &get_projects_args(Some("2026-01-15")),
+                some_day(),
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Ok);
+        assert_eq!(
+            io.out_text(),
+            "Assigned projects as of 2026-01-15 (0):\n  (none)"
+        );
+        assert_eq!(io.err_text(), "");
+        let _ = portal.requests();
+    }
+
+    /// `ApiCommand.kt:64-66` has **one** catch clause and it prints `✗ Error: `.
+    /// `SettleCommand.kt:104-106` has a second one that prints `✗ API Error: ` for
+    /// exactly this error type. Reusing settle's two-armed renderer here would change
+    /// the text of every `api` failure, and nothing but this test would notice.
+    #[tokio::test]
+    async fn an_api_error_prints_its_own_message_under_the_plain_error_prefix() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            404,
+            "Not Found",
+            "text/plain",
+            "",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            get_projects_with(
+                &stub_client(&portal.base_url),
+                &get_projects_args(Some("2026-01-15")),
+                some_day(),
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(
+            outcome,
+            Outcome::Failed,
+            "D3: a failed command exits non-zero"
+        );
+        assert_eq!(io.err_text(), "\u{2717} Error: Resource not found.");
+        assert!(
+            !io.err_text().contains("API Error"),
+            "that prefix is settle's"
+        );
+        assert_eq!(io.out_text(), "", "nothing reaches stdout on a failed read");
+        let _ = portal.requests();
+    }
+
+    /// C17 through this command instead of through `settle`. The message is
+    /// `ApiException(401, …)`'s, so it arrives under the same plain prefix; the
+    /// two-line `make auth` notice is written by `portal::report_and_raise` straight
+    /// to the process's stderr (D5) and deliberately does not come through here.
+    #[tokio::test]
+    async fn a_dead_session_reports_the_make_auth_message_and_fails() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            401,
+            "Unauthorized",
+            "text/plain",
+            "",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            get_projects_with(
+                &stub_client(&portal.base_url),
+                &get_projects_args(Some("2026-01-15")),
+                some_day(),
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Error: Authentication failed. Session cookie expired \u{2014} run 'make auth'."
+        );
+        let _ = portal.requests();
+    }
+
+    /// `{error:#}` rather than `{error}`. A refused connection is wrapped with
+    /// `requesting <url>` in `portal.rs`, so the outermost message alone names the URL
+    /// and drops the refusal that caused it — an operator reading `✗ Error: requesting
+    /// https://…/contact/currentUser` learns nothing about why.
+    #[tokio::test]
+    async fn a_transport_failure_reports_the_whole_context_chain_not_just_its_outermost_message() {
+        let origin = closed_origin();
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            get_projects_with(
+                &stub_client(&origin),
+                &get_projects_args(Some("2026-01-15")),
+                some_day(),
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        let reported = io.err_text();
+        let head = format!("\u{2717} Error: requesting {origin}/contact/currentUser: ");
+        assert!(
+            reported.starts_with(&head),
+            "the context and then its cause, got:\n{reported}"
+        );
+        assert!(
+            reported.len() > head.len(),
+            "the cause must not be empty: the whole point is what follows the colon"
+        );
+    }
+
+    // -- get-worklogs --------------------------------------------------------
+
+    /// `ApiCommand.kt:74,80`. `--date` here carries **no** `.convert`, so the text is
+    /// handed to `getNormalView` exactly as typed — including a value no date parser
+    /// would accept. `get-projects` parses its `--date` and this one does not, and the
+    /// asymmetry is the incumbent's rather than an oversight to tidy up.
+    #[tokio::test]
+    async fn the_period_goes_to_the_portal_as_the_option_text_with_no_date_parsing_in_between() {
+        for raw in ["2026-09-18", "2026-09", "not-a-date"] {
+            let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+                &worklogs_body(vec![]),
+            )]);
+            let mut io = FakeConsole::default();
+
+            let outcome = outcome_of(
+                get_worklogs_with(
+                    &stub_client(&portal.base_url),
+                    &GetWorklogsArgs {
+                        date: raw.to_string(),
+                    },
+                    &mut io,
+                )
+                .await,
+                &mut io,
+            );
+
+            assert_eq!(outcome, Outcome::Ok, "`{raw}` is the portal's business");
+            let target = &portal.requests()[0].target;
+            assert!(
+                target.contains(&format!("period={raw}")),
+                "`{raw}` must reach the wire untouched, got: {target}"
+            );
+        }
+    }
+
+    /// `get-projects` opens with `getCurrentUser()` and `get-worklogs` does not
+    /// (`ApiCommand.kt:80` calls `getNormalView` straight away) — the `normalView`
+    /// endpoint scopes itself by the cookie. The stub is handed a second canned
+    /// response that a correct client never collects, so `seen()` rather than
+    /// `requests()`: joining would block on the response nobody fetches.
+    #[tokio::test]
+    async fn get_worklogs_asks_the_portal_once_and_never_for_the_current_user() {
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&worklogs_body(vec![])),
+            crate::api::stub::json_200(&user_body("contact-77")),
+        ]);
+        let mut io = FakeConsole::default();
+
+        get_worklogs_with(
+            &stub_client(&portal.base_url),
+            &GetWorklogsArgs {
+                date: "2026-09-18".to_string(),
+            },
+            &mut io,
+        )
+        .await
+        .expect("the stub answers the one read");
+
+        let seen = portal.seen();
+        assert_eq!(seen.len(), 1, "one request, and the spare stays untouched");
+        assert!(
+            seen[0].target.starts_with("/timeTracking/normalView"),
+            "got: {}",
+            seen[0].target
+        );
+    }
+
+    /// The renderer is already pinned against the capture; this pins the *wiring*,
+    /// which is the part that can print the block twice, print it per line with an
+    /// extra newline between, or route it to stderr.
+    #[tokio::test]
+    async fn the_captured_day_reaches_stdout_as_one_block() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &worklogs_body(vec![captured_day_2026_09_17()]),
+        )]);
+        let mut io = FakeConsole::default();
+
+        get_worklogs_with(
+            &stub_client(&portal.base_url),
+            &GetWorklogsArgs {
+                date: "2026-09-18".to_string(),
+            },
+            &mut io,
+        )
+        .await
+        .expect("the stub answers the one read");
+
+        assert_eq!(io.out, vec![CAPTURED_DAY_2026_09_17.to_string()]);
+        assert_eq!(io.err_text(), "");
+        let _ = portal.requests();
+    }
+
+    /// The Kotlin loop body runs zero times, so **nothing** is echoed — not a blank
+    /// line. [`render_worklogs`] returns the empty string for that case, and
+    /// `io.out("")` would print a newline, so the check in the command body is
+    /// load-bearing rather than defensive.
+    #[tokio::test]
+    async fn a_response_with_no_days_prints_nothing_rather_than_a_blank_line() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &worklogs_body(vec![]),
+        )]);
+        let mut io = FakeConsole::default();
+
+        get_worklogs_with(
+            &stub_client(&portal.base_url),
+            &GetWorklogsArgs {
+                date: "2026-09-18".to_string(),
+            },
+            &mut io,
+        )
+        .await
+        .expect("the stub answers the one read");
+
+        assert!(io.out.is_empty(), "got: {:?}", io.out);
+        let _ = portal.requests();
+    }
+
+    // -- create-worklog ------------------------------------------------------
+
+    /// **The trap.** `checkStatus` returns `status == HttpStatusCode.OK`
+    /// (`TtApiClient.kt:65`) and `ApiCommand.kt:137-142` reads that boolean, so a
+    /// `201 Created` — the other status a create plausibly answers with — prints
+    /// `✗ Create failed` on a worklog that *was* created. Ported as it is: the
+    /// incumbent's verdict on a 201 is "failed" and this is not the rewrite that
+    /// changes it. A port reaching for `is_success()` passes every other test here.
+    #[tokio::test]
+    async fn a_201_is_a_failed_create_because_the_incumbent_tests_for_exactly_200() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            201,
+            "Created",
+            "application/json",
+            "{}",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            create_worklog_with(&stub_client(&portal.base_url), &create_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(io.err_text(), "\u{2717} Create failed");
+        assert!(
+            !io.out_text().contains("Created successfully"),
+            "got:\n{}",
+            io.out_text()
+        );
+        assert!(
+            !io.err_text().contains("Error:"),
+            "a declined write is not an exception, so it carries no Error: line"
+        );
+        let _ = portal.requests();
+    }
+
+    /// The success path, pinned to the stream and the exact sentence. `✓` is U+2713,
+    /// read out of `ApiCommand.kt:139` rather than retyped.
+    #[tokio::test]
+    async fn a_200_prints_the_tick_line_on_stdout_and_succeeds() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            create_worklog_with(&stub_client(&portal.base_url), &create_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Ok);
+        assert_eq!(
+            io.out.last().map(String::as_str),
+            Some("\u{2713} Created successfully!")
+        );
+        assert_eq!(io.err_text(), "");
+        let _ = portal.requests();
+    }
+
+    /// `:128-134` runs **before** `:137`, so the six-line header is on stdout even
+    /// when the portal then refuses the write. A port that printed it afterwards would
+    /// lose it on exactly the run where the operator needs to know what was attempted.
+    #[tokio::test]
+    async fn the_create_header_is_on_stdout_even_when_the_write_is_refused() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            500,
+            "Internal Server Error",
+            "text/plain",
+            "boom",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            create_worklog_with(&stub_client(&portal.base_url), &create_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert!(
+            io.out_text()
+                .starts_with("Creating worklog:\n  Date: 2026-09-18"),
+            "got:\n{}",
+            io.out_text()
+        );
+        assert_eq!(io.err_text(), "\u{2717} Error: Server error (500): boom");
+        let _ = portal.requests();
+    }
+
+    /// `hours.toDouble()` at `:123` is inside the request construction at `:118-126`,
+    /// which runs before the header at `:128`. So a bad `--hours` is the whole output:
+    /// no header, and — the part a reader would not guess — no request either. A port
+    /// that echoed the header first would leave six lines on stdout describing a
+    /// worklog it never tried to write.
+    #[tokio::test]
+    async fn unparseable_hours_stop_the_create_before_its_header_and_before_the_request() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut args = create_args();
+        args.hours = "eight".to_string();
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            create_worklog_with(&stub_client(&portal.base_url), &args, &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert!(
+            io.out.is_empty(),
+            "nothing precedes the failure: {:?}",
+            io.out
+        );
+        assert_eq!(io.err_text(), "\u{2717} Error: For input string: \"eight\"");
+        assert!(
+            portal.seen().is_empty(),
+            "the portal must not be contacted at all"
+        );
+    }
+
+    /// The endpoint, the method and the one field that proves the parse happened:
+    /// `duration` goes out as the JSON number `5.25`, not as the option string. The
+    /// header prints `Hours: 5.25` from the raw text and the body carries the parsed
+    /// double, and the two rules are only distinguishable when they disagree — so the
+    /// second half of this uses `--hours 5.250`, which prints one way and posts the
+    /// other.
+    #[tokio::test]
+    async fn the_create_posts_the_parsed_duration_to_the_create_endpoint() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut args = create_args();
+        args.hours = "5.250".to_string();
+        let mut io = FakeConsole::default();
+
+        create_worklog_with(&stub_client(&portal.base_url), &args, &mut io)
+            .await
+            .expect("the stub answers 200");
+
+        assert!(
+            io.out_text().contains("\n  Hours: 5.250\n"),
+            "the header prints the option text: {}",
+            io.out_text()
+        );
+        let requests = portal.requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].target, "/worklog/create");
+        assert!(
+            requests[0].body.contains("\"duration\":5.25"),
+            "the body carries the parsed number: {}",
+            requests[0].body
+        );
+    }
+
+    // -- update-worklog ------------------------------------------------------
+
+    /// The same `== 200` gate on the other write. Stated separately because the two
+    /// command bodies are separate in the source and a port can get one right.
+    #[tokio::test]
+    async fn a_201_is_a_failed_update_too() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            201,
+            "Created",
+            "application/json",
+            "{}",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            update_worklog_with(&stub_client(&portal.base_url), &update_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(io.err_text(), "\u{2717} Update failed");
+        let _ = portal.requests();
+    }
+
+    /// `/worklog/update`, not `/worklog/create`, and the id travels in the body rather
+    /// than in the path. The two write bodies are near-identical in the source, which
+    /// is exactly how one ends up posting to the other's endpoint.
+    #[tokio::test]
+    async fn the_update_posts_to_its_own_endpoint_with_the_id_in_the_body() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut io = FakeConsole::default();
+
+        update_worklog_with(&stub_client(&portal.base_url), &update_args(), &mut io)
+            .await
+            .expect("the stub answers 200");
+
+        let requests = portal.requests();
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].target, "/worklog/update");
+        assert!(
+            requests[0]
+                .body
+                .contains("\"uniqueId\":\"b8bbd5da-c47e-4166-9700-a788a8e6b8c7\""),
+            "got: {}",
+            requests[0].body
+        );
+    }
+
+    /// `:187` says `Updated`, `:139` says `Created`. One word, two commands, and the
+    /// operator reads it to decide whether a worklog was added or edited.
+    #[tokio::test]
+    async fn the_update_success_line_names_updating_and_not_creating() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            update_worklog_with(&stub_client(&portal.base_url), &update_args(), &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Ok);
+        assert_eq!(
+            io.out.last().map(String::as_str),
+            Some("\u{2713} Updated successfully!")
+        );
+        assert!(
+            io.out_text().starts_with("Updating worklog: b8bbd5da-"),
+            "got:\n{}",
+            io.out_text()
+        );
+        assert!(!io.out_text().contains("Creat"), "got:\n{}", io.out_text());
+        let _ = portal.requests();
+    }
+
+    /// `:171` is the update's copy of the same out-of-`try` parse, so the update has
+    /// the same ordering contract: no header, no request.
+    #[tokio::test]
+    async fn unparseable_hours_stop_the_update_before_its_header_too() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut args = update_args();
+        args.hours = "".to_string();
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            update_worklog_with(&stub_client(&portal.base_url), &args, &mut io).await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert!(io.out.is_empty(), "got: {:?}", io.out);
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Error: empty String",
+            "`parseDouble(\"\")` has its own message"
+        );
+        assert!(portal.seen().is_empty());
+    }
+
+    // -- delete-worklog ------------------------------------------------------
+
+    /// `TtApiClient.kt:120-124`: a DELETE on `/worklog/{uniqueId}`, with the id in the
+    /// path and no body at all. There is deliberately no `IdempotencyKey` here — the
+    /// incumbent sets one on the two POSTs and not on this, and "completing the set"
+    /// would send the portal a header it has never seen from this tool.
+    #[tokio::test]
+    async fn the_delete_addresses_the_worklog_by_id_and_sends_no_body() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            delete_worklog_with(
+                &stub_client(&portal.base_url),
+                &DeleteWorklogArgs {
+                    id: "5382c445-9a05-453d-92e8-fdf8c0a521d9".to_string(),
+                },
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Ok);
+        assert_eq!(
+            io.out,
+            vec![
+                "Deleting worklog: 5382c445-9a05-453d-92e8-fdf8c0a521d9".to_string(),
+                "\u{2713} Deleted successfully!".to_string(),
+            ]
+        );
+        let requests = portal.requests();
+        assert_eq!(requests[0].method, "DELETE");
+        assert_eq!(
+            requests[0].target,
+            "/worklog/5382c445-9a05-453d-92e8-fdf8c0a521d9"
+        );
+        assert_eq!(requests[0].body, "");
+        assert!(
+            requests[0].header("IdempotencyKey").is_none(),
+            "the incumbent sets that header on the two POSTs only"
+        );
+    }
+
+    /// `204 No Content` is the ordinary REST answer to a successful DELETE, and the
+    /// `== 200` gate reports it as `✗ Delete failed` on a worklog that is gone. This
+    /// is the most reachable face of the gate — more so than the 201 on a create — and
+    /// it is ported rather than corrected, which is why the standing procedure after a
+    /// write is to verify with `api get-worklogs` rather than to trust the line.
+    #[tokio::test]
+    async fn a_204_is_a_failed_delete_because_the_gate_is_exactly_200() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            204,
+            "No Content",
+            "text/plain",
+            "",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            delete_worklog_with(
+                &stub_client(&portal.base_url),
+                &DeleteWorklogArgs {
+                    id: "wl-1".to_string(),
+                },
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(io.err_text(), "\u{2717} Delete failed");
+        assert_eq!(io.out_text(), "Deleting worklog: wl-1");
+        let _ = portal.requests();
+    }
+
+    /// `:206` precedes the call, so the header stands even when the portal refuses —
+    /// and on a 404 the write gate has no `Resource not found.` arm, so the message is
+    /// `Client error (404): ` with the response body after it, not the read gate's
+    /// sentence.
+    #[tokio::test]
+    async fn the_delete_header_is_on_stdout_even_when_the_delete_is_refused() {
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            404,
+            "Not Found",
+            "text/plain",
+            "no such worklog",
+        )]);
+        let mut io = FakeConsole::default();
+
+        let outcome = outcome_of(
+            delete_worklog_with(
+                &stub_client(&portal.base_url),
+                &DeleteWorklogArgs {
+                    id: "wl-1".to_string(),
+                },
+                &mut io,
+            )
+            .await,
+            &mut io,
+        );
+
+        assert_eq!(outcome, Outcome::Failed);
+        assert_eq!(io.out_text(), "Deleting worklog: wl-1");
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Error: Client error (404): no such worklog",
+            "the write gate has no 404 arm, so this is not `Resource not found.`"
+        );
+        let _ = portal.requests();
     }
 }
