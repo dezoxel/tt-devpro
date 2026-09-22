@@ -322,22 +322,40 @@ fn option_names(options: &[OptionSpec]) -> Vec<String> {
 /// 5. **Token-pass errors come out in token order**, finalization errors after
 ///    them: `api create-worklog --nosuchopt` prints the unknown option, then the
 ///    five missing ones.
-/// 6. **A token-pass error suppresses the positional pass, but not the
-///    missing-option pass.** `settle --dry-run extra --nosuchflag` reports only the
-///    unknown option — no `extra argument` — and `api delete-worklog --nosuchopt
-///    aaa bbb` reports only the unknown option, no `missing argument <id>` and no
-///    excess. Yet `api create-worklog --nosuchopt` still lists its five missing
-///    options. So the arguments are never finalized once a token failed, and the
-///    options always are.
+/// 6. **Finalization is three passes and they are suppressed differently.** The
+///    missing-required-argument and missing-required-option passes *always* run;
+///    the excess-argument pass and the descent (rule 7) do not run after a token
+///    error. `api delete-worklog --nosuchopt` reports the unknown option **and**
+///    `missing argument <id>`, while `api delete-worklog --nosuchopt aaa bbb`
+///    reports only the unknown option — `<id>` is satisfied by `aaa` and `bbb`'s
+///    excess is dropped — and `settle --dry-run extra --nosuchflag` likewise drops
+///    `extra`. Yet `api create-worklog --nosuchopt` still lists its five missing
+///    options. `delete-worklog` is the only command in the tree with a positional,
+///    which is the only reason the two halves of the argument pass can be told
+///    apart at all; an earlier reading of this rule suppressed both and lost the
+///    `missing argument <id>` line. Measured in
+///    `~/.cache/tt-devpro-rewrite/measurements/clikt/finalization-passes.md`.
+///
+///    **The order of `missing argument` before `missing option` is unobservable
+///    today**, because no command in this tree declares both a required positional
+///    and a required option, so no invocation can emit both. It is written in that
+///    order because Clikt finalizes arguments before options — not because
+///    anything measured it. Adding such a command would make it observable, and
+///    the order would have to be measured then rather than assumed to be this one.
 /// 7. **The subcommand is resolved in that same suppressed pass**, which is why
 ///    `api --nosuch get-projects` reports the unknown option against **`api`'s**
 ///    usage line and `get-projects` never runs.
 /// 8. **One excess token under a command that has subcommands is a subcommand
-///    miss; two are extra arguments.** `api no-such-thing` says
-///    `no such subcommand`, `api nosuchsub anotherone` says
-///    `got unexpected extra arguments (nosuchsub anotherone)`. Under a command with
-///    no subcommands one excess token is already an extra argument
-///    (`settle extra-arg`).
+///    miss, and that message replaces every other one; two excess tokens are extra
+///    arguments, and *that* message is the one dropped.** `api no-such-thing` says
+///    `no such subcommand`, and so do `api no-such-thing --nosuchflag` and
+///    `api --nosuchflag nosuchsub`: the unknown option is gone from both, on either
+///    side of the token. `api nosuchsub anotherone` says
+///    `got unexpected extra arguments (nosuchsub anotherone)`, but
+///    `api --nosuchflag nosuchsub anotherone` keeps the unknown option and drops
+///    the extra-arguments line instead. Under a command with no subcommands one
+///    excess token is already an extra argument (`settle extra-arg`), suppressible
+///    like any other (`settle extra --nosuchflag`). Same measurement file as rule 6.
 fn analyze(argv: &[String]) -> Verdict {
     let cmd = command();
     walk(&cmd, &[], argv)
@@ -498,8 +516,8 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
         return Verdict::Help(help);
     }
 
-    // Rule 6: the argument pass runs only on a clean token pass. Rule 7 puts the
-    // descent inside it.
+    // Rule 7: the descent runs only on a clean token pass, which is what makes
+    // `api --nosuch get-projects` report against api's usage line.
     if messages.is_empty() {
         if let Some(at) = descend_at {
             let name = tokens[at].as_str();
@@ -508,35 +526,50 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
             child.push(sub.get_name());
             return walk(sub, &child, &tokens[at + 1..]);
         }
+    }
 
-        let declared: Vec<(String, bool)> = cmd
-            .get_positionals()
-            .map(|arg| (arg.get_id().to_string(), arg.is_required_set()))
-            .collect();
+    let declared: Vec<(String, bool)> = cmd
+        .get_positionals()
+        .map(|arg| (arg.get_id().to_string(), arg.is_required_set()))
+        .collect();
 
-        if positionals.len() > declared.len() {
-            let excess = &positionals[declared.len()..];
-            if excess.len() == 1 && !subcommands.is_empty() {
-                messages.push(no_such_subcommand(
+    if positionals.len() > declared.len() {
+        let excess = &positionals[declared.len()..];
+        if excess.len() == 1 && !subcommands.is_empty() {
+            // Rule 8. This one neither accumulates nor is suppressed: it is the
+            // whole answer. `api --nosuchflag nosuchsub` and
+            // `api no-such-thing --nosuchflag` both print it alone, so returning
+            // here rather than pushing is the behaviour, not a shortcut.
+            return Verdict::Usage {
+                help,
+                messages: vec![no_such_subcommand(
                     excess[0],
                     &suggest(excess[0], &subcommands),
-                ));
-            } else {
-                let noun = if excess.len() == 1 {
-                    "argument"
-                } else {
-                    "arguments"
-                };
-                messages.push(format!(
-                    "got unexpected extra {noun} ({})",
-                    excess.join(" ")
-                ));
-            }
+                )],
+            };
         }
-        for (name, required) in declared.iter().skip(positionals.len()) {
-            if *required {
-                messages.push(format!("missing argument <{name}>"));
-            }
+        // …whereas the extra-arguments message is an ordinary accumulated one and
+        // a token error cancels it (`settle --dry-run extra --nosuchflag`).
+        if messages.is_empty() {
+            let noun = if excess.len() == 1 {
+                "argument"
+            } else {
+                "arguments"
+            };
+            messages.push(format!(
+                "got unexpected extra {noun} ({})",
+                excess.join(" ")
+            ));
+        }
+    }
+
+    // Rule 6: the missing-required-argument pass runs whatever the token pass did,
+    // exactly like the missing-option pass below it. Kept above that loop so the
+    // two orderings stay as they were — though nothing in this tree can observe
+    // which comes first; see the doc comment on `analyze`.
+    for (name, required) in declared.iter().skip(positionals.len()) {
+        if *required {
+            messages.push(format!("missing argument <{name}>"));
         }
     }
 
@@ -929,7 +962,7 @@ mod tests {
     /// (`-h -zz` prints help), it is specifically the unknown letter (`-hd` prints
     /// help although `-d` is left without a value), and it does not reach
     /// finalization (`api create-worklog -z` still lists its five missing options,
-    /// asserted in [`a_token_pass_error_cancels_the_argument_pass_but_not_the_missing_options`]).
+    /// asserted in `a_token_pass_error_cancels_only_the_excess_half_of_the_argument_pass`).
     ///
     /// Measured: `~/.cache/tt-devpro-rewrite/measurements/clikt/help-with-attached-value.md`
     /// for `-h=x`, and the probes beside it for the rest.
@@ -1320,22 +1353,54 @@ mod tests {
     }
 
     /// The single most surprising measured rule, and the one a plausible
-    /// implementation gets wrong in both directions: a token-pass error cancels the
-    /// **argument** pass and leaves the **option** pass alone.
+    /// implementation gets wrong in both directions: a token-pass error cancels
+    /// only the **excess** half of the argument pass. The missing-required half
+    /// runs whatever happened, exactly like the missing-option pass.
     ///
-    /// `settle --dry-run extra --nosuchflag` prints no `extra argument` line.
-    /// `api delete-worklog --nosuchopt aaa bbb` prints neither the excess nor
-    /// `missing argument <id>`. And yet `api create-worklog --nosuchopt` still lists
-    /// all five missing options.
+    /// This is the row that caught a real defect. The first reading of the rule
+    /// suppressed the whole argument pass, and the only command in the tree that
+    /// can tell the two halves apart is `api delete-worklog` — the only one with a
+    /// positional — so the port dropped its `missing argument <id>` line and a
+    /// fully green suite said nothing about it.
+    ///
+    /// Measured: `~/.cache/tt-devpro-rewrite/measurements/clikt/finalization-passes.md`
     #[test]
-    fn a_token_pass_error_cancels_the_argument_pass_but_not_the_missing_options() {
+    fn a_token_pass_error_cancels_only_the_excess_half_of_the_argument_pass() {
+        assert_eq!(
+            stderr_of(&["api", "delete-worklog", "--nosuchopt"]),
+            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\
+             \n\
+             Error: no such option --nosuchopt\n\
+             Error: missing argument <id>\n",
+            "the missing-required half runs after a token error"
+        );
+        assert_eq!(
+            stderr_of(&["api", "delete-worklog", "--help=x"]),
+            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\
+             \n\
+             Error: option --help does not take a value\n\
+             Error: missing argument <id>\n",
+            "and it does not care which kind of token error preceded it"
+        );
         assert_eq!(
             stderr_of(&["settle", "--dry-run", "extra", "--nosuchflag"]),
-            "Usage: tt-devpro settle [<options>]\n\nError: no such option --nosuchflag\n"
+            "Usage: tt-devpro settle [<options>]\n\nError: no such option --nosuchflag\n",
+            "the excess half does not run: no `got unexpected extra argument (extra)`"
         );
         assert_eq!(
             stderr_of(&["api", "delete-worklog", "--nosuchopt", "aaa", "bbb"]),
-            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\nError: no such option --nosuchopt\n"
+            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\nError: no such option --nosuchopt\n",
+            "`aaa` satisfies <id>, so nothing is missing, and `bbb`'s excess is cancelled"
+        );
+        assert_eq!(
+            stderr_of(&["api", "delete-worklog", "aaa", "bbb", "--nosuchopt"]),
+            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\nError: no such option --nosuchopt\n",
+            "and the cancellation does not depend on the token error being typed first"
+        );
+        assert_eq!(
+            stderr_of(&["api", "delete-worklog", "--help=x", "someid"]),
+            "Usage: tt-devpro api delete-worklog [<options>] <id>\n\nError: option --help does not take a value\n",
+            "a satisfied <id> emits nothing, so the one error stands alone"
         );
         assert_eq!(
             stderr_of(&["api", "create-worklog", "--nosuchopt"]),
@@ -1346,8 +1411,60 @@ mod tests {
              Error: missing option --project-id\n\
              Error: missing option --task\n\
              Error: missing option --billability\n\
-             Error: missing option --hours\n"
+             Error: missing option --hours\n",
+            "the missing-option pass was never in doubt"
         );
+    }
+
+    /// A subcommand miss is not one of the accumulated messages: it **replaces**
+    /// them, whichever side of it they were typed on. Two excess tokens behave the
+    /// opposite way round — then it is the extra-arguments line that yields.
+    ///
+    /// The contrast is what makes the rule testable. An implementation that leaves
+    /// the miss inside the suppressed pass answers `no such option --nosuchflag` to
+    /// row one; one that simply lifts the whole argument pass out of the
+    /// suppression answers two lines to row one and loses row four's suppression.
+    ///
+    /// Measured: `~/.cache/tt-devpro-rewrite/measurements/clikt/finalization-passes.md`
+    #[test]
+    fn a_subcommand_miss_replaces_the_token_errors_where_an_extra_argument_yields_to_them() {
+        assert_eq!(
+            stderr_of(&["api", "no-such-thing", "--nosuchflag"]),
+            "Usage: tt-devpro api [<options>] <command> [<args>]...\n\nError: no such subcommand no-such-thing\n",
+            "the unknown option is gone and the miss stands alone"
+        );
+        assert_eq!(
+            stderr_of(&["api", "--nosuchflag", "nosuchsub"]),
+            "Usage: tt-devpro api [<options>] <command> [<args>]...\n\nError: no such subcommand nosuchsub\n",
+            "including when the token error was typed first"
+        );
+        assert_eq!(
+            stderr_of(&["api", "nosuchsub", "--help=x"]),
+            "Usage: tt-devpro api [<options>] <command> [<args>]...\n\nError: no such subcommand nosuchsub\n",
+            "and when the token error is an attached value on --help"
+        );
+        assert_eq!(
+            stderr_of(&["api", "--nosuchflag", "nosuchsub", "anotherone"]),
+            "Usage: tt-devpro api [<options>] <command> [<args>]...\n\nError: no such option --nosuchflag\n",
+            "two excess tokens are an extra-arguments line, and that line yields instead"
+        );
+        assert_eq!(
+            stderr_of(&["api", "nosuchsub", "anotherone", "--nosuchflag"]),
+            "Usage: tt-devpro api [<options>] <command> [<args>]...\n\nError: no such option --nosuchflag\n",
+            "in either order"
+        );
+        assert_eq!(
+            stderr_of(&["settle", "extra", "--nosuchflag"]),
+            "Usage: tt-devpro settle [<options>]\n\nError: no such option --nosuchflag\n",
+            "settle has no subcommands, so its one stray token is an excess and yields too"
+        );
+        let helped = outcome(&["api", "nosuchsub", "-h"]);
+        assert_eq!(
+            helped.stdout.as_deref(),
+            Some(format!("{API_HELP}\n").as_str()),
+            "rule 1 is untouched by any of this: help still beats the miss"
+        );
+        assert_eq!(helped.code, 0);
     }
 
     /// The same rule one level up, and the reason it matters: a subcommand name is
