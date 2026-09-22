@@ -452,10 +452,18 @@ fn sanitize(s: &str) -> String {
 /// It was briefly two: this module and `settle_render` each hand-ported the regex
 /// independently, with different day-digit strategies — one arguing the greedy
 /// `\d{1,2}` needs no backtracking, the other backtracking explicitly. A differential
-/// run over **826 964** adversarial inputs (`scratchpad/datecmp/`) found both agreeing
-/// with `java.util.regex` and with each other on every one, so the collapse is a
+/// run over **826 964** adversarial inputs found both agreeing with
+/// `java.util.regex` and with each other on every one, so the collapse is a
 /// deduplication and not a behaviour change. `pub` rather than private for that reason,
 /// and no third copy when `borrower.rs` needs it.
+///
+/// That original corpus is gone with the directory that held it, and the other
+/// hand-port went with the collapse, so neither the number nor the
+/// two-implementations half is re-runnable. What is re-runnable was re-run on
+/// 2026-09-22 against `java.util.regex`:
+/// `~/.cache/tt-devpro-rewrite/measurements/datecmp/` rebuilds an adversarial
+/// corpus from the same brief — 3 338 100 inputs, 8 820 of them matching — and
+/// this function's output is byte-identical to the JVM's on every one.
 pub fn strip_date_suffix(s: &str) -> String {
     let (core, terminator) = split_final_line_terminator(s);
     match date_suffix_start(core) {
@@ -731,7 +739,8 @@ mod tests {
 
     /// The two strips fail **together** on a trailing line terminator, and the
     /// entry silently stops being a meeting. C12/C26, measured on JDK 21 running
-    /// the whole incumbent pipeline (`scratchpad/verify/Suffix.java`):
+    /// the whole incumbent pipeline, re-run 2026-09-22
+    /// (`~/.cache/tt-devpro-rewrite/measurements/suffix/Suffix.java`):
     ///
     /// ```text
     /// <Team Sync, Apr 8 2026 - Practices - DevPro - Work>    -> <Team Sync>

@@ -18,7 +18,7 @@
 //!
 //! **C31 — nothing is ever retried.** `connectAttempts = 1` and no retry plugin.
 //! `reqwest` adds no retries of its own, so the port inherits this by adding
-//! nothing — and [`tests::the_dependency_set_carries_no_retry_middleware`] is what
+//! nothing — and `tests::the_dependency_set_carries_no_retry_middleware` is what
 //! keeps it that way.
 //!
 //! **Redirects are followed for GET and HEAD only — measured in step 3, and not in

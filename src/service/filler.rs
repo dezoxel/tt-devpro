@@ -121,7 +121,8 @@ impl FillerRandom for ThreadFillerRandom {
 /// `f64::from_bits(until.to_bits() - 1)`. The bit trick walks the wrong way for a
 /// negative `until`, and at `±0.0` the subtraction underflows the bit pattern to
 /// `u64::MAX`, which is a NaN. Measured against `Math.nextDown` on JDK 21
-/// (`scratchpad/nextdown/`): they agree on `0.5`, `0.25`, `1.0` and
+/// (`~/.cache/tt-devpro-rewrite/measurements/nextdown/`, re-run 2026-09-22):
+/// they agree on `0.5`, `0.25`, `1.0` and
 /// `f64::MIN_POSITIVE_SUBNORMAL`, and diverge on `0.0`, `-0.0`, `-0.25` and `-1.0`.
 /// `f64::next_down()` is the faithful counterpart and is available on the declared
 /// MSRV of 1.87 (stabilised in 1.86), so there is nothing to trade off.
@@ -1477,8 +1478,10 @@ mod tests {
     /// get there: `(-1.0, -0.25, NEAR_ONE)` interpolates to `-0.2500000000000001`,
     /// already below the bound, so it returns the raw draw and proves nothing. Both
     /// pairs below were confirmed to take the branch on the JVM before being written
-    /// here (`scratchpad/nextdown/Force.java`), and the expected values are
-    /// `Math.nextDown`'s own output on JDK 21 rather than anything derived.
+    /// here (`~/.cache/tt-devpro-rewrite/measurements/nextdown/Force.java`, whose
+    /// re-run on 2026-09-22 shows both taking the step-down branch and the third
+    /// pair not), and the expected values are `Math.nextDown`'s own output on
+    /// JDK 21 rather than anything derived.
     ///
     /// The bit trick returns `-0.49999999999999994` for the first case and NaN for the
     /// second, so it fails either assertion.

@@ -41,7 +41,7 @@
 //!    identical action — two 0.5h meetings on the same project are exactly that.
 //!
 //! The one deliberate divergence from the incumbent is D2, and it lives in
-//! [`prepare_actions`]: project ids are resolved per day rather than once for the
+//! [`Settle::prepare_actions`]: project ids are resolved per day rather than once for the
 //! range's first day, `normalView` is fetched for every month the range spans
 //! rather than once, and filler budgets come from
 //! [`PeriodBudgets::calculate_if_configured`] per billing period. The plan's D2

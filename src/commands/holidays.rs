@@ -197,7 +197,7 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // Each fixed holiday in each of the three week positions.
-    // Weekday assignments measured on a JVM (`Oracle.java`), not derived.
+    // Weekday assignments measured on a JVM (`~/.cache/tt-devpro-rewrite/measurements/holidays/Oracle.java`), not derived.
     // ---------------------------------------------------------------------
 
     /// C4, `Holidays.kt:38,44`. New Year on a weekday, a Saturday and a Sunday.
@@ -268,7 +268,7 @@ mod tests {
 
     // ---------------------------------------------------------------------
     // The four floating holidays, over enough years to catch off-by-one in the
-    // hand-written adjusters. Dates measured on a JVM (`Oracle.java`).
+    // hand-written adjusters. Dates measured on a JVM (`~/.cache/tt-devpro-rewrite/measurements/holidays/Oracle.java`).
     // ---------------------------------------------------------------------
 
     /// C4, `Holidays.kt:47-48`. MLK Jr. Day = 3rd Monday of January. The span of
@@ -779,7 +779,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // The two hand-written adjusters, against JVM measurements.
+    // The two hand-written adjusters, against JVM measurements
+    // (`~/.cache/tt-devpro-rewrite/measurements/holidays/Oracle.java`).
     // ---------------------------------------------------------------------
 
     /// `observed` (`Holidays.kt:23-27`) shifts on exactly two of the seven

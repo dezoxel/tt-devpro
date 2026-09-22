@@ -318,10 +318,12 @@ fn find_override<'a>(description: &str, overrides: &'a [OverrideRule]) -> Option
 /// rejects. Comparing character by character cannot invent a character.
 ///
 /// Residual divergences stay, and there are **82**, not the one this comment
-/// first named. Measured 2026-09-21 by walking every code point on both sides
-/// (`scratchpad/casecmp/`, `Character.toUpperCase`/`toLowerCase` on JDK 21
-/// against the shipped helpers on rustc 1.91). They split cleanly in two, and
-/// neither half is closable here:
+/// first named. Measured by walking every code point on both sides —
+/// `Character.toUpperCase`/`toLowerCase` on JDK 21 against the shipped helpers
+/// on rustc 1.91 — and re-run 2026-09-22, which reproduced 82, 28 and 54
+/// exactly (`~/.cache/tt-devpro-rewrite/measurements/casecmp/`, which carries
+/// the probes and the command that produced them). They split cleanly in two,
+/// and neither half is closable here:
 ///
 /// - **28 are simple-vs-full gaps.** Java has a single-character mapping where
 ///   Rust's standard library exposes only the multi-character one, so the
@@ -2069,7 +2071,8 @@ mod tests {
     /// The two halves of the measured 82-code-point residue, one representative
     /// each, so the doc comment above cannot drift away from the behaviour.
     /// Both were read off a full code-point walk on JDK 21 versus rustc 1.91
-    /// (`scratchpad/casecmp/`), not reasoned about.
+    /// (`~/.cache/tt-devpro-rewrite/measurements/casecmp/`), not reasoned
+    /// about.
     ///
     /// Neither is reachable on this tool's data — the live 2 710-entry window
     /// holds 43 distinct non-ASCII characters and none of the 82 — which is why
