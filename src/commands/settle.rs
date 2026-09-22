@@ -4836,10 +4836,20 @@ mod tests {
             normalizer: &normalizer,
             today,
         };
+        // `dispatch`'s own routing, verbatim. It used to stop at the two read-only
+        // modes, which left the `!io.present()` branches of the other two — the C7
+        // contract the project's CLAUDE.md states as "when stdout is not a TTY,
+        // settle prints the readable --dry-run summary instead of prompting" —
+        // with no test able to reach them.
         if args.json {
             settle.run_json_mode(io).await
-        } else {
+        } else if args.dry_run {
             settle.run_dry_run_mode(io).await
+        } else if settle.explicit_range() {
+            let range = settle.resolve_range(io);
+            settle.run_batch_mode(range.from, range.to, io).await
+        } else {
+            settle.run_day_by_day_mode(io).await
         }
     }
 
@@ -5453,5 +5463,122 @@ mod tests {
             requests[0].target
         );
         let _ = portal.requests();
+    }
+
+    /// C7 on the batch surface (`:1925`). With no console there is nothing to
+    /// answer `[A]pprove / [C]ancel:`, so the readable summary stands in. The
+    /// failure this pins is the one the branch's own comment names: without it the
+    /// run falls through `read_line()` → `None` → `Cancelled.`, which reads like a
+    /// decision somebody made rather than a machine that was never asked.
+    #[tokio::test]
+    async fn a_batch_run_with_no_console_prints_the_summary_instead_of_prompting() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Deep work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        // Neither `--json` nor `--dry-run`: this is the surface that would otherwise
+        // write, which is what makes the absent console load-bearing.
+        let args = SettleArgs {
+            from: Some(d("2026-09-15")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::new().absent();
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the run completes");
+
+        assert!(io.out_text().contains("Deep work"), "{}", io.out_text());
+        assert!(
+            !io.out_text().contains("[A]pprove"),
+            "nothing may prompt a console that is not there: {}",
+            io.out_text()
+        );
+        assert!(
+            !io.out_text().contains("Cancelled."),
+            "an unasked question is not a cancellation: {}",
+            io.out_text()
+        );
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// C7 on the day-by-day surface (`:1959`), the default mode — no flags and no
+    /// range, so this is what a piped `tt-devpro settle` does. The per-day prompt
+    /// has the same problem as the batch one, and the branch answers it by fetching
+    /// every unfilled day up front and rendering the summary.
+    #[tokio::test]
+    async fn a_day_by_day_run_with_no_console_prints_the_summary_instead_of_prompting() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new().absent();
+
+        run_settle(
+            &SettleArgs::default(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the scan completes");
+
+        assert!(io.out_text().contains("Friday work"), "{}", io.out_text());
+        assert!(
+            !io.out_text().contains("days to settle:"),
+            "the interactive listing belongs to the branch that prompts: {}",
+            io.out_text()
+        );
+        assert!(
+            !io.out_text().contains("Cancelled."),
+            "an unasked question is not a cancellation: {}",
+            io.out_text()
+        );
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
     }
 }

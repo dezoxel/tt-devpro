@@ -273,6 +273,13 @@ impl PeriodBudgets {
     /// that built this from a hand-made period set still gets the right map. The
     /// periods are disjoint, so at most one can match; `None` means "no budget
     /// known", which every reader here already treats as unlimited.
+    ///
+    /// Test-only, and not because the read is uninteresting: the production path
+    /// needs `&mut` anyway (`has_remaining_budget` checks and `consume_budget`
+    /// writes back through the same borrow), so `for_date_mut` serves it alone and
+    /// a shared borrow has no caller left. Its job here is observation — the D2
+    /// third-facet assertions read a period's map without consuming it.
+    #[cfg(test)]
     pub fn for_date(&self, date: NaiveDate) -> Option<&Budgets> {
         self.by_period
             .iter()
@@ -289,6 +296,13 @@ impl PeriodBudgets {
     }
 
     /// The periods this was built for, in chronological order.
+    ///
+    /// Test-only. The incumbent's period *list* is enumerated at
+    /// `SettleCommand.kt:449` and then only `.firstOrNull()`'d at `:452` — D2's
+    /// third facet moved that enumeration inside `calculate_if_configured`
+    /// precisely so no caller can hold the list and pick one. Nothing in the port
+    /// should want this; the tests want it, to prove the enumeration happened.
+    #[cfg(test)]
     pub fn periods(&self) -> impl Iterator<Item = &BillingPeriod> {
         self.by_period.keys()
     }

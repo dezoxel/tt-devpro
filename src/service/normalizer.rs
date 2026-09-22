@@ -74,6 +74,12 @@ impl TimeNormalizer {
     }
 
     /// Every directory named `Calendar` the walk found, in walk order.
+    ///
+    /// Test-only, matching the incumbent, whose `calendarDirs` is `private` and
+    /// read at `TimeNormalizer.kt:136` alone. `normalize_day` reads the field
+    /// directly (`:223`), so exposing it buys production nothing; C26 — which
+    /// directories the depth-10 walk finds — is only checkable through it.
+    #[cfg(test)]
     pub fn calendar_dirs(&self) -> &[PathBuf] {
         &self.calendar_dirs
     }
