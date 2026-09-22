@@ -5,6 +5,7 @@
 
 mod commands;
 mod config;
+mod cookie;
 mod fmt;
 mod model;
 mod service;
