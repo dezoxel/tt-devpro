@@ -59,8 +59,8 @@ use crate::api::chrono::ChronoClient;
 use crate::api::portal::{ApiError, TtApiClient};
 use crate::commands::holidays::is_us_federal_holiday;
 use crate::commands::settle_render::{
-    action_label, clean_chrono_entry, entry_type, render_day_summary, task_title,
-    under_eight_days, weekday_abbreviation, weekday_name,
+    action_label, clean_chrono_entry, entry_type, render_day_summary, task_title, under_eight_days,
+    weekday_abbreviation, weekday_name,
 };
 use crate::commands::settle_window::{
     describe_not_final_days, last_settleable_day, nothing_to_settle_message, split_by_finality,
@@ -356,7 +356,10 @@ fn truncate_to_quarter_at_least_quarter(x: f64) -> f64 {
 /// idea, four lines apart in the incumbent; collapsing them into one is the tidy-up
 /// C27 exists to prevent, so both are here.
 fn truncate_to_quarter_max_quarter(x: f64) -> f64 {
-    java_max(QUARTER_HOUR, f64::from(java_to_int(x / QUARTER_HOUR)) * QUARTER_HOUR)
+    java_max(
+        QUARTER_HOUR,
+        f64::from(java_to_int(x / QUARTER_HOUR)) * QUARTER_HOUR,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -390,11 +393,7 @@ pub fn resolve_range(
     let range = ResolvedRange {
         // `LocalDate.now().withDayOfMonth(1)`. Day 1 exists in every month, so the
         // `expect` is unreachable for any date `chrono` can represent.
-        from: from.unwrap_or_else(|| {
-            today
-                .with_day(1)
-                .expect("every month has a first day")
-        }),
+        from: from.unwrap_or_else(|| today.with_day(1).expect("every month has a first day")),
         to: to.unwrap_or(cutoff),
     };
     let note = if range.to > cutoff {
@@ -445,7 +444,10 @@ pub fn find_existing<'a>(
 fn group_by_date_in_encounter_order(actions: &[SettleAction]) -> Vec<(NaiveDate, Vec<usize>)> {
     let mut groups: Vec<(NaiveDate, Vec<usize>)> = Vec::new();
     for (index, action) in actions.iter().enumerate() {
-        match groups.iter_mut().find(|(date, _)| *date == action.aggregate.date) {
+        match groups
+            .iter_mut()
+            .find(|(date, _)| *date == action.aggregate.date)
+        {
             Some((_, bucket)) => bucket.push(index),
             None => groups.push((action.aggregate.date, vec![index])),
         }
@@ -465,7 +467,9 @@ fn first_max_by_hours(actions: &[SettleAction], candidates: &[usize]) -> Option<
     for &index in candidates {
         match best {
             None => best = Some(index),
-            Some(current) if actions[current].normalized_hours < actions[index].normalized_hours => {
+            Some(current)
+                if actions[current].normalized_hours < actions[index].normalized_hours =>
+            {
                 best = Some(index)
             }
             Some(_) => {}
@@ -483,7 +487,10 @@ fn first_max_by_hours(actions: &[SettleAction], candidates: &[usize]) -> Option<
 /// not at all when the cap is already spent and the day is short. Which is to say
 /// the cap wins over the 8h target, which is what the under-8h warning exists to
 /// report.
-pub fn adjust_to_eight_hours(actions: &[SettleAction], max_synthetic_hours: f64) -> Vec<SettleAction> {
+pub fn adjust_to_eight_hours(
+    actions: &[SettleAction],
+    max_synthetic_hours: f64,
+) -> Vec<SettleAction> {
     let mut out: Vec<SettleAction> = Vec::with_capacity(actions.len());
     for (_, day) in group_by_date_in_encounter_order(actions) {
         out.extend(adjust_day(actions, &day, max_synthetic_hours));
@@ -491,7 +498,11 @@ pub fn adjust_to_eight_hours(actions: &[SettleAction], max_synthetic_hours: f64)
     out
 }
 
-fn adjust_day(actions: &[SettleAction], day: &[usize], max_synthetic_hours: f64) -> Vec<SettleAction> {
+fn adjust_day(
+    actions: &[SettleAction],
+    day: &[usize],
+    max_synthetic_hours: f64,
+) -> Vec<SettleAction> {
     let unchanged = || day.iter().map(|&i| actions[i].clone()).collect::<Vec<_>>();
     let replace = |index: usize, hours: f64| {
         day.iter()
@@ -805,12 +816,15 @@ pub fn build_actions(
 
     let mut adjusted = adjust_to_eight_hours(&all, max_synthetic_hours);
     adjusted.sort_by(|left, right| {
-        left.aggregate.date.cmp(&right.aggregate.date).then_with(|| {
-            utf16_cmp(
-                &left.aggregate.devpro_project_name,
-                &right.aggregate.devpro_project_name,
-            )
-        })
+        left.aggregate
+            .date
+            .cmp(&right.aggregate.date)
+            .then_with(|| {
+                utf16_cmp(
+                    &left.aggregate.devpro_project_name,
+                    &right.aggregate.devpro_project_name,
+                )
+            })
     });
     Ok(adjusted)
 }
@@ -1042,8 +1056,7 @@ fn batch_prompt(has_warning: bool) -> &'static str {
 /// `str::to_lowercase` also is. The two can differ on a handful of code points
 /// (final sigma, U+0130), none of which lowercase to `a`, `c`, `d`, `e` or `s`.
 fn read_choice(io: &mut dyn Console) -> Option<String> {
-    io.read_line()
-        .map(|line| kotlin_trim(&line).to_lowercase())
+    io.read_line().map(|line| kotlin_trim(&line).to_lowercase())
 }
 
 /// Reads one line and applies `trim()` only — the *inner* prompts' rule.
@@ -1356,7 +1369,10 @@ async fn apply_all(
                 .await
                 .map(|_| Some("Created")),
             ActionType::Update => match update_request(action) {
-                Ok(request) => client.update_worklog(&request).await.map(|_| Some("Updated")),
+                Ok(request) => client
+                    .update_worklog(&request)
+                    .await
+                    .map(|_| Some("Updated")),
                 Err(error) => Err(error),
             },
             ActionType::Skip => Ok(None),
@@ -1592,7 +1608,10 @@ impl Settle<'_> {
     /// bodies — so passing the first of each month is the same request the
     /// incumbent makes on the single-month path that every baseline capture
     /// exercises.
-    async fn existing_worklogs(&self, months: &[NaiveDate]) -> Result<Vec<(WorklogDetail, NaiveDate)>> {
+    async fn existing_worklogs(
+        &self,
+        months: &[NaiveDate],
+    ) -> Result<Vec<(WorklogDetail, NaiveDate)>> {
         let mut existing = Vec::new();
         for month in months {
             let view = self.tt_client.get_normal_view(&month.to_string()).await?;
@@ -1806,8 +1825,11 @@ impl Settle<'_> {
                 .tt_client
                 .get_assigned_projects(contact_id, &date.to_string())
                 .await?;
-            let resolution =
-                aggregator::resolve_project_ids(names, &response.projects, &self.config.project_ids)?;
+            let resolution = aggregator::resolve_project_ids(
+                names,
+                &response.projects,
+                &self.config.project_ids,
+            )?;
             for fallback in resolution.fallbacks {
                 if !fallbacks.contains(&fallback) {
                     fallbacks.push(fallback);
@@ -2162,7 +2184,7 @@ mod tests {
     use chrono::FixedOffset;
 
     use super::*;
-    use crate::model::{ChronoProject, ChronoTimeEntry};
+    use crate::model::{ChronoProject, ChronoTimeEntry, CurrentUser};
 
     // -----------------------------------------------------------------------
     // Fixtures
@@ -2259,6 +2281,7 @@ mod tests {
         source_date: Option<NaiveDate>,
         project_id: String,
         action: ActionType,
+        billability: String,
         existing_worklog_id: Option<String>,
         descriptions: Option<Vec<String>>,
     }
@@ -2279,6 +2302,7 @@ mod tests {
                 source_date: None,
                 project_id: "id-1".to_string(),
                 action: ActionType::Create,
+                billability: "Billable".to_string(),
                 existing_worklog_id: None,
                 descriptions: None,
             }
@@ -2332,6 +2356,21 @@ mod tests {
             self
         }
 
+        /// The aggregate's billability, which every other fixture leaves at
+        /// `Billable`. Needed because it travels verbatim into both write bodies
+        /// and into the `--json` output.
+        fn billability(mut self, billability: &str) -> Self {
+            self.billability = billability.to_string();
+            self
+        }
+
+        /// The id an UPDATE carries. `build` leaves it `None`, which is the state
+        /// [`update_request`] refuses.
+        fn existing(mut self, id: &str) -> Self {
+            self.existing_worklog_id = Some(id.to_string());
+            self
+        }
+
         /// Separates `normalized_hours` from the aggregate's `total_hours`, which is
         /// what the `orig→norm` column keys off and what makes two actions sharing
         /// one aggregate distinguishable.
@@ -2356,7 +2395,7 @@ mod tests {
                     total_hours: self.total_hours,
                     descriptions,
                     devpro_project_name: self.devpro_project,
-                    billability: "Billable".to_string(),
+                    billability: self.billability,
                     max_hours: None,
                 },
                 normalized_hours: self.normalized_hours,
@@ -2388,6 +2427,19 @@ mod tests {
             is_deletable: true,
             expense_type: None,
         }
+    }
+
+    /// A portal client pointed at a stub origin, with the C31 bounds supplied so
+    /// that a test that means to hit a timeout does not wait fifteen seconds for it.
+    /// The cookie is the same placeholder `portal.rs`'s own tests use.
+    fn stub_client(base_url: &str) -> TtApiClient {
+        TtApiClient::with_base_url(
+            "session=test",
+            base_url,
+            crate::api::REQUEST_TIMEOUT,
+            crate::api::CONNECT_TIMEOUT,
+        )
+        .expect("a client against the stub")
     }
 
     fn chrono_entry(id: i64, start: &str) -> ChronoTimeEntry {
@@ -2439,16 +2491,30 @@ mod tests {
     fn a_no_break_space_before_the_approval_cancels_instead_of_approving() {
         let typed = kotlin_trim("\u{00A0}a").to_lowercase();
         assert_eq!(day_choice(Some(&typed)), DayChoice::Unknown);
-        assert_eq!(day_choice(Some(&"\u{001C}a".trim().to_lowercase())), DayChoice::Unknown);
-        assert_eq!(day_choice(Some(&kotlin_trim("\u{001C}a").to_lowercase())), DayChoice::Approve);
+        assert_eq!(
+            day_choice(Some(&"\u{001C}a".trim().to_lowercase())),
+            DayChoice::Unknown
+        );
+        assert_eq!(
+            day_choice(Some(&kotlin_trim("\u{001C}a").to_lowercase())),
+            DayChoice::Approve
+        );
     }
 
     /// `Character.digit(c, 10)` reads every Unicode decimal digit, not only ASCII.
     #[test]
     fn to_int_or_null_reads_non_ascii_decimal_digits() {
         assert_eq!(to_int_or_null("\u{0663}"), Some(3), "Arabic-Indic three");
-        assert_eq!(to_int_or_null("\u{FF11}\u{FF12}"), Some(12), "fullwidth twelve");
-        assert_eq!(to_int_or_null("\u{1D7CE}"), Some(0), "mathematical bold zero");
+        assert_eq!(
+            to_int_or_null("\u{FF11}\u{FF12}"),
+            Some(12),
+            "fullwidth twelve"
+        );
+        assert_eq!(
+            to_int_or_null("\u{1D7CE}"),
+            Some(0),
+            "mathematical bold zero"
+        );
     }
 
     /// Mixing scripts is allowed — `Character.digit` is per character and nothing
@@ -2558,7 +2624,12 @@ mod tests {
     /// coincide for no month.
     #[test]
     fn an_unspecified_from_is_the_first_of_the_month_today_falls_in() {
-        let (range, note) = resolve_range(None, Some(d("2026-09-20")), d("2026-09-22"), d("2026-09-21"));
+        let (range, note) = resolve_range(
+            None,
+            Some(d("2026-09-20")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
         assert_eq!(range.from, d("2026-09-01"));
         assert_eq!(note, None);
     }
@@ -2567,11 +2638,20 @@ mod tests {
     /// otherwise yesterday. A port defaulting to `today` settles an unfinished day.
     #[test]
     fn an_unspecified_to_is_the_cutoff_and_not_today() {
-        let (range, _) = resolve_range(Some(d("2026-09-01")), None, d("2026-09-22"), d("2026-09-21"));
+        let (range, _) = resolve_range(
+            Some(d("2026-09-01")),
+            None,
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
         assert_eq!(range.to, d("2026-09-21"));
 
-        let (included, _) =
-            resolve_range(Some(d("2026-09-01")), None, d("2026-09-22"), d("2026-09-22"));
+        let (included, _) = resolve_range(
+            Some(d("2026-09-01")),
+            None,
+            d("2026-09-22"),
+            d("2026-09-22"),
+        );
         assert_eq!(included.to, d("2026-09-22"));
     }
 
@@ -2580,20 +2660,30 @@ mod tests {
     /// test here.
     #[test]
     fn a_to_past_the_cutoff_is_honoured_and_carries_the_stderr_note() {
-        let (range, note) =
-            resolve_range(Some(d("2026-09-01")), Some(d("2026-09-30")), d("2026-09-22"), d("2026-09-21"));
+        let (range, note) = resolve_range(
+            Some(d("2026-09-01")),
+            Some(d("2026-09-30")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
         assert_eq!(range.to, d("2026-09-30"));
         assert_eq!(
             note.as_deref(),
-            Some("\u{2139} Range ends 2026-09-30, past the last completed day (2026-09-21) \u{2014} those days' hours aren't final.")
+            Some(
+                "\u{2139} Range ends 2026-09-30, past the last completed day (2026-09-21) \u{2014} those days' hours aren't final."
+            )
         );
     }
 
     /// The boundary. `>` and not `>=`, so the cutoff itself is silent.
     #[test]
     fn a_to_exactly_on_the_cutoff_produces_no_note() {
-        let (_, note) =
-            resolve_range(None, Some(d("2026-09-21")), d("2026-09-22"), d("2026-09-21"));
+        let (_, note) = resolve_range(
+            None,
+            Some(d("2026-09-21")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
         assert_eq!(note, None);
     }
 
@@ -2603,14 +2693,25 @@ mod tests {
     /// made settleable.
     #[test]
     fn under_include_today_a_to_of_today_produces_no_note() {
-        let (range, note) =
-            resolve_range(None, Some(d("2026-09-22")), d("2026-09-22"), d("2026-09-22"));
+        let (range, note) = resolve_range(
+            None,
+            Some(d("2026-09-22")),
+            d("2026-09-22"),
+            d("2026-09-22"),
+        );
         assert_eq!(range.to, d("2026-09-22"));
         assert_eq!(note, None);
 
-        let (_, without_the_flag) =
-            resolve_range(None, Some(d("2026-09-22")), d("2026-09-22"), d("2026-09-21"));
-        assert!(without_the_flag.is_some(), "the premise: without the flag the same date is noted");
+        let (_, without_the_flag) = resolve_range(
+            None,
+            Some(d("2026-09-22")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert!(
+            without_the_flag.is_some(),
+            "the premise: without the flag the same date is noted"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2621,7 +2722,10 @@ mod tests {
     /// already holding any worklog for the project becomes an UPDATE of it.
     #[test]
     fn a_worklog_on_the_same_day_and_project_matches_whatever_it_is_called() {
-        let existing = vec![(worklog("w-1", "p-1", "Something else entirely"), d("2026-09-15"))];
+        let existing = vec![(
+            worklog("w-1", "p-1", "Something else entirely"),
+            d("2026-09-15"),
+        )];
         let found = find_existing(d("2026-09-15"), "p-1", &existing);
         assert_eq!(found.map(|w| w.unique_id.as_str()), Some("w-1"));
     }
@@ -2773,7 +2877,12 @@ mod tests {
     /// whatever the portal says about them.
     #[test]
     fn weekends_are_never_offered_even_at_zero_hours() {
-        let days = vec![d("2026-09-18"), d("2026-09-19"), d("2026-09-20"), d("2026-09-21")];
+        let days = vec![
+            d("2026-09-18"),
+            d("2026-09-19"),
+            d("2026-09-20"),
+            d("2026-09-21"),
+        ];
         assert_eq!(
             unfilled_days(&days, &HashMap::new()),
             vec![d("2026-09-18"), d("2026-09-21")]
@@ -2899,7 +3008,10 @@ mod tests {
             Row::new("2026-09-15", "B", 3.0).build(),
             Row::new("2026-09-15", "M", 1.0).meeting().build(),
         ];
-        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![2.0, 5.0, 1.0]);
+        assert_eq!(
+            hours(&adjust_to_eight_hours(&day, 4.0)),
+            vec![2.0, 5.0, 1.0]
+        );
     }
 
     /// `maxByOrNull` returns the **first** maximum. Rust's `max_by` returns the
@@ -2912,7 +3024,10 @@ mod tests {
             Row::new("2026-09-15", "B", 3.0).build(),
             Row::new("2026-09-15", "M", 1.0).meeting().build(),
         ];
-        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![4.0, 3.0, 1.0]);
+        assert_eq!(
+            hours(&adjust_to_eight_hours(&day, 4.0)),
+            vec![4.0, 3.0, 1.0]
+        );
     }
 
     /// Neither a meeting nor a manually fixed entry is a candidate, so a day
@@ -2924,7 +3039,10 @@ mod tests {
             Row::new("2026-09-15", "F", 2.0).fixed().build(),
             Row::new("2026-09-15", "W", 1.0).build(),
         ];
-        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![3.0, 2.0, 3.0]);
+        assert_eq!(
+            hours(&adjust_to_eight_hours(&day, 4.0)),
+            vec![3.0, 2.0, 3.0]
+        );
     }
 
     /// A synthetic entry moves only when there is no real one to move.
@@ -2972,9 +3090,14 @@ mod tests {
         let day = vec![
             Row::new("2026-09-15", "M", 2.0).meeting().build(),
             Row::new("2026-09-15", "F", 2.0).filler().build(),
-            Row::new("2026-09-15", "B", 2.0).borrowed("2026-09-14").build(),
+            Row::new("2026-09-15", "B", 2.0)
+                .borrowed("2026-09-14")
+                .build(),
         ];
-        assert_eq!(hours(&adjust_to_eight_hours(&day, 4.0)), vec![2.0, 2.0, 2.0]);
+        assert_eq!(
+            hours(&adjust_to_eight_hours(&day, 4.0)),
+            vec![2.0, 2.0, 2.0]
+        );
     }
 
     /// Nothing scalable at all — the day is left exactly as it arrived rather than
@@ -3171,7 +3294,12 @@ mod tests {
     // The tail of prepareActions
     // -----------------------------------------------------------------------
 
-    fn normalized(date: &str, devpro: &str, hours: f64, descriptions: &[&str]) -> NormalizedAggregate {
+    fn normalized(
+        date: &str,
+        devpro: &str,
+        hours: f64,
+        descriptions: &[&str],
+    ) -> NormalizedAggregate {
         NormalizedAggregate {
             original: DayProjectAggregate {
                 date: d(date),
@@ -3282,7 +3410,12 @@ mod tests {
     fn a_real_aggregates_title_is_the_first_description_cleaned() {
         let actions = build_actions(
             &[
-                normalized("2026-09-15", "Alpha", 4.0, &["Refactoring - Work - DevPro - Work"]),
+                normalized(
+                    "2026-09-15",
+                    "Alpha",
+                    4.0,
+                    &["Refactoring - Work - DevPro - Work"],
+                ),
                 normalized("2026-09-15", "Beta", 4.0, &[]),
             ],
             &[],
@@ -3406,7 +3539,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn table_lines(actions: &[SettleAction]) -> Vec<String> {
-        draft_table(actions).lines().map(|l| l.to_string()).collect()
+        draft_table(actions)
+            .lines()
+            .map(|l| l.to_string())
+            .collect()
     }
 
     /// Every column has a floor, so a table of short cells still lines up with one
@@ -3452,11 +3588,9 @@ mod tests {
     #[test]
     fn the_chrono_entry_column_caps_at_fifty_and_the_cell_is_cut_to_fortynine_plus_an_ellipsis() {
         let long = "A".repeat(60);
-        let lines = table_lines(&[
-            Row::new("2026-09-15", "P", 8.0)
-                .descriptions(&[&long])
-                .build(),
-        ]);
+        let lines = table_lines(&[Row::new("2026-09-15", "P", 8.0)
+            .descriptions(&[&long])
+            .build()]);
         let expected_cell = format!("{}\u{2026}", "A".repeat(49));
         assert_eq!(utf16_len(&expected_cell), 50);
         assert!(
@@ -3471,9 +3605,7 @@ mod tests {
     /// hours are within a hundredth of the original shows a single figure.
     #[test]
     fn an_entry_whose_hours_changed_shows_the_original_and_the_normalized_figure() {
-        let changed = table_lines(&[
-            Row::new("2026-09-15", "P", 8.0).original(6.0).build(),
-        ]);
+        let changed = table_lines(&[Row::new("2026-09-15", "P", 8.0).original(6.0).build()]);
         assert!(changed[2].contains(" 6.00\u{2192} 8.00"), "{}", changed[2]);
 
         let unchanged = table_lines(&[Row::new("2026-09-15", "P", 8.0).build()]);
@@ -3530,13 +3662,11 @@ mod tests {
     /// `Meeting`, and the action column title-cases the enum name.
     #[test]
     fn the_type_and_action_columns_read_off_the_flags_they_are_named_for() {
-        let lines = table_lines(&[
-            Row::new("2026-09-15", "A", 4.0)
-                .borrowed("2026-09-14")
-                .meeting()
-                .action(ActionType::Update)
-                .build(),
-        ]);
+        let lines = table_lines(&[Row::new("2026-09-15", "A", 4.0)
+            .borrowed("2026-09-14")
+            .meeting()
+            .action(ActionType::Update)
+            .build()]);
         assert!(lines[2].contains("Meeting"), "{}", lines[2]);
         assert!(lines[2].ends_with("Update"), "{}", lines[2]);
     }
@@ -3564,13 +3694,19 @@ mod tests {
     /// A full day produces no warning at all, so the prompt keeps its plain form.
     #[test]
     fn a_full_day_produces_no_under_eight_warning() {
-        assert_eq!(under_eight_warning(&[Row::new("2026-09-15", "A", 8.0).build()]), None);
+        assert_eq!(
+            under_eight_warning(&[Row::new("2026-09-15", "A", 8.0).build()]),
+            None
+        );
     }
 
     /// The epsilon boundary `under_eight_days` applies: 7.99 is not short, 7.98 is.
     #[test]
     fn a_day_at_seven_ninety_nine_is_not_short_and_one_at_seven_ninety_eight_is() {
-        assert_eq!(under_eight_warning(&[Row::new("2026-09-15", "A", 7.99).build()]), None);
+        assert_eq!(
+            under_eight_warning(&[Row::new("2026-09-15", "A", 7.99).build()]),
+            None
+        );
         assert!(under_eight_warning(&[Row::new("2026-09-15", "A", 7.98).build()]).is_some());
     }
 
@@ -3607,7 +3743,11 @@ mod tests {
     fn a_bare_enter_at_the_day_prompt_is_unknown_and_abandons_every_remaining_day() {
         assert_eq!(day_choice(Some("")), DayChoice::Unknown);
         assert_eq!(day_choice(Some("yes")), DayChoice::Unknown);
-        assert_eq!(day_choice(Some("A")), DayChoice::Unknown, "the caller lowercases first");
+        assert_eq!(
+            day_choice(Some("A")),
+            DayChoice::Unknown,
+            "the caller lowercases first"
+        );
     }
 
     /// EOF and `c` reach the same branch, which is the one that prints `Cancelled.`
@@ -3626,14 +3766,21 @@ mod tests {
         assert_eq!(batch_choice(Some("e")), BatchChoice::Unknown);
         assert_eq!(batch_choice(Some("d")), BatchChoice::Unknown);
         assert_eq!(batch_choice(Some("s")), BatchChoice::Unknown);
-        assert_eq!(day_choice(Some("e")), DayChoice::Edit, "the premise: the other prompt takes it");
+        assert_eq!(
+            day_choice(Some("e")),
+            DayChoice::Edit,
+            "the premise: the other prompt takes it"
+        );
     }
 
     /// Both prompt texts change when the warning fired — `[A]pprove` becomes
     /// `[A]pprove anyway`, so the operator is told what they are approving.
     #[test]
     fn both_prompts_say_approve_anyway_once_the_warning_has_fired() {
-        assert_eq!(day_prompt(false), "\n[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all: ");
+        assert_eq!(
+            day_prompt(false),
+            "\n[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all: "
+        );
         assert_eq!(
             day_prompt(true),
             "\n[A]pprove anyway / [E]dit / [D]elete / [S]kip / [C]ancel all: "
@@ -3684,7 +3831,10 @@ mod tests {
     /// `toIntOrNull` reads every Unicode decimal digit here too.
     #[test]
     fn a_non_ascii_digit_selects_an_entry() {
-        assert_eq!(entry_selection(Some("\u{0663}"), 3), EntrySelection::Chosen(2));
+        assert_eq!(
+            entry_selection(Some("\u{0663}"), 3),
+            EntrySelection::Chosen(2)
+        );
     }
 
     /// The inner prompt does not lowercase, so `B` falls through to `toIntOrNull`,
@@ -3704,7 +3854,10 @@ mod tests {
     /// in a debug build.
     #[test]
     fn int_min_wraps_to_int_max_and_is_then_rejected_as_out_of_range() {
-        assert_eq!(entry_selection(Some("-2147483648"), 3), EntrySelection::Invalid);
+        assert_eq!(
+            entry_selection(Some("-2147483648"), 3),
+            EntrySelection::Invalid
+        );
         assert_eq!(entry_selection(Some("-1"), 3), EntrySelection::Invalid);
     }
 
@@ -3726,9 +3879,9 @@ mod tests {
         let mut edit_io = FakeConsole::new();
         assert_eq!(edit_entry(&day, &mut edit_io), day);
         assert!(
-            edit_io
-                .out_text()
-                .contains("\u{2717} Cannot edit: need at least 2 work entries to redistribute hours."),
+            edit_io.out_text().contains(
+                "\u{2717} Cannot edit: need at least 2 work entries to redistribute hours."
+            ),
             "{}",
             edit_io.out_text()
         );
@@ -3747,11 +3900,19 @@ mod tests {
 
         let mut edit_io = FakeConsole::new();
         assert_eq!(edit_entry(&day, &mut edit_io), day);
-        assert!(edit_io.out_text().contains("No editable entries (meetings cannot be edited)."));
+        assert!(
+            edit_io
+                .out_text()
+                .contains("No editable entries (meetings cannot be edited).")
+        );
 
         let mut delete_io = FakeConsole::new();
         assert_eq!(delete_entry(&day, &mut delete_io), day);
-        assert!(delete_io.out_text().contains("No deletable entries (meetings cannot be deleted)."));
+        assert!(
+            delete_io
+                .out_text()
+                .contains("No deletable entries (meetings cannot be deleted).")
+        );
     }
 
     #[test]
@@ -3762,7 +3923,10 @@ mod tests {
         ];
         let mut io = FakeConsole::new();
         assert_eq!(delete_entry(&day, &mut io), day);
-        assert!(io.out_text().contains("\u{2717} Cannot delete: need at least 2 work entries."));
+        assert!(
+            io.out_text()
+                .contains("\u{2717} Cannot delete: need at least 2 work entries.")
+        );
     }
 
     /// The chosen entry is marked manually fixed and its hours are **truncated** to
@@ -3779,7 +3943,11 @@ mod tests {
         assert_eq!(hours(&result), vec![2.5, 5.5]);
         assert!(result[0].is_manually_fixed);
         assert!(!result[1].is_manually_fixed);
-        assert!(io.out_text().contains("Current: 4.00h. New hours: "), "{}", io.out_text());
+        assert!(
+            io.out_text().contains("Current: 4.00h. New hours: "),
+            "{}",
+            io.out_text()
+        );
     }
 
     /// A value under a quarter and one that will not parse at all share a message,
@@ -3793,7 +3961,11 @@ mod tests {
 
         for typed in ["0.1", "not a number", "0"] {
             let mut io = FakeConsole::typing(&["1", typed]);
-            assert_eq!(edit_entry(&day, &mut io), day, "input {typed} changed the day");
+            assert_eq!(
+                edit_entry(&day, &mut io),
+                day,
+                "input {typed} changed the day"
+            );
             assert!(
                 io.out_text().contains("Invalid. Must be >= 0.25"),
                 "input {typed}: {}",
@@ -3832,7 +4004,11 @@ mod tests {
 
         let mut empty = FakeConsole::typing(&["1", ""]);
         assert_eq!(edit_entry(&day, &mut empty), day);
-        assert!(!empty.out_text().contains("Invalid"), "{}", empty.out_text());
+        assert!(
+            !empty.out_text().contains("Invalid"),
+            "{}",
+            empty.out_text()
+        );
 
         let mut eof = FakeConsole::typing(&["1"]);
         assert_eq!(edit_entry(&day, &mut eof), day);
@@ -3855,7 +4031,10 @@ mod tests {
     #[test]
     fn the_listing_marks_a_manually_fixed_entry_with_a_star_and_rejects_a_bad_number() {
         let day = vec![
-            Row::new("2026-09-15", "A", 4.0).title("Fixed one").fixed().build(),
+            Row::new("2026-09-15", "A", 4.0)
+                .title("Fixed one")
+                .fixed()
+                .build(),
             Row::new("2026-09-15", "B", 2.0).title("Loose one").build(),
             Row::new("2026-09-15", "C", 2.0).title("Other one").build(),
         ];
@@ -3864,7 +4043,10 @@ mod tests {
         let text = io.out_text();
         assert!(text.contains("  1.* A: Fixed one (4.00h)"), "{text}");
         assert!(text.contains("  2.  B: Loose one (2.00h)"), "{text}");
-        assert!(text.contains("  (* = manually fixed, won't scale)"), "{text}");
+        assert!(
+            text.contains("  (* = manually fixed, won't scale)"),
+            "{text}"
+        );
         assert!(text.contains("Invalid entry number."), "{text}");
     }
 
@@ -3881,7 +4063,11 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].task_title, "Keep me");
         assert_eq!(result[0].normalized_hours, 8.0);
-        assert!(io.out_text().contains("\u{2713} Deleted: Drop me"), "{}", io.out_text());
+        assert!(
+            io.out_text().contains("\u{2713} Deleted: Drop me"),
+            "{}",
+            io.out_text()
+        );
     }
 
     /// Delete has **no** 8h floor: dropping an entry can leave the day short, the
@@ -3900,14 +4086,20 @@ mod tests {
         assert_eq!(hours(&result), vec![0.77, 7.0]);
         let total: f64 = result.iter().map(|a| a.normalized_hours).sum();
         assert!(total < FULL_DAY_HOURS, "the day is left at {total}h");
-        assert!(under_eight_warning(&result).is_some(), "and the redraw will say so");
+        assert!(
+            under_eight_warning(&result).is_some(),
+            "and the redraw will say so"
+        );
     }
 
     /// The delete listing carries the same `*` marker and no explanation of it.
     #[test]
     fn the_delete_listing_marks_a_fixed_entry_but_does_not_explain_the_marker() {
         let day = vec![
-            Row::new("2026-09-15", "A", 4.0).title("Fixed one").fixed().build(),
+            Row::new("2026-09-15", "A", 4.0)
+                .title("Fixed one")
+                .fixed()
+                .build(),
             Row::new("2026-09-15", "B", 4.0).title("Loose one").build(),
         ];
         let mut io = FakeConsole::typing(&["b"]);
@@ -3915,5 +4107,1351 @@ mod tests {
         let text = io.out_text();
         assert!(text.contains("  1.* A: Fixed one (4.00h)"), "{text}");
         assert!(!text.contains("(* = manually fixed"), "{text}");
+    }
+
+    // -----------------------------------------------------------------------
+    // C18 / C19 — building the two write bodies from an action
+    // -----------------------------------------------------------------------
+
+    /// `SettleCommand.kt:876-883`. Six fields are copied off the action and
+    /// `expenseType` is the literal `"None"` — not the absent value the other four
+    /// optionals take, and not the empty string. A port that left it `None` sends a
+    /// `null` the portal has never been sent by this tool.
+    #[test]
+    fn a_create_request_copies_the_action_and_pins_expense_type_to_the_literal_none() {
+        let action = Row::new("2026-09-18", "Delivery Practices", 0.5)
+            .title("AI Heads Sync")
+            .billability("NonBillable")
+            .project_id("cf84fdca-4809-4678-98b1-2e7cc56537c0")
+            .build();
+
+        let request = create_request(&action);
+
+        assert_eq!(request.worklog_date, "2026-09-18");
+        assert_eq!(
+            request.project_unique_id,
+            "cf84fdca-4809-4678-98b1-2e7cc56537c0"
+        );
+        assert_eq!(request.task_title, "AI Heads Sync");
+        assert_eq!(request.billability, "NonBillable");
+        assert_eq!(request.duration, 0.5);
+        assert_eq!(request.expense_type.as_deref(), Some("None"));
+    }
+
+    /// The duration is `normalizedHours` (`:881`), which is the whole point of the
+    /// command: the aggregate's `totalHours` is what Chrono recorded and the
+    /// normalized figure is what gets filed. A port that sent the total would post
+    /// unnormalized hours and every other assertion here would still pass.
+    #[test]
+    fn a_create_request_sends_the_normalized_hours_and_not_the_aggregates_total() {
+        let action = Row::new("2026-09-18", "Alpha", 6.0).normalized(2.5).build();
+        assert_eq!(action.aggregate.total_hours, 6.0, "the premise");
+        assert_eq!(create_request(&action).duration, 2.5);
+        assert_eq!(
+            update_request(
+                &Row::new("2026-09-18", "Alpha", 6.0)
+                    .normalized(2.5)
+                    .existing("w-1")
+                    .build()
+            )
+            .expect("an id is present")
+            .duration,
+            2.5,
+            "and the update path reads the same field"
+        );
+    }
+
+    /// C18's null set. `CreateWorklogRequest` has five optional fields and the
+    /// settle path names exactly one of them, so the other four ride out as
+    /// `null` — which is what the captured body shows and what the portal accepts.
+    #[test]
+    fn the_only_optional_field_a_create_request_fills_is_expense_type() {
+        let request = create_request(&Row::new("2026-09-18", "Alpha", 1.0).build());
+        assert_eq!(request.description, None);
+        assert_eq!(request.overtime, None);
+        assert_eq!(request.pif, None);
+        assert_eq!(request.google_calendar_event_id, None);
+        assert_eq!(request.expense_type.as_deref(), Some("None"));
+    }
+
+    /// `SettleCommand.kt:889-896`. The update body is the create body with
+    /// `uniqueId` in front and no `googleCalendarEventId` at all — the two are
+    /// separate request types on both sides and collapsing them into one would put
+    /// a field on the wire that the incumbent's update never carries.
+    #[test]
+    fn an_update_request_carries_the_existing_worklog_id_and_otherwise_matches_the_create() {
+        let action = Row::new("2026-09-15", "Beta", 3.25)
+            .title("Velocitor NLP")
+            .billability("Billable")
+            .project_id("proj-9")
+            .action(ActionType::Update)
+            .existing("wl-4242")
+            .build();
+
+        let request = update_request(&action).expect("the action carries an id");
+
+        assert_eq!(request.unique_id, "wl-4242");
+        assert_eq!(request.worklog_date, "2026-09-15");
+        assert_eq!(request.project_unique_id, "proj-9");
+        assert_eq!(request.task_title, "Velocitor NLP");
+        assert_eq!(request.billability, "Billable");
+        assert_eq!(request.duration, 3.25);
+        assert_eq!(request.expense_type.as_deref(), Some("None"));
+    }
+
+    /// The incumbent writes `existingWorklogId!!` inside the per-action `try`, so a
+    /// missing id is one counted failure and not a crash. The port returns `Err` for
+    /// the same reason — a `.unwrap()` here would abort the whole batch mid-way,
+    /// which is the one outcome `applyAll` is built to avoid.
+    #[test]
+    fn an_update_request_without_an_existing_id_is_an_error_naming_the_field() {
+        let action = Row::new("2026-09-15", "Beta", 1.0)
+            .action(ActionType::Update)
+            .build();
+        assert_eq!(action.existing_worklog_id, None, "the premise");
+
+        let error = update_request(&action).expect_err("no id, no request");
+        assert_eq!(
+            error.to_string(),
+            "action.existingWorklogId must not be null"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C19 — applyAll's pre-flight filter
+    // -----------------------------------------------------------------------
+
+    /// `SettleCommand.kt:859-866`. The batch is validated as a whole before the
+    /// first POST, so a day carrying one bad entry writes nothing at all. The stub
+    /// is canned with a response nobody should fetch: if it is ever consumed the
+    /// client wrote when it must not have.
+    #[tokio::test]
+    async fn a_zero_hour_create_aborts_the_batch_before_the_first_request() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("true")]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 0.0).build(),
+            Row::new("2026-09-15", "Beta", 4.0).build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        let error = apply_all(&batch, &client, &mut io)
+            .await
+            .expect_err("a non-positive entry aborts");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 1 entries with non-positive hours. Aborting."
+        );
+        assert!(
+            server.seen().is_empty(),
+            "nothing may reach the portal: {:?}",
+            server.seen()
+        );
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Invalid hours: 2026-09-15 Alpha (0.0h)"
+        );
+        assert_eq!(
+            io.out_text(),
+            "",
+            "and no tally line, because there is no tally"
+        );
+    }
+
+    /// `:860` exempts `SKIP` explicitly. A skipped action is never sent, so its
+    /// hours are not a claim about anything — and a port that validated the whole
+    /// list would refuse to settle a day that holds one skip.
+    #[tokio::test]
+    async fn a_skip_at_zero_hours_is_exempt_and_does_not_abort_the_batch() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("true")]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 0.0)
+                .action(ActionType::Skip)
+                .build(),
+            Row::new("2026-09-15", "Beta", 4.0).build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("the skip is exempt");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "only the Beta create");
+        assert!(
+            requests[0].target.ends_with("/worklog/create"),
+            "{:?}",
+            requests[0].target
+        );
+        assert!(
+            io.out_text()
+                .contains("Done! Created: 1, Updated: 0, Errors: 0"),
+            "{}",
+            io.out_text()
+        );
+    }
+
+    /// Every offending entry gets its own line, the count in the abort message is
+    /// their number, and the hours are rendered by `Double.toString` — so a
+    /// negative whole number keeps its `.0`.
+    #[tokio::test]
+    async fn the_invalid_hours_lines_name_every_offender_and_print_java_doubles() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("true")]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", -1.0).build(),
+            Row::new("2026-09-15", "Beta", 4.0).build(),
+            Row::new("2026-09-16", "Gamma", 0.0)
+                .action(ActionType::Update)
+                .existing("w-1")
+                .build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        let error = apply_all(&batch, &client, &mut io)
+            .await
+            .expect_err("two offenders");
+
+        assert_eq!(
+            error.to_string(),
+            "Found 2 entries with non-positive hours. Aborting."
+        );
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Invalid hours: 2026-09-15 Alpha (-1.0h)\n\u{2717} Invalid hours: 2026-09-16 Gamma (0.0h)"
+        );
+        assert!(
+            server.seen().is_empty(),
+            "the UPDATE path is gated by the same filter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C19 — applyAll against a stub portal
+    // -----------------------------------------------------------------------
+
+    /// The two write paths, in list order, each hitting its own endpoint with its
+    /// own body. A port that sent both through one endpoint, or that reordered the
+    /// batch, fails here rather than on the portal.
+    #[tokio::test]
+    async fn a_create_and_an_update_reach_the_portal_in_list_order_with_their_own_bodies() {
+        let server = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200("true"),
+            crate::api::stub::json_200("true"),
+        ]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 2.5)
+                .title("Alpha work")
+                .project_id("p-a")
+                .build(),
+            Row::new("2026-09-15", "Beta", 5.5)
+                .title("Beta work")
+                .project_id("p-b")
+                .action(ActionType::Update)
+                .existing("wl-77")
+                .build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("both writes land");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].target.ends_with("/worklog/create"),
+            "{}",
+            requests[0].target
+        );
+        assert!(
+            requests[1].target.ends_with("/worklog/update"),
+            "{}",
+            requests[1].target
+        );
+        assert!(
+            requests[0].body.contains("\"taskTitle\":\"Alpha work\""),
+            "{}",
+            requests[0].body
+        );
+        assert!(
+            requests[0].body.contains("\"duration\":2.5"),
+            "{}",
+            requests[0].body
+        );
+        assert!(
+            requests[1].body.contains("\"uniqueId\":\"wl-77\""),
+            "{}",
+            requests[1].body
+        );
+        assert!(
+            !requests[0].body.contains("uniqueId"),
+            "a create carries no worklog id"
+        );
+
+        assert_eq!(
+            io.out_text(),
+            "\u{2713} Created: 2026-09-15 Alpha (2.5h)\n\u{2713} Updated: 2026-09-15 Beta (5.5h)\n\nDone! Created: 1, Updated: 1, Errors: 0"
+        );
+        assert_eq!(io.err_text(), "");
+    }
+
+    /// `ActionType.SKIP -> {}`: no call, no line, and no place in either tally.
+    /// The server is canned with one response so a stray request would be captured.
+    #[tokio::test]
+    async fn a_skip_action_is_never_sent_and_appears_in_no_tally() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("true")]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 4.0)
+                .action(ActionType::Skip)
+                .build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("a skip cannot fail");
+
+        assert!(server.seen().is_empty(), "{:?}", server.seen());
+        assert_eq!(io.out_text(), "\nDone! Created: 0, Updated: 0, Errors: 0");
+    }
+
+    /// Each action sits in its own `try` (`:872-906`), so a rejected write is
+    /// counted and the ones after it still go. A port that used `?` inside the loop
+    /// would stop at the first rejection and leave the day half-written — the exact
+    /// outcome the pre-flight filter exists to prevent, arrived at from the other
+    /// side.
+    #[tokio::test]
+    async fn one_rejected_write_is_counted_and_the_batch_carries_on() {
+        let server = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200("true"),
+            crate::api::stub::response(500, "Internal Server Error", "text/plain", "boom"),
+            crate::api::stub::json_200("true"),
+        ]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 2.0).build(),
+            Row::new("2026-09-15", "Beta", 3.0).build(),
+            Row::new("2026-09-15", "Gamma", 3.0).build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("the batch completes");
+
+        assert_eq!(
+            server.requests().len(),
+            3,
+            "the third write was still attempted"
+        );
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Failed: 2026-09-15 Beta - Server error (500): boom"
+        );
+        assert!(
+            io.out_text()
+                .contains("Done! Created: 2, Updated: 0, Errors: 1"),
+            "{}",
+            io.out_text()
+        );
+    }
+
+    /// The `Err` from [`update_request`] is raised where the incumbent's
+    /// `NullPointerException` would be — inside the per-action `try` — so it is one
+    /// counted failure and the wire never sees it.
+    #[tokio::test]
+    async fn an_update_with_no_id_fails_only_that_action_and_never_reaches_the_wire() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("true")]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![
+            Row::new("2026-09-15", "Alpha", 4.0)
+                .action(ActionType::Update)
+                .build(),
+            Row::new("2026-09-15", "Beta", 4.0).build(),
+        ];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("the batch completes");
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "only the create");
+        assert!(
+            requests[0].target.ends_with("/worklog/create"),
+            "{}",
+            requests[0].target
+        );
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Failed: 2026-09-15 Alpha - action.existingWorklogId must not be null"
+        );
+        assert!(
+            io.out_text()
+                .contains("Done! Created: 1, Updated: 0, Errors: 1"),
+            "{}",
+            io.out_text()
+        );
+    }
+
+    /// `createWorklog` returns a `Boolean` and `applyAll` never looks at it:
+    /// `created++` runs on the line after the call. `checkStatus` tests `== 200`, so
+    /// a 201 comes back as `false` — and the incumbent still reports it as created.
+    /// A port that gated the tally on the returned bool would print `Created: 0` for
+    /// a write the portal accepted.
+    #[tokio::test]
+    async fn a_201_counts_as_created_because_the_incumbent_increments_before_it_looks() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            201,
+            "Created",
+            "application/json",
+            "true",
+        )]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![Row::new("2026-09-15", "Alpha", 4.0).build()];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("a 201 is not an error");
+
+        assert_eq!(
+            io.out_text(),
+            "\u{2713} Created: 2026-09-15 Alpha (4.0h)\n\nDone! Created: 1, Updated: 0, Errors: 0"
+        );
+        assert_eq!(io.err_text(), "");
+    }
+
+    /// `:909` sits after the loop with nothing guarding it, so the tally is printed
+    /// whatever happened — including a batch where every single write was rejected.
+    #[tokio::test]
+    async fn the_tally_line_is_printed_even_when_nothing_succeeded() {
+        let server = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
+            500,
+            "Internal Server Error",
+            "text/plain",
+            "down",
+        )]);
+        let client = stub_client(&server.base_url);
+        let batch = vec![Row::new("2026-09-15", "Alpha", 4.0).build()];
+        let mut io = FakeConsole::new();
+
+        apply_all(&batch, &client, &mut io)
+            .await
+            .expect("a rejected write is not an abort");
+
+        assert_eq!(io.out_text(), "\nDone! Created: 0, Updated: 0, Errors: 1");
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Failed: 2026-09-15 Alpha - Server error (500): down"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C29 — the --json body
+    // -----------------------------------------------------------------------
+
+    /// kotlinx-serialization's pretty printer indents with four spaces per level.
+    /// `serde_json::to_string_pretty` uses two, so a port that reached for it emits
+    /// a body that differs from the incumbent's on every line but the first.
+    #[test]
+    fn the_json_is_pretty_printed_with_a_four_space_indent_like_kotlinx() {
+        let body = json_body(&[Row::new("2026-09-18", "Alpha", 1.0).build()]).expect("json");
+        let lines: Vec<&str> = body.lines().collect();
+
+        assert_eq!(lines[0], "[");
+        assert_eq!(lines[1], "    {");
+        assert_eq!(lines[2], "        \"aggregate\": {");
+        assert_eq!(lines[3], "            \"date\": \"2026-09-18\",");
+        assert!(
+            !body.contains("\n  \""),
+            "a two-space indent would show here: {body}"
+        );
+    }
+
+    /// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out` opens `[` and closes
+    /// `]` with the elements between, so an empty run is those two characters and a
+    /// newline — not `[]` on one line, which is what a compact encoder gives.
+    #[test]
+    fn an_empty_action_list_is_an_empty_json_array() {
+        assert_eq!(json_body(&[]).expect("json"), "[]");
+    }
+
+    /// Byte for byte against the first element of
+    /// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out`, captured from the
+    /// pinned incumbent binary on 2026-09-18 data. Field order, the four-space
+    /// indent, the one-string-per-line `descriptions` array, the `CREATE` spelling
+    /// and the absence of `isBorrowed` / `isManuallyFixed` / `maxHours` are all one
+    /// assertion, because on the wire they are one string.
+    #[test]
+    fn one_action_serializes_byte_for_byte_like_the_captured_baseline() {
+        let action = Row::new("2026-09-18", "Delivery Practices", 0.5)
+            .chrono_project("Practices - DevPro - Work")
+            .title("AI Heads Sync")
+            .billability("NonBillable")
+            .meeting()
+            .project_id("cf84fdca-4809-4678-98b1-2e7cc56537c0")
+            .build();
+
+        let expected = r#"[
+    {
+        "aggregate": {
+            "date": "2026-09-18",
+            "chronoProject": "Practices - DevPro - Work",
+            "totalHours": 0.5,
+            "descriptions": [
+                "AI Heads Sync"
+            ],
+            "devproProjectName": "Delivery Practices",
+            "billability": "NonBillable"
+        },
+        "normalizedHours": 0.5,
+        "isMeeting": true,
+        "isFiller": false,
+        "taskTitle": "AI Heads Sync",
+        "devproProjectId": "cf84fdca-4809-4678-98b1-2e7cc56537c0",
+        "action": "CREATE"
+    }
+]"#;
+
+        assert_eq!(json_body(&[action]).expect("json"), expected);
+    }
+
+    /// The three optional fields appear only once they hold something, and a
+    /// borrowed entry is the case that carries all of them.
+    #[test]
+    fn a_borrowed_update_carries_the_fields_a_plain_create_omits() {
+        let action = Row::new("2026-09-18", "Alpha", 2.0)
+            .borrowed("2026-09-11")
+            .fixed()
+            .action(ActionType::Update)
+            .existing("wl-1")
+            .build();
+
+        let body = json_body(&[action]).expect("json");
+        assert!(body.contains("\"isBorrowed\": true"), "{body}");
+        assert!(body.contains("\"sourceDate\": \"2026-09-11\""), "{body}");
+        assert!(body.contains("\"existingWorklogId\": \"wl-1\""), "{body}");
+        assert!(body.contains("\"isManuallyFixed\": true"), "{body}");
+        assert!(body.contains("\"action\": \"UPDATE\""), "{body}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The two catch clauses
+    // -----------------------------------------------------------------------
+
+    /// `SettleCommand.kt:105-106`. An `ApiException` gets its own prefix and the
+    /// message alone — the status code it carries is deliberately not printed.
+    #[test]
+    fn an_api_error_is_reported_under_its_own_prefix_with_the_message_alone() {
+        let mut io = FakeConsole::new();
+        report_failure(
+            &anyhow::Error::new(ApiError {
+                status_code: 503,
+                message: "Server error: Service Unavailable".to_string(),
+            }),
+            &mut io,
+        );
+
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} API Error: Server error: Service Unavailable"
+        );
+        assert!(
+            !io.err_text().contains("503"),
+            "the status code stays out of the line"
+        );
+        assert_eq!(io.out_text(), "", "both clauses write to stderr");
+    }
+
+    /// `:107-108`. Everything else takes the plain prefix, and the port prints the
+    /// whole `anyhow` chain rather than the outermost message: for a failed HTTP
+    /// call the outermost message is `requesting http://...` and the refusal that
+    /// caused it is one level down.
+    #[test]
+    fn any_other_error_is_reported_with_the_whole_context_chain() {
+        let mut io = FakeConsole::new();
+        let error = anyhow!("connection refused")
+            .context("requesting http://localhost:9247/api/time-entries");
+        report_failure(&error, &mut io);
+
+        assert_eq!(
+            io.err_text(),
+            "\u{2717} Error: requesting http://localhost:9247/api/time-entries: connection refused"
+        );
+    }
+
+    /// The match is a downcast through the chain, not a look at the outermost
+    /// error, so an `ApiError` that picked up context on the way out still reads as
+    /// an API failure. The context is then dropped, because `:106` prints
+    /// `e.message` and nothing else.
+    #[test]
+    fn an_api_error_under_context_keeps_the_api_prefix_and_drops_the_context() {
+        let mut io = FakeConsole::new();
+        let error = anyhow::Error::new(ApiError {
+            status_code: 404,
+            message: "Resource not found.".to_string(),
+        })
+        .context("fetching the normal view");
+        report_failure(&error, &mut io);
+
+        assert_eq!(io.err_text(), "\u{2717} API Error: Resource not found.");
+    }
+
+    // -----------------------------------------------------------------------
+    // The orchestration, against two stub origins
+    // -----------------------------------------------------------------------
+    //
+    // D2 is decided here rather than asserted: the three facets the plan fixed —
+    // project ids resolved per day, one `normalView` per month the range spans, and
+    // one filler budget per billing period — are all invisible to the pure layer
+    // above, because each is a question about *which requests get made*. Two stubs,
+    // canned in request order, are the only instrument that can see them.
+
+    /// Midday UTC, so that every zone from UTC-11 to UTC+11 dates the entry to
+    /// `day`. [`aggregator::aggregate`] reads `ZoneId.systemDefault()` inline and
+    /// [`Settle::prepare_actions`] calls it, so an orchestration test cannot pass a
+    /// fixed zone in the way `aggregate_in_zone`'s own tests do — it has to pick a
+    /// wall time no ordinary offset can push across a date boundary.
+    fn work_entry(id: i64, day: &str, project: &str, description: &str) -> ChronoTimeEntry {
+        ChronoTimeEntry {
+            id,
+            description: Some(description.to_string()),
+            start_time: format!("{day}T12:00:00+00:00"),
+            end_time: None,
+            duration: Some(3600),
+            project: Some(ChronoProject {
+                id: 1,
+                name: project.to_string(),
+                color: "#000".to_string(),
+                aspect: None,
+            }),
+            aspect: None,
+        }
+    }
+
+    fn chrono_body(entries: &[ChronoTimeEntry]) -> String {
+        serde_json::to_string(entries).expect("a Chrono body")
+    }
+
+    fn user_body(unique_id: &str) -> String {
+        serde_json::to_string(&CurrentUser {
+            unique_id: unique_id.to_string(),
+            full_name: "Yurii Buchchenko".to_string(),
+            email: "yurii.buchchenko@dev.pro".to_string(),
+        })
+        .expect("a currentUser body")
+    }
+
+    fn projects_body(contact: &str, projects: &[(&str, &str)]) -> String {
+        serde_json::to_string(&crate::model::AssignedProjectsResponse {
+            unique_id: contact.to_string(),
+            projects: projects
+                .iter()
+                .map(|(id, name)| crate::model::Project {
+                    unique_id: (*id).to_string(),
+                    short_name: (*name).to_string(),
+                    is_internal: false,
+                    is_favorite: false,
+                })
+                .collect(),
+        })
+        .expect("an assignedProjectsOnDate body")
+    }
+
+    /// One page holding the days given. The `date` is written the way the portal
+    /// writes it — a full timestamp whose first ten characters are the date — so
+    /// that [`detail_date`] is exercised rather than bypassed.
+    fn normal_view_body(days: &[(&str, f64, Vec<WorklogDetail>)]) -> String {
+        serde_json::to_string(&crate::model::NormalViewResponse {
+            total_logged_hours: 0.0,
+            total_expected_hours: 0.0,
+            page_list: vec![crate::model::PageItem {
+                contact_unique_id: "u-1".to_string(),
+                full_name: "Yurii Buchchenko".to_string(),
+                logged_hours: 0.0,
+                expected_hours: 0.0,
+                details_by_dates: days
+                    .iter()
+                    .map(|(date, hours, worklogs)| crate::model::DateDetails {
+                        date: format!("{date}T00:00:00"),
+                        logged_hours: *hours,
+                        expected_hours: 8.0,
+                        worklogs_details: worklogs.clone(),
+                    })
+                    .collect(),
+            }],
+        })
+        .expect("a normalView body")
+    }
+
+    /// `chrono_project -> devpro_project`, everything billable, no fillers and no
+    /// overrides. A filler would pull the RNG and the budget map into every one of
+    /// these tests; the filler's own module owns that.
+    fn settle_config(chrono_base: &str, mappings: &[(&str, &str)]) -> Config {
+        Config {
+            chrono_api: chrono_base.to_string(),
+            mappings: mappings
+                .iter()
+                .map(
+                    |(chrono_project, devpro_project)| crate::config::ProjectMapping {
+                        chrono_project: (*chrono_project).to_string(),
+                        devpro_project: (*devpro_project).to_string(),
+                        billability: "Billable".to_string(),
+                    },
+                )
+                .collect(),
+            fillers: Vec::new(),
+            overrides: Vec::new(),
+            project_ids: HashMap::new(),
+            max_synthetic_hours: 4.0,
+        }
+    }
+
+    /// The tail of [`dispatch`] with the two clients pointed at stubs instead of at
+    /// the portal and at `~/.tt-cookie`. `dispatch` itself builds them from
+    /// [`crate::api::portal::BASE_URL`] and the cookie file, so it cannot be driven
+    /// from a test without a production seam this port does not have — which is why
+    /// the mode precedence it encodes is left to the CLI-level tests.
+    async fn run_settle(
+        args: &SettleArgs,
+        config: &Config,
+        portal_base: &str,
+        today: NaiveDate,
+        io: &mut dyn Console,
+    ) -> Result<()> {
+        let chrono_client = ChronoClient::new(&config.chrono_api).expect("a Chrono client");
+        let tt_client = stub_client(portal_base);
+        let normalizer = TimeNormalizer::with_knowledge_base("/definitely/not/a/knowledge/base");
+        let settle = Settle {
+            args,
+            config,
+            chrono_client: &chrono_client,
+            tt_client: &tt_client,
+            normalizer: &normalizer,
+            today,
+        };
+        if args.json {
+            settle.run_json_mode(io).await
+        } else {
+            settle.run_dry_run_mode(io).await
+        }
+    }
+
+    fn json_args(from: &str, to: &str) -> SettleArgs {
+        SettleArgs {
+            from: Some(d(from)),
+            to: Some(d(to)),
+            json: true,
+            ..SettleArgs::default()
+        }
+    }
+
+    /// D2, second facet. `SettleCommand.kt:440-446` fetches `normalView` once, for
+    /// the range's **first day**, so every worklog in a later month is invisible.
+    /// The port walks [`months_in_range`], which for a range straddling a month
+    /// boundary is two requests with the first of each month as the period.
+    #[tokio::test]
+    async fn a_range_spanning_two_months_fetches_one_normal_view_for_each_of_them() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-08-31", "Alpha - DevPro - Work", "August work"),
+                work_entry(2, "2026-09-01", "Alpha - DevPro - Work", "September work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-08-31", "2026-09-01"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let requests = portal.requests();
+        assert_eq!(
+            requests.len(),
+            5,
+            "{:?}",
+            requests.iter().map(|r| &r.target).collect::<Vec<_>>()
+        );
+        assert!(
+            requests[0].target.contains("period=2026-08-01"),
+            "{}",
+            requests[0].target
+        );
+        assert!(
+            requests[1].target.contains("period=2026-09-01"),
+            "{}",
+            requests[1].target
+        );
+        assert_eq!(
+            chrono.requests().len(),
+            1,
+            "one Chrono fetch for the whole range"
+        );
+    }
+
+    /// D2, first facet. `:463-478` asks for the assignments held on `from` and
+    /// resolves every name in the range against that one list. The port asks once
+    /// per day that has proposals, each with that day's own `dateFrom`.
+    #[tokio::test]
+    async fn project_ids_are_resolved_once_per_day_and_each_day_asks_for_its_own_date() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-14", "Alpha - DevPro - Work", "Monday"),
+                work_entry(2, "2026-09-15", "Alpha - DevPro - Work", "Tuesday"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("contact-77")),
+            crate::api::stub::json_200(&projects_body("contact-77", &[("id-alpha", "Alpha")])),
+            crate::api::stub::json_200(&projects_body("contact-77", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-14", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let requests = portal.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests[2]
+                .target
+                .starts_with("/contact/contact-77/assignedProjectsOnDate"),
+            "the contact id comes from currentUser and goes in the path: {}",
+            requests[2].target
+        );
+        assert!(
+            requests[2].target.contains("dateFrom=2026-09-14"),
+            "{}",
+            requests[2].target
+        );
+        assert!(
+            requests[3].target.contains("dateFrom=2026-09-15"),
+            "{}",
+            requests[3].target
+        );
+        let _ = chrono.requests();
+    }
+
+    /// The bug D2's first facet was written against, reproduced as a test: a project
+    /// assigned only from the second day of the range. Measured against the
+    /// incumbent, `--from 2026-08-01 --to 2026-08-15 --json` printed nothing but
+    /// `✗ Error: DevPro project 'Inveniam SOW #5' not found.` for exactly this
+    /// shape. The premise assertion is the other half — the union against day one's
+    /// list is still an error, so the fix is the per-day split and not a widened
+    /// lookup.
+    #[tokio::test]
+    async fn a_project_assigned_only_on_the_later_day_resolves_against_that_days_list() {
+        let day_one_projects = vec![crate::model::Project {
+            unique_id: "id-alpha".to_string(),
+            short_name: "Alpha".to_string(),
+            is_internal: false,
+            is_favorite: false,
+        }];
+        assert!(
+            aggregator::resolve_project_ids(
+                &["Alpha".to_string(), "Beta".to_string()],
+                &day_one_projects,
+                &HashMap::new()
+            )
+            .is_err(),
+            "the premise: resolving the range's union against the first day's list fails"
+        );
+
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-14", "Alpha - DevPro - Work", "Alpha day"),
+                work_entry(2, "2026-09-15", "Beta - DevPro - Work", "Beta day"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-beta", "Beta")])),
+        ]);
+        let config = settle_config(
+            &chrono.base_url,
+            &[
+                ("Alpha - DevPro - Work", "Alpha"),
+                ("Beta - DevPro - Work", "Beta"),
+            ],
+        );
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-14", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("each day resolves against its own assignment list");
+
+        let body = io.out_text();
+        assert!(body.contains("\"devproProjectId\": \"id-alpha\""), "{body}");
+        assert!(body.contains("\"devproProjectId\": \"id-beta\""), "{body}");
+        let _ = (portal.requests(), chrono.requests());
+    }
+
+    /// D2's second facet in its consequence. The 09-01 worklog exists only in the
+    /// September `normalView` response, so a port that fetched the range's first
+    /// month alone would never see it and would propose a CREATE against a day that
+    /// already holds a worklog for that project — a duplicate in the system of
+    /// record, not a crash.
+    #[tokio::test]
+    async fn a_worklog_in_the_ranges_second_month_turns_its_proposal_into_an_update() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-08-31", "Alpha - DevPro - Work", "August work"),
+                work_entry(2, "2026-09-01", "Alpha - DevPro - Work", "September work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[("2026-08-31", 0.0, Vec::new())])),
+            crate::api::stub::json_200(&normal_view_body(&[(
+                "2026-09-01",
+                4.0,
+                vec![worklog(
+                    "wl-september",
+                    "id-alpha",
+                    "Something already filed",
+                )],
+            )])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-08-31", "2026-09-01"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let actions: Vec<SettleAction> =
+            serde_json::from_str(&io.out_text()).expect("the JSON body parses back");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].aggregate.date, d("2026-08-31"));
+        assert_eq!(actions[0].action, ActionType::Create);
+        assert_eq!(actions[0].existing_worklog_id, None);
+        assert_eq!(actions[1].aggregate.date, d("2026-09-01"));
+        assert_eq!(actions[1].action, ActionType::Update);
+        assert_eq!(
+            actions[1].existing_worklog_id.as_deref(),
+            Some("wl-september")
+        );
+        let _ = (portal.requests(), chrono.requests());
+    }
+
+    /// The fallback warning is printed once for the whole run even though the
+    /// resolution now happens per day. The incumbent prints one line per fallback
+    /// over the whole range; resolving per day without the dedup would print the
+    /// same line once per day the project appears on, which for a 45-day scan is a
+    /// wall of identical warnings around a real one.
+    #[tokio::test]
+    async fn the_fallback_warning_for_one_project_is_printed_once_however_many_days_it_names() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-14", "Alpha - DevPro - Work", "Monday"),
+                work_entry(2, "2026-09-15", "Alpha - DevPro - Work", "Tuesday"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[])),
+            crate::api::stub::json_200(&projects_body("u-1", &[])),
+        ]);
+        let mut config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        config
+            .project_ids
+            .insert("Alpha".to_string(), "configured-alpha".to_string());
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-14", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("a configured id keeps the run alive");
+
+        let warnings = io
+            .err_text()
+            .matches("\u{26A0} 'Alpha' is not in your assigned projects")
+            .count();
+        assert_eq!(warnings, 1, "two days, one warning:\n{}", io.err_text());
+        assert!(
+            io.out_text()
+                .contains("\"devproProjectId\": \"configured-alpha\""),
+            "{}",
+            io.out_text()
+        );
+        let _ = (portal.requests(), chrono.requests());
+    }
+
+    /// C7. Every progress line in `--json` mode goes to stderr, so stdout is the
+    /// JSON and nothing else — a port that echoed `Fetching Chrono data…` to stdout
+    /// makes the output unparseable for the automation the flag exists for.
+    #[tokio::test]
+    async fn in_json_mode_stdout_holds_only_the_json_and_the_progress_goes_to_stderr() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-15", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&io.out_text()).expect("stdout is exactly one JSON document");
+        assert_eq!(parsed.as_array().expect("an array").len(), 1);
+        assert!(
+            io.err_text()
+                .contains("Fetching Chrono data (2026-09-15 to 2026-09-15)..."),
+            "{}",
+            io.err_text()
+        );
+        let _ = (portal.requests(), chrono.requests());
+    }
+
+    /// `--dry-run` reads and never writes. The assertion is on the method of every
+    /// request that reached the stub, which is the only statement that stays true
+    /// however the summary is rendered.
+    #[tokio::test]
+    async fn a_dry_run_issues_reads_only_and_renders_the_day_summary() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Deep work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let args = SettleArgs {
+            from: Some(d("2026-09-15")),
+            to: Some(d("2026-09-15")),
+            dry_run: true,
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::new();
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the run completes");
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        assert!(io.out_text().contains("Deep work"), "{}", io.out_text());
+        let _ = chrono.requests();
+    }
+
+    /// `:418-421`. An empty Chrono answer ends `prepareActions` before the portal is
+    /// asked anything at all — so a day with no tracked time costs one request, not
+    /// five, and `--json` still emits a well-formed empty array.
+    #[tokio::test]
+    async fn an_empty_chrono_answer_stops_before_the_portal_is_asked_anything() {
+        let chrono = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("[]")]);
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &normal_view_body(&[]),
+        )]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-15", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        assert_eq!(io.out_text(), "[]");
+        assert!(portal.seen().is_empty(), "{:?}", portal.seen());
+        assert!(
+            io.err_text()
+                .contains("No entries found in Chrono for this period."),
+            "{}",
+            io.err_text()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// C10, `Aggregator.kt:47`. The filter the project's own CLAUDE.md calls
+    /// "unmapped Chrono projects are silently skipped" is this one and not the
+    /// mapping lookup: a project whose name does not end in `DevPro - Work` never
+    /// reaches the lookup at all. The portal is still never asked anything, because
+    /// the aggregate list is empty before the first read.
+    #[tokio::test]
+    async fn a_chrono_project_outside_devpro_work_is_dropped_silently_and_costs_no_portal_request()
+    {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Reading - Health - Personal", "A book"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &normal_view_body(&[]),
+        )]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-15", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("a non-DevPro project is not an error");
+
+        assert_eq!(io.out_text(), "[]");
+        assert!(portal.seen().is_empty(), "{:?}", portal.seen());
+        assert!(
+            io.err_text().contains("No work entries to process"),
+            "{}",
+            io.err_text()
+        );
+        assert!(
+            !io.err_text().contains("Reading"),
+            "the name is never mentioned: {}",
+            io.err_text()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// The other half, and the one this test module got wrong first time round: a
+    /// project that **is** a DevPro Work project and has no mapping is not skipped
+    /// at all. `Aggregator.kt:69` is a bare `error(...)`, so the run dies naming the
+    /// project, offering the YAML to paste and listing what is configured — because
+    /// the alternative is a day quietly settling short by however many hours that
+    /// project held.
+    #[tokio::test]
+    async fn a_devpro_work_project_with_no_mapping_stops_the_run_and_lists_what_is_configured() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Gamma - DevPro - Work", "Unmapped"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &normal_view_body(&[]),
+        )]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        let error = run_settle(
+            &json_args("2026-09-15", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect_err("an unmapped DevPro Work project ends the run");
+
+        let text = format!("{error:#}");
+        assert!(
+            text.starts_with("Chrono project 'Gamma - DevPro - Work' has no mapping in config."),
+            "{text}"
+        );
+        assert!(
+            text.contains("chrono_project: \"Gamma - DevPro - Work\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("Currently configured projects:\n  - Alpha - DevPro - Work"),
+            "{text}"
+        );
+        assert_eq!(
+            io.out_text(),
+            "",
+            "nothing is emitted on stdout for a failed run"
+        );
+        assert!(
+            portal.seen().is_empty(),
+            "the failure precedes every portal read"
+        );
+        let _ = chrono.requests();
+    }
+
+    /// C17, `:205`. `getCurrentUser` is called before the month loop and its answer
+    /// is thrown away — the call exists so that a dead session fails in one request
+    /// instead of after forty-five days of months have been fetched. A port that
+    /// moved it down to where the contact id is actually needed would pass every
+    /// other test here and lose the early failure.
+    #[tokio::test]
+    async fn the_scan_asks_who_you_are_before_it_fetches_a_single_month() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let args = SettleArgs {
+            json: true,
+            ..SettleArgs::default()
+        };
+        let mut io = FakeConsole::new();
+
+        run_settle(&args, &config, &portal.base_url, d("2026-09-20"), &mut io)
+            .await
+            .expect("the scan completes");
+
+        let requests = portal.requests();
+        assert_eq!(
+            requests[0].target, "/contact/currentUser",
+            "before any month"
+        );
+        assert!(
+            requests[1].target.contains("period=2026-08-01"),
+            "{}",
+            requests[1].target
+        );
+        assert!(
+            requests[2].target.contains("period=2026-09-01"),
+            "{}",
+            requests[2].target
+        );
+
+        let chrono_requests = chrono.requests();
+        assert_eq!(chrono_requests.len(), 2, "the scan's fetch, then the day's");
+        assert!(
+            chrono_requests[0].target.contains("start_date=2026-08-06"),
+            "forty-five days before 2026-09-20: {}",
+            chrono_requests[0].target
+        );
+        assert!(
+            chrono_requests[0].target.contains("end_date=2026-09-20"),
+            "C2's padding — the cutoff is 09-19 and the fetch runs to 09-20: {}",
+            chrono_requests[0].target
+        );
+
+        let actions: Vec<SettleAction> =
+            serde_json::from_str(&io.out_text()).expect("the JSON body parses back");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].aggregate.date, d("2026-09-18"));
+    }
+
+    /// C2's padding on the explicit-range path. `SettleCommand.kt:424` fetches to
+    /// `to.plusDays(1)` and the low end is not padded, because the two bounds do
+    /// different jobs: the fetch runs on the UTC axis and every entry is then
+    /// re-dated to its local day, so a late local evening filed under the next UTC
+    /// day still arrives and a morning one was never at risk. A port that made the
+    /// two bounds agree loses the last evening of every range — silently, because
+    /// the day simply settles short.
+    ///
+    /// The scan path has its own padding, asserted in
+    /// [`tests::the_scan_asks_who_you_are_before_it_fetches_a_single_month`]; this
+    /// is the other of the two sites and they are not the same line of code.
+    #[tokio::test]
+    async fn the_explicit_range_fetch_pads_the_end_date_by_a_day_and_leaves_the_start_alone() {
+        let chrono =
+            crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-15", "Alpha - DevPro - Work", "Work"),
+            ]))]);
+        let portal = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &json_args("2026-09-15", "2026-09-15"),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let requests = chrono.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].target.contains("start_date=2026-09-15"),
+            "the low end is the range's own start: {}",
+            requests[0].target
+        );
+        assert!(
+            requests[0].target.contains("end_date=2026-09-16"),
+            "the high end is padded by one UTC day: {}",
+            requests[0].target
+        );
+        let _ = portal.requests();
     }
 }
