@@ -451,19 +451,22 @@ fn sanitize(s: &str) -> String {
 ///
 /// It was briefly two: this module and `settle_render` each hand-ported the regex
 /// independently, with different day-digit strategies — one arguing the greedy
-/// `\d{1,2}` needs no backtracking, the other backtracking explicitly. A differential
-/// run over **826 964** adversarial inputs found both agreeing with
-/// `java.util.regex` and with each other on every one, so the collapse is a
-/// deduplication and not a behaviour change. `pub` rather than private for that reason,
-/// and no third copy when `borrower.rs` needs it.
+/// `\d{1,2}` needs no backtracking, the other backtracking explicitly. They were
+/// collapsed into this one, so the surviving question is not whether the two
+/// agreed with each other but whether this one agrees with the JVM.
 ///
-/// That original corpus is gone with the directory that held it, and the other
-/// hand-port went with the collapse, so neither the number nor the
-/// two-implementations half is re-runnable. What is re-runnable was re-run on
-/// 2026-09-22 against `java.util.regex`:
-/// `~/.cache/tt-devpro-rewrite/measurements/datecmp/` rebuilds an adversarial
-/// corpus from the same brief — 3 338 100 inputs, 8 820 of them matching — and
-/// this function's output is byte-identical to the JVM's on every one.
+/// It does, measured 2026-09-22 over **3 338 100** adversarial inputs — the
+/// deduped product of five prefixes, five separators, eighteen month tokens
+/// (`jan`, `JAN`, `Jann`, `Ja`, `Sept` among them), three day separators, twelve
+/// day tokens, three year separators, eight year tokens and nine trailing
+/// terminators, of which **8 820** match and the rest are near misses that must
+/// not be stripped. This function's output and `java.util.regex`'s under the
+/// incumbent's own pattern hash to the same sha256 `fb0e9375…` and `diff` exits
+/// 0. Generator, both probes and the commands:
+/// `~/.cache/tt-devpro-rewrite/measurements/datecmp/README.md`.
+///
+/// `pub` rather than private for that reason, and no third copy when
+/// `borrower.rs` needs it.
 pub fn strip_date_suffix(s: &str) -> String {
     let (core, terminator) = split_final_line_terminator(s);
     match date_suffix_start(core) {

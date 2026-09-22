@@ -6,9 +6,10 @@
 //!
 //! - `String.format("%.Nf", v)` rounds the **shortest round-trip decimal
 //!   representation** of `v` HALF_UP. Rust's `{:.N}` rounds the **exact binary
-//!   value** half-to-even. Over a 188 048-value corpus drawn from this tool's own
-//!   domain they disagree on 13 134 values — 6.98 %, roughly one printed line in
-//!   fourteen. See C25.
+//!   value** half-to-even. `0.125` at `%.2f` is `0.13` against `0.12`, `1.005` is
+//!   `1.01` against `1.00`, and `0.25` at `%.1f` is `0.3` against `0.2` — all
+//!   three measured, all three live on this tool's data, since multiples of
+//!   `0.25` are exact in `f64` and the half-way cases are ordinary here. See C25.
 //! - Interpolating a `Double` calls `Double.toString`, which keeps a `.0` on every
 //!   whole number and switches to `E` notation outside `[1e-3, 1e7)`. Rust's `{}`
 //!   does neither. Three of the ten distinct values in the captured
@@ -17,10 +18,27 @@
 //! The third way is `ApiCommand.kt:132,180`, which prints the raw `String` the
 //! option carried — `--hours 8.00` prints `8.00` — and needs no helper. All three
 //! are contracts; none of them may be unified into the others.
+//!
+//! **The agreement result, which is the one worth quoting.** Over a 160 288-value
+//! corpus built from this tool's own domain — whole-second Chrono durations over
+//! 3600, quarter multiples and their sums, the normalizer's `raw * 8 / total`
+//! scaling shape, `8.0 - quarter`, and adversarial exact ties — [`java_fmt`] at
+//! one and two decimals and [`java_dbl`] match JDK 21 on **all 480 864 calls,
+//! with zero mismatches**. On the same corpus Rust's own forms miss the JVM 2 263
+//! times out of 320 576 `%.Nf` calls and 636 times out of 160 288 `{}` calls,
+//! which is what the two helpers exist to close. Probes, raw output and the
+//! commands: `~/.cache/tt-devpro-rewrite/measurements/fmt/README.md`.
+//!
+//! An earlier corpus is referred to in the plan notes, but its generator did not
+//! survive, so its divergence rate is not re-runnable and is deliberately not
+//! quoted here. The rate is in any case a property of how many exact ties a
+//! generator plants, not of this tool; the three named values above and the
+//! zero-mismatch result are the parts that mean something.
 
 /// Java's `String.format("%.Nf", v)`.
 ///
-/// Verified against JDK 21 on all 188 048 values of the differential corpus.
+/// Verified against JDK 21 on all 160 288 values of the corpus described in the
+/// module docs, at both the one- and two-decimal widths this tool prints.
 pub fn java_fmt(v: f64, decimals: usize) -> String {
     if v.is_nan() {
         return "NaN".to_string();
