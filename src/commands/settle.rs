@@ -1967,8 +1967,9 @@ impl Settle<'_> {
         io.out(&format!("{} days to settle:", scan.unfilled_days.len()));
         for day in &scan.unfilled_days {
             let hours = scan.devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
-            // `:346` — `< 0.01`, not `== 0.0`: a day holding six minutes reads as
-            // empty in this listing.
+            // `:352` — `< 0.01`, not `== 0.0`: a day holding six minutes reads as
+            // empty in this listing. (`:346` is the closing brace of the
+            // `System.console() == null` block; the citation used to point there.)
             let hours_info = if hours < 0.01 {
                 String::new()
             } else {
@@ -6027,5 +6028,914 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let _ = chrono.requests();
+    }
+
+    // -----------------------------------------------------------------------
+    // `run_day_by_day_mode` — the loop, not its parts
+    //
+    // `edit_entry`, `delete_entry`, `day_choice`, `entry_selection` and
+    // `renormalize_after_edit` are each tested above on their own. The `for` over
+    // the days, the `loop` inside it and the `match` that wires the six answers to
+    // `break` / `continue` / `return` were executed by no test, so any of the six
+    // could have been attached to the wrong control-flow verb and stayed green.
+    // These tests are the batch-surface pattern (`:5905`) with a second and a
+    // third day added, because the whole contract of this surface is what happens
+    // to the *next* day.
+    // -----------------------------------------------------------------------
+
+    /// The three portal reads `Settle::find_unfilled_days` makes: `currentUser`,
+    /// then one `normalView` per month [`months_in_range`] returns for the 45-day
+    /// window. Every test here fixes `today` at 2026-09-20, whose window is
+    /// 2026-08-06..=2026-09-19 and so touches exactly two months.
+    ///
+    /// `september_hours` becomes `devpro_hours_by_day`, which is the only input to
+    /// the two `< 0.01` tests — the listing's and the per-day header's.
+    fn scan_reads(september_hours: &[(&str, f64)]) -> Vec<String> {
+        let september: Vec<(&str, f64, Vec<WorklogDetail>)> = september_hours
+            .iter()
+            .map(|(date, hours)| (*date, *hours, Vec::new()))
+            .collect();
+        vec![
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&normal_view_body(&september)),
+        ]
+    }
+
+    /// The three portal reads `Settle::prepare_actions` makes for one day that has
+    /// Chrono entries, in the order it makes them: that month's `normalView` (no
+    /// worklogs, so every proposal is a CREATE), `currentUser`, and that day's
+    /// assigned projects.
+    fn day_reads() -> Vec<String> {
+        vec![
+            crate::api::stub::json_200(&normal_view_body(&[])),
+            crate::api::stub::json_200(&user_body("u-1")),
+            crate::api::stub::json_200(&projects_body("u-1", &[("id-alpha", "Alpha")])),
+        ]
+    }
+
+    /// The portal's answer to one `worklog/create`.
+    fn write_ok() -> String {
+        crate::api::stub::json_200("true")
+    }
+
+    /// No range and no flags, which is the only argument set [`mode`] routes to
+    /// [`Settle::run_day_by_day_mode`].
+    fn day_by_day_args() -> SettleArgs {
+        SettleArgs::default()
+    }
+
+    /// Every POST body the stub captured, in order.
+    fn posted_bodies(requests: &[crate::api::stub::CapturedRequest]) -> Vec<&str> {
+        requests
+            .iter()
+            .filter(|r| r.method == "POST")
+            .map(|r| r.body.as_str())
+            .collect()
+    }
+
+    /// Contract 1, `SettleCommand.kt:334-337`. An empty scan returns on
+    /// [`nothing_to_settle_message`] **before** the `System.console()` test, so a
+    /// present console changes nothing here: no listing, no header, no prompt.
+    ///
+    /// Chrono returning nothing is the shortest route to an empty scan
+    /// (`SettleCommand.kt:232`), and it empties `notFinal` too, which is what
+    /// selects the "All days are settled" half of the message over the "Held back"
+    /// half. The console is fed an `a` it must never be asked for.
+    #[tokio::test]
+    async fn an_empty_scan_says_everything_is_settled_and_never_reaches_the_prompt() {
+        let chrono = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200(
+            &chrono_body(&[]),
+        )]);
+        let portal = crate::api::stub::StubServer::start(scan_reads(&[]));
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert_eq!(
+            out,
+            "Checking 2026-08-06 to 2026-09-19 for unfilled days (<8h)...\nAll days are settled (\u{2265}8h logged).",
+            "the empty scan's whole output: C7's progress line, which an interactive run sends to stdout rather than to stderr, and then the message"
+        );
+        assert!(
+            !out.contains("days to settle:"),
+            "an empty scan lists nothing: {out}"
+        );
+        assert!(
+            !out.contains("Done! All unfilled days processed."),
+            "the early return is above the loop, so its closing line is unreachable here: {out}"
+        );
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 2, `SettleCommand.kt:352` and the same test written again at
+    /// `:361`. The threshold is `< 0.01`, not `== 0.0`: a day holding six minutes
+    /// reads as empty in both the listing and the day header.
+    ///
+    /// 0.009h is six minutes of logged time, under the threshold, so no ` (…h)`
+    /// suffix and the word `empty`. 0.01h is the first value on the other side,
+    /// and `%.1f` renders it `0.0` — so the two days differ in whether the suffix
+    /// is *there*, not in its digits. That is what an `== 0.0` implementation
+    /// cannot reproduce: it would hang a `(0.0h)` on the 0.009h day.
+    ///
+    /// Neither day has Chrono entries of its own, so both fall into contract 3 and
+    /// no prompt is reached.
+    #[tokio::test]
+    async fn a_day_holding_six_minutes_reads_as_empty_and_one_holding_more_does_not() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[])),
+            crate::api::stub::json_200(&chrono_body(&[])),
+        ]);
+        let portal = crate::api::stub::StubServer::start(scan_reads(&[
+            ("2026-09-17", 0.009),
+            ("2026-09-18", 0.01),
+        ]));
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::new();
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(out.contains("2 days to settle:"), "{out}");
+        assert!(
+            out.contains("\n  2026-09-17 Thu\n"),
+            "0.009h is under the threshold, so the listing prints no hours suffix at all: {out}"
+        );
+        assert!(
+            out.contains("  2026-09-18 Fri (0.0h)"),
+            "0.01h is over it, and `%.1f` of 0.01 is `0.0` - the suffix is there even though its digits are zeroes: {out}"
+        );
+        assert!(
+            out.contains(
+                "\u{2550}\u{2550}\u{2550} 2026-09-17 Thursday (empty) \u{2550}\u{2550}\u{2550}"
+            ),
+            "the day header applies the same threshold and calls 0.009h empty: {out}"
+        );
+        assert!(
+            out.contains(
+                "\u{2550}\u{2550}\u{2550} 2026-09-18 Friday (0.0h logged) \u{2550}\u{2550}\u{2550}"
+            ),
+            "and calls 0.01h logged: {out}"
+        );
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 3, `SettleCommand.kt:365-368` — the `continue`. A day the scan
+    /// offered can still come back with no actions, because the scan fetches the
+    /// whole window in one call while the loop re-fetches one day at a time.
+    ///
+    /// The verb is the whole test: `continue` moves to the next day, `break` would
+    /// end the run on the first empty day and never offer the second. So the first
+    /// day here is empty, the second is not, and the second is approved.
+    #[tokio::test]
+    async fn a_day_with_no_entries_is_passed_over_and_the_next_day_is_still_offered() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("No entries for this day.\n"),
+            "the empty day says so: {out}"
+        );
+        assert!(
+            out.contains("\u{2550}\u{2550}\u{2550} 2026-09-18 Friday"),
+            "and the run carries on to the day after it: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (8.0h)"),
+            "which is then approved and written: {out}"
+        );
+        assert!(
+            out.ends_with("Done! All unfilled days processed."),
+            "an empty day is not an ending: {out}"
+        );
+
+        let requests = portal.requests();
+        assert_eq!(requests.len(), 7, "six reads and the one write");
+        let posts = posted_bodies(&requests);
+        assert_eq!(posts.len(), 1, "only the second day was written: {posts:?}");
+        assert!(
+            posts[0].contains("\"worklogDate\":\"2026-09-18\""),
+            "{}",
+            posts[0]
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contracts 4 and 10, `SettleCommand.kt:381-385` and `:408`. `a` writes the
+    /// day and `break`s the inner loop; the outer `for` then offers the next day,
+    /// and falling off its end prints the closing line.
+    ///
+    /// Two approvals rather than one, because one approval cannot tell `break`
+    /// from `return` — the distinction contract 7 rests on. Both days are written,
+    /// in the order they were offered, and the run ends on `Done!` rather than on
+    /// the second day's tally.
+    #[tokio::test]
+    async fn approving_two_days_in_a_row_writes_both_and_ends_on_the_closing_line() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-17",
+                "Alpha - DevPro - Work",
+                "Thursday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["a", "a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-17 Alpha (8.0h)"),
+            "the first day was written: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (8.0h)"),
+            "and so was the second: {out}"
+        );
+        assert!(
+            out.ends_with("Done! All unfilled days processed."),
+            "the closing line is the last thing the loop prints, after the second day's tally: {out}"
+        );
+        assert_eq!(io.err_text(), "", "nothing was rejected");
+
+        let requests = portal.requests();
+        let posts = posted_bodies(&requests);
+        assert_eq!(posts.len(), 2, "one write per approved day: {posts:?}");
+        assert!(
+            posts[0].contains("\"worklogDate\":\"2026-09-17\""),
+            "the days are written in the order they were offered: {}",
+            posts[0]
+        );
+        assert!(
+            posts[1].contains("\"worklogDate\":\"2026-09-18\""),
+            "{}",
+            posts[1]
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 5, `SettleCommand.kt:386-388` — `currentActions =
+    /// editEntry(...)`. The assignment is the contract: an implementation that
+    /// calls `editEntry`, prints its listing and throws the result away looks
+    /// identical on screen and then posts the *unedited* draft when `a` follows.
+    ///
+    /// So the evidence is the POST bodies, not the redraw. The day carries two
+    /// one-hour Chrono entries that normalize to 4h each; entry 1 is set to 2h and
+    /// [`renormalize_after_edit`] pushes the freed hours onto the other, so the
+    /// two writes must be 2h and 6h. A dropped assignment writes 4h and 4h.
+    #[tokio::test]
+    async fn editing_an_entry_changes_the_hours_a_later_approval_posts() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Refactoring",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-18", "Alpha - DevPro - Work", "Refactoring"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Code review"),
+            ])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        responses.push(write_ok());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["e", "1", "2", "a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("\nEditable entries:"),
+            "the edit listing was shown: {out}"
+        );
+        assert!(
+            out.contains("Current: 4.00h. New hours: "),
+            "entry 1 held 4h before the edit: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (2.0h)"),
+            "the edited entry was written at the hours that were typed, not at the ones the first draft held: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (6.0h)"),
+            "and the other entry absorbed what the edit freed: {out}"
+        );
+        assert!(
+            !out.contains("\u{2713} Created: 2026-09-18 Alpha (4.0h)"),
+            "4h is the pre-edit draft, and approving must not post it: {out}"
+        );
+        assert!(out.ends_with("Done! All unfilled days processed."), "{out}");
+
+        let requests = portal.requests();
+        let posts = posted_bodies(&requests);
+        assert_eq!(posts.len(), 2, "two entries, two writes: {posts:?}");
+        assert!(
+            posts.iter().any(|body| body.contains("\"duration\":2.0")),
+            "one of the two writes carries the edited 2h: {posts:?}"
+        );
+        assert!(
+            posts.iter().any(|body| body.contains("\"duration\":6.0")),
+            "and the other carries the 6h it was renormalized to: {posts:?}"
+        );
+        assert!(
+            !posts.iter().any(|body| body.contains("\"duration\":4.0")),
+            "neither carries the unedited 4h: {posts:?}"
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 6, `SettleCommand.kt:389-391` — the same assignment, through
+    /// `deleteEntry`. A dropped assignment posts two worklogs where one was asked
+    /// for, which is the shape of the bug: the operator reads `✓ Deleted:` and the
+    /// entry is written anyway.
+    ///
+    /// Deleting one of two 4h entries leaves one, which
+    /// [`renormalize_after_edit`] scales back up to a full 8h, so the single write
+    /// is the survivor at 8h and its task title is the one that was *not* chosen.
+    #[tokio::test]
+    async fn deleting_an_entry_removes_it_from_what_a_later_approval_posts() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Refactoring",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-18", "Alpha - DevPro - Work", "Refactoring"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Code review"),
+            ])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["d", "1", "a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("\nDeletable entries:"),
+            "the delete listing was shown: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Deleted: Refactoring"),
+            "entry 1 is the one that went: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (8.0h)"),
+            "the survivor was renormalized back to a full day: {out}"
+        );
+        assert!(out.ends_with("Done! All unfilled days processed."), "{out}");
+
+        let requests = portal.requests();
+        let posts = posted_bodies(&requests);
+        assert_eq!(
+            posts.len(),
+            1,
+            "the deleted entry must not be written: {posts:?}"
+        );
+        assert!(
+            posts[0].contains("\"taskTitle\":\"Code review\""),
+            "the one write is the survivor, not the entry that was deleted: {}",
+            posts[0]
+        );
+        assert!(posts[0].contains("\"duration\":8.0"), "{}", posts[0]);
+        let _ = chrono.requests();
+    }
+
+    /// Contract 7, `SettleCommand.kt:392-395` — `break`, not `return`. `s` ends
+    /// the inner loop for this day and the outer `for` offers the next one.
+    ///
+    /// This is the pair to
+    /// [`cancelling_on_the_second_day_leaves_the_third_day_unasked`]: the two
+    /// answers differ in one verb and in nothing else on screen, so the
+    /// distinguishing evidence is that the day after a skip is still asked about
+    /// and still written. A `return` in place of the `break` leaves this run with
+    /// no writes at all and no closing line.
+    #[tokio::test]
+    async fn skipping_a_day_writes_nothing_for_it_and_still_offers_the_next_day() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-17",
+                "Alpha - DevPro - Work",
+                "Thursday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["s", "a"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(out.contains("Skipped.\n"), "the skip said so: {out}");
+        assert!(
+            !out.contains("Cancelled."),
+            "a skip is not a cancellation, and the two must not share a line: {out}"
+        );
+        assert!(
+            out.contains("\u{2550}\u{2550}\u{2550} 2026-09-18 Friday"),
+            "the day after the skipped one was still offered: {out}"
+        );
+        assert!(
+            out.contains("\u{2713} Created: 2026-09-18 Alpha (8.0h)"),
+            "and was written when it was approved: {out}"
+        );
+        assert!(
+            !out.contains("\u{2713} Created: 2026-09-17"),
+            "the skipped day itself was written nowhere: {out}"
+        );
+        assert!(
+            out.ends_with("Done! All unfilled days processed."),
+            "a skip leaves the run to finish normally: {out}"
+        );
+
+        let requests = portal.requests();
+        let posts = posted_bodies(&requests);
+        assert_eq!(posts.len(), 1, "exactly the approved day: {posts:?}");
+        assert!(
+            posts[0].contains("\"worklogDate\":\"2026-09-18\""),
+            "{}",
+            posts[0]
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 8, `SettleCommand.kt:396-399` — `return`, not `break`. `c`
+    /// abandons every remaining day.
+    ///
+    /// Three days, approved-cancelled-untouched, because two cannot separate the
+    /// two failure modes: a `break` here would fall through to the third day, and
+    /// only a third day can show that. The killing assertion is that the third
+    /// day's header never appears; the portal is canned for the first two days
+    /// alone, so a `break` implementation also runs out of canned answers, and the
+    /// stdout assertions are read before the outcome is unwrapped so that the
+    /// transport error does not hide what actually broke.
+    #[tokio::test]
+    async fn cancelling_on_the_second_day_leaves_the_third_day_unasked() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-16", "Alpha - DevPro - Work", "Wednesday work"),
+                work_entry(2, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(3, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-16",
+                "Alpha - DevPro - Work",
+                "Wednesday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                2,
+                "2026-09-17",
+                "Alpha - DevPro - Work",
+                "Thursday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        responses.push(write_ok());
+        responses.extend(day_reads());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["a", "c"]);
+
+        let outcome = run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await;
+
+        let out = io.out_text();
+        assert!(
+            out.contains("3 days to settle:"),
+            "all three days were handed to the loop: {out}"
+        );
+        assert!(
+            !out.contains("\u{2550}\u{2550}\u{2550} 2026-09-18"),
+            "the day after the cancelled one is never even announced: {out}"
+        );
+        assert!(
+            out.ends_with("Cancelled."),
+            "`c` ends the run on the cancel line: {out}"
+        );
+        assert!(
+            !out.contains("Done! All unfilled days processed."),
+            "a cancelled run did not process every unfilled day and must not say it did: {out}"
+        );
+        assert!(
+            !out.contains("Unknown option."),
+            "`c` is a known answer: {out}"
+        );
+        outcome.expect("the run completes");
+
+        let requests = portal.requests();
+        let posts = posted_bodies(&requests);
+        assert_eq!(
+            posts.len(),
+            1,
+            "only the day approved before the cancellation: {posts:?}"
+        );
+        assert!(
+            posts[0].contains("\"worklogDate\":\"2026-09-16\""),
+            "{}",
+            posts[0]
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 8 again, by the other road into it. `day_choice(None)` is `Cancel`
+    /// (`SettleCommand.kt:396`, the `null` arm of the `when`), so a closed stdin
+    /// cancels rather than falling into the `else`.
+    ///
+    /// Paired with [`a_bare_enter_on_the_first_day_abandons_the_second_day_unasked`]:
+    /// EOF and an empty line reach this prompt as different values and take
+    /// different arms, and this surface is where that distinction is load-bearing.
+    #[tokio::test]
+    async fn running_out_of_input_at_the_day_prompt_cancels_the_way_c_does() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&[]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.ends_with("Cancelled."),
+            "EOF takes the `c` arm, message and all: {out}"
+        );
+        assert!(
+            !out.contains("Unknown option."),
+            "EOF is not an unknown option - that is what an empty line is: {out}"
+        );
+        assert!(
+            !out.contains("\u{2713} Created:"),
+            "and it writes nothing: {out}"
+        );
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// Contract 9, `SettleCommand.kt:400-403` — the `else` arm. A bare Enter is
+    /// `Some("")` and not `None`, so it is `Unknown` rather than `Cancel`: the run
+    /// prints its own line first and then abandons every remaining day just the
+    /// same.
+    ///
+    /// Two days, so that "abandons the rest" is observed rather than assumed. The
+    /// assertion is on the whole last line and not on a suffix, because both arms
+    /// end in `Cancelled.` and the prefix is the entire difference between them.
+    #[tokio::test]
+    async fn a_bare_enter_on_the_first_day_abandons_the_second_day_unasked() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[
+                work_entry(1, "2026-09-17", "Alpha - DevPro - Work", "Thursday work"),
+                work_entry(2, "2026-09-18", "Alpha - DevPro - Work", "Friday work"),
+            ])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-17",
+                "Alpha - DevPro - Work",
+                "Thursday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&[""]);
+
+        let outcome = run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await;
+
+        let out = io.out_text();
+        assert!(
+            out.ends_with("Unknown option. Cancelled."),
+            "an empty line names itself before it cancels: {out}"
+        );
+        assert!(
+            !out.contains("\u{2550}\u{2550}\u{2550} 2026-09-18"),
+            "and the second day is never announced: {out}"
+        );
+        assert!(!out.contains("Done! All unfilled days processed."), "{out}");
+        outcome.expect("the run completes");
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    /// The prompt this loop asks with, `SettleCommand.kt:376-377`, on the branch
+    /// where the draft reaches 8h. The batch surface's prompt offers two answers;
+    /// this one offers five, and a run that printed the batch prompt here would be
+    /// offering answers the loop cannot honour — and withholding three it can.
+    #[tokio::test]
+    async fn the_day_prompt_offers_all_five_answers_when_the_draft_reaches_eight_hours() {
+        let chrono = crate::api::stub::StubServer::start(vec![
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+            crate::api::stub::json_200(&chrono_body(&[work_entry(
+                1,
+                "2026-09-18",
+                "Alpha - DevPro - Work",
+                "Friday work",
+            )])),
+        ]);
+        let mut responses = scan_reads(&[]);
+        responses.extend(day_reads());
+        let portal = crate::api::stub::StubServer::start(responses);
+        let config = settle_config(&chrono.base_url, &[("Alpha - DevPro - Work", "Alpha")]);
+        let mut io = FakeConsole::typing(&["c"]);
+
+        run_settle(
+            &day_by_day_args(),
+            &config,
+            &portal.base_url,
+            d("2026-09-20"),
+            &mut io,
+        )
+        .await
+        .expect("the run completes");
+
+        let out = io.out_text();
+        assert!(
+            out.contains("\n[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all: "),
+            "the five-answer prompt, un-warned: {out}"
+        );
+        assert!(
+            !out.contains("[A]pprove anyway"),
+            "an 8h draft raises no under-8h warning, so the prompt keeps its plain first word: {out}"
+        );
+        assert!(
+            !out.contains("[A]pprove / [C]ancel: "),
+            "that is the batch surface's prompt and does not belong here: {out}"
+        );
+        assert!(
+            out.contains("Total: 1.00 \u{2192} 8.00 hours, 1 entries"),
+            "the draft table is drawn before the prompt: {out}"
+        );
+
+        let requests = portal.requests();
+        assert!(
+            requests.iter().all(|r| r.method == "GET"),
+            "{:?}",
+            requests
+                .iter()
+                .map(|r| (&r.method, &r.target))
+                .collect::<Vec<_>>()
+        );
+        let _ = chrono.requests();
+    }
+
+    // -----------------------------------------------------------------------
+    // `entry_listing_line`
+    // -----------------------------------------------------------------------
+
+    /// `SettleCommand.kt:745-746`, and the byte-identical `:803-804` inside
+    /// `deleteEntry`. The number the operator types is `index + 1`, so the listing
+    /// is one-based while the selection it feeds is zero-based; the two live in
+    /// different functions and only this one prints.
+    ///
+    /// The marker column is a space for an ordinary entry, which is why `1.` is
+    /// followed by two spaces and not one. Dropping that space shifts every line
+    /// of both listings and is exactly the edit a renderer with no test invites.
+    #[test]
+    fn the_entry_listing_numbers_from_one_and_holds_the_marker_column_open() {
+        let action = Row::new("2026-09-18", "Alpha", 4.0)
+            .title("Refactoring")
+            .build();
+
+        assert_eq!(
+            entry_listing_line(0, &action),
+            "  1.  Alpha: Refactoring (4.00h)"
+        );
+    }
+
+    /// The `*` arm of the same line. It marks an entry [`edit_entry`] has pinned,
+    /// and it occupies the column the unmarked line holds open with a space, so
+    /// the two are the same width.
+    ///
+    /// The position is 9 rather than 0 so that the `+ 1` shows up as `10.` and not
+    /// merely as `1.`, where an off-by-one would be invisible.
+    #[test]
+    fn a_manually_fixed_entry_carries_a_star_where_the_space_would_be() {
+        let action = Row::new("2026-09-18", "Alpha", 4.0)
+            .title("Refactoring")
+            .fixed()
+            .build();
+
+        assert_eq!(
+            entry_listing_line(9, &action),
+            "  10.* Alpha: Refactoring (4.00h)"
+        );
+    }
+
+    /// The hours are `%.2f`, which [`java_fmt`] reproduces as HALF_UP on the
+    /// shortest round-trip decimal rather than as the half-even a naive port
+    /// reaches for. `0.125` is the value that separates the two: HALF_UP gives
+    /// `0.13`, half-even gives `0.12`.
+    #[test]
+    fn the_entry_listing_rounds_its_hours_half_up_to_two_places() {
+        let action = Row::new("2026-09-18", "Alpha", 0.125)
+            .title("Refactoring")
+            .build();
+
+        assert_eq!(
+            entry_listing_line(0, &action),
+            "  1.  Alpha: Refactoring (0.13h)"
+        );
     }
 }
