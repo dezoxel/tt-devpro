@@ -710,20 +710,39 @@ mod tests {
     /// `checkStatus` answers `false`. `reqwest`'s default policy would follow it,
     /// re-issue the write as a GET of the login page, read that page's 200 and
     /// report a worklog that was never created — the exact shape an expired session
-    /// cookie produces. The second canned response exists to prove the point: if it
-    /// is ever consumed, the client followed.
+    /// cookie produces.
+    ///
+    /// The second canned response is the instrument, and it has to be there for this
+    /// test to mean what it says. With only the 302 canned, a client that follows
+    /// gets a connection refused and the test fails on the `expect` — the right
+    /// verdict for the wrong reason, and a portal whose login page answers (which is
+    /// the real case) would sail past. With a 200 waiting behind the redirect, a
+    /// following client reaches `Ok(true)` and dies on the assertion that names the
+    /// hazard. `seen` rather than `requests` because a correct client never fetches
+    /// that second response and joining would wait for it forever.
     #[tokio::test]
     async fn a_302_on_a_write_is_not_followed_and_is_reported_as_a_failed_write() {
-        let server = StubServer::start(vec![redirect_302("/login")]);
+        let server = StubServer::start(vec![
+            redirect_302("/login"),
+            json_200(r#"{"id":"a worklog that was never created"}"#),
+        ]);
         let created = client(&server.base_url)
             .create_worklog(&create_request())
             .await
             .expect("a redirect is not an exception");
 
-        assert!(!created, "302 is not 200");
-        let requests = server.requests();
-        assert_eq!(requests.len(), 1, "the write must not be re-issued");
-        assert_eq!(requests[0].method, "POST");
+        assert!(
+            !created,
+            "a 302 on a write is not a written worklog, whatever answers behind it"
+        );
+        let seen = server.seen();
+        assert_eq!(
+            seen.len(),
+            1,
+            "the write must not be re-issued as a GET of the redirect target"
+        );
+        assert_eq!(seen[0].method, "POST");
+        assert_eq!(seen[0].target, "/worklog/create");
     }
 
     /// The other side of the same split: GET *is* in `ALLOWED_FOR_REDIRECT`, so a

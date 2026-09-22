@@ -96,6 +96,7 @@ pub(crate) fn build_client(
 pub(crate) mod stub {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
 
     /// What the server saw, in the order it saw it.
@@ -120,7 +121,11 @@ pub(crate) mod stub {
 
     pub(crate) struct StubServer {
         pub base_url: String,
-        handle: Option<JoinHandle<Vec<CapturedRequest>>>,
+        handle: Option<JoinHandle<()>>,
+        /// Written by the server thread as each request lands, so that a test can
+        /// read what arrived without first waiting for every canned response to be
+        /// consumed. `seen` needs that; `requests` does not.
+        captured: Arc<Mutex<Vec<CapturedRequest>>>,
     }
 
     /// `HTTP/1.1 200 OK` with a JSON body.
@@ -149,8 +154,10 @@ pub(crate) mod stub {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stub server");
             let port = listener.local_addr().expect("stub server port").port();
 
+            let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&captured);
+
             let handle = std::thread::spawn(move || {
-                let mut captured = Vec::new();
                 for canned in responses {
                     let (mut stream, _) = listener.accept().expect("accept");
                     let request = read_request(&mut stream);
@@ -158,14 +165,14 @@ pub(crate) mod stub {
                         .write_all(canned.as_bytes())
                         .expect("write the canned response");
                     stream.flush().ok();
-                    captured.push(request);
+                    sink.lock().expect("the capture lock").push(request);
                 }
-                captured
             });
 
             Self {
                 base_url: format!("http://127.0.0.1:{port}"),
                 handle: Some(handle),
+                captured,
             }
         }
 
@@ -177,7 +184,18 @@ pub(crate) mod stub {
                 .take()
                 .expect("the server was already joined")
                 .join()
-                .expect("the stub server thread panicked")
+                .expect("the stub server thread panicked");
+            self.captured.lock().expect("the capture lock").clone()
+        }
+
+        /// Everything that has arrived so far, without joining. This is for the test
+        /// that cans *more* responses than a correct client will ask for: `requests`
+        /// would block forever on the response nobody fetches, and the surplus canned
+        /// response is the whole instrument — if it is ever consumed, the client did
+        /// something it must not do. The server thread is left parked on `accept`
+        /// and ends with the test process, the same bargain `start_black_hole` makes.
+        pub fn seen(&self) -> Vec<CapturedRequest> {
+            self.captured.lock().expect("the capture lock").clone()
         }
     }
 
