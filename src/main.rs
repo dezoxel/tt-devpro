@@ -3,9 +3,11 @@
 //! Ports `Main.kt`. The clap root mirrors Clikt's `TtCli`; subcommands are wired
 //! in as their modules land.
 
+mod commands;
 mod config;
 mod fmt;
 mod model;
+mod service;
 
 use clap::Parser;
 
