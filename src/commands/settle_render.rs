@@ -38,14 +38,13 @@ use std::collections::BTreeMap;
 
 use chrono::{Datelike, NaiveDate, Weekday};
 
-use crate::service::normalizer::strip_date_suffix;
 use crate::fmt::{java_fmt, java_fmt_width};
 use crate::model::{ActionType, SettleAction};
+use crate::service::normalizer::strip_date_suffix;
 
 /// `"Development work"`, the C12 fallback when an aggregate carries no
 /// descriptions. `SettleCommand.kt:495`.
 const NO_DESCRIPTION_TITLE: &str = "Development work";
-
 
 /// Minimum width of the project column. `SettleRenderer.kt:52`.
 const MIN_PROJECT_WIDTH: usize = 12;
@@ -312,9 +311,6 @@ fn action_label(action: ActionType) -> String {
     };
     title_case(name)
 }
-
-
-
 
 // ---------------------------------------------------------------------------
 // Tests

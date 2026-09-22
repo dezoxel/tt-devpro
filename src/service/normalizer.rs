@@ -714,9 +714,7 @@ mod tests {
         let with_terminator = DayProjectAggregate {
             date: date(2026, 4, 8),
             chrono_project: "Practices - DevPro - Work".to_string(),
-            descriptions: vec![
-                "Team Sync, Apr 8 2026 - Practices - DevPro - Work\n".to_string(),
-            ],
+            descriptions: vec!["Team Sync, Apr 8 2026 - Practices - DevPro - Work\n".to_string()],
             ..work("Delivery Practices", 0.5)
         };
         assert!(
@@ -727,9 +725,7 @@ mod tests {
         // The premise: the identical entry without the terminator IS a meeting, so
         // the assertion above is about the terminator and not about the fixture.
         let without_terminator = DayProjectAggregate {
-            descriptions: vec![
-                "Team Sync, Apr 8 2026 - Practices - DevPro - Work".to_string(),
-            ],
+            descriptions: vec!["Team Sync, Apr 8 2026 - Practices - DevPro - Work".to_string()],
             ..with_terminator.clone()
         };
         assert!(normalizer.is_meeting_entry(&without_terminator));
