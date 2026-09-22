@@ -6,8 +6,6 @@ package-lock.json
 .idea/
 
 # Build
-build/
-.gradle/
 target/
 
 # Local settings / agent scaffolding

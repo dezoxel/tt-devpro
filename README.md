@@ -2,7 +2,7 @@
 
 A single global CLI that syncs time entries from **Chrono** (local time tracker) to the **Dev.Pro Time Tracking Portal**. It reads your Chrono entries, aggregates them by date + project, normalizes each day to 8 hours (meetings preserved, work scaled), and syncs them as worklogs.
 
-No Docker, no Gradle-on-PATH at runtime — `tt-devpro` is a self-contained binary on your `PATH`.
+`tt-devpro` is one self-contained binary on your `PATH` — no runtime engine, no Docker.
 
 ## Install
 
@@ -10,23 +10,9 @@ No Docker, no Gradle-on-PATH at runtime — `tt-devpro` is a self-contained bina
 ./install.sh
 ```
 
-This builds and installs `tt-devpro` to `~/.local/bin/`:
+This runs `cargo build --release` and copies the binary to `~/.local/bin/tt-devpro`. The script warns if `~/.local/bin` is not on your `PATH`.
 
-- **Native** (preferred) — a single self-contained binary via GraalVM `native-image`, no JVM needed at runtime. Requires a GraalVM JDK; the script auto-detects one installed via SDKMAN.
-- **JVM fallback** — `./install.sh --jvm` (or automatic if native-image is unavailable) builds a `gradle installDist` launcher that runs on any host JDK ≥ 17.
-
-Ensure `~/.local/bin` is on your `PATH`.
-
-### Build toolchain (one-time)
-
-The native build needs a GraalVM JDK 21. Simplest, no-sudo path:
-
-```bash
-curl -s "https://get.sdkman.io" | bash
-sdk install java 21.0.11-graal
-```
-
-`install.sh` and the `Makefile` pick this up automatically via `JAVA_HOME`.
+The only prerequisite is a stock Rust toolchain. The crate is edition **2024** and declares `rust-version = "1.87"`, so any Rust ≥ 1.87 builds it; nothing else needs to be installed.
 
 ## Usage
 
@@ -34,19 +20,33 @@ sdk install java 21.0.11-graal
 tt-devpro settle                       # Interactive: review each unfilled day, approve/edit/skip
 tt-devpro settle --dry-run             # Readable per-day summary of proposed actions, nothing written
 tt-devpro settle --json                # Machine-readable JSON of proposed actions
-tt-devpro settle --include-today       # Also offer today, whose hours aren't final yet
+tt-devpro settle --include-today       # Also settle today, whose hours aren't final yet
 tt-devpro settle --from 2026-07-01 --to 2026-07-15   # Batch a specific range
 ```
 
-- **Interactive** (a TTY): steps through each unfilled day for `[A]pprove / [E]dit / [D]elete / [S]kip`.
-- **Piped / non-interactive**: prints the same readable summary as `--dry-run` instead of prompting.
+- **Interactive** (stdin *and* stdout are both terminals): steps through each unfilled day for `[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all`.
+- **Piped / non-interactive** (either stream redirected): prints the same readable summary as `--dry-run` instead of prompting.
 - `--dry-run` and `--json` compute the proposals without applying them. If both are given, `--json` wins.
+- Without `--from`/`--to`, `settle` runs day-by-day over a 45-day scan. With either given, it runs as a batch over the range: `--from` defaults to the 1st of the current month, `--to` to the last completed day.
 
-**The window ends at the last completed day.** `settle` proposes days that came back under 8h, and today qualifies by construction — it isn't over. Left unbounded, the filler and borrowing synthesis rounded a half-finished day up to a convincing 8h and parked it in the review table next to the legitimate one, where a single `[A]` published it. Future days got in the same way, since Chrono also holds planned entries for days that haven't started. So the default upper bound is yesterday: any date you didn't type is a completed date. `--include-today` moves the bound to today for the deliberate case (closing the books early before time off) and never past it. An explicit `--from`/`--to` is honoured verbatim, with a note on stderr if the range reaches today or beyond.
+Direct portal calls live under `api`:
+
+```bash
+tt-devpro api get-projects                    # Assigned projects as of today
+tt-devpro api get-projects --date 2026-07-01  # ...as of any other date
+tt-devpro api get-worklogs --date 2026-07-01  # Worklogs for a period (normalView endpoint)
+tt-devpro api create-worklog ...              # Create / update / delete a single worklog
+```
+
+`api get-projects` is **date-scoped, and the date is part of the answer.** The portal endpoint is `assignedProjectsOnDate` — assignments exist per date, not globally — so the command defaults to today and prints the date it queried in its header (`Assigned projects as of 2026-09-21 (32):`). This command gets used precisely when something is already wrong and its output is trusted most, so never read the list without reading the date above it.
+
+Every command prints its own help with `--help` and exits 0; a usage failure prints the usage line plus one `Error:` line per problem and exits **1**. Note that `api create-worklog` binds `-h` to `--hours`, not to help — use the long `--help` there.
+
+**The settle window ends at the last completed day.** `settle` proposes days that came back under 8h, and today qualifies by construction — it isn't over. Left unbounded, the filler and borrowing synthesis rounded a half-finished day up to a convincing 8h and parked it in the review table next to the legitimate one, where a single `[A]` published it. Future days got in the same way, since Chrono also holds planned entries for days that haven't started. So the default upper bound is yesterday: any date you didn't type is a completed date. `--include-today` moves the bound to today for the deliberate case (closing the books early before time off) and never past it. An explicit `--from`/`--to` is honoured verbatim, with a note on stderr if the range reaches today or beyond. The Chrono fetch deliberately reaches one day past the cutoff on the UTC axis to catch late-night local entries; every entry is then re-dated to its local day, so that padding can never introduce a future local date.
 
 ## Authentication
 
-The portal authenticates API calls with a server-side session cookie (scoped to `.dev.pro`, ~2-week lifetime), saved to `~/.tt-cookie`.
+The portal authenticates API calls with a server-side session cookie scoped to `.dev.pro`, saved to `~/.tt-cookie`.
 
 ```bash
 make auth      # or: ./auth.sh
@@ -54,7 +54,7 @@ make auth      # or: ./auth.sh
 
 This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window) against a persistent profile, so the Google login and its MFA are asked for once and then reused.
 
-A cookie is written only after the portal answered `200` to that exact cookie on an authenticated endpoint, and the verified account is printed — presence in the browser profile proves nothing, since a dead cookie lingers there forever. If the saved session is rejected, `auth` drops the `.dev.pro` cookies (the Google session survives), logs in again and verifies the new one. When no session can be obtained it fails with a non-zero exit and leaves `~/.tt-cookie` untouched, rather than re-blessing a dead cookie.
+A cookie is written only after the portal answered `200` to that exact cookie on `/api/contact/currentUser`, and the verified account is printed — presence in the browser profile proves nothing, since a dead cookie lingers there forever. The check bypasses the browser jar and does not follow redirects, so a login page can never pose as a success. If the saved session is rejected, `auth` drops the `.dev.pro` cookies (the Google session survives), logs in again and verifies the new one. When no session can be obtained it fails with a non-zero exit and leaves `~/.tt-cookie` untouched, rather than re-blessing a dead cookie.
 
 ## Configuration (`~/.tt-config.yaml`)
 
@@ -73,45 +73,56 @@ overrides:      # Reroute entries by pattern before mapping
 project_ids:    # Fallback ids by DevPro project name (see below)
 ```
 
-Unmapped Chrono projects are silently skipped — if entries are missing, check your mappings.
+Chrono project names use the flat format (`Project - Parent - Work`) or the hierarchical slash format (`Project/Parent/Work`).
 
-`project_ids` is a **fallback**, not an override. Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` prints a warning naming the project and the id it used, since a hardcoded id can quietly go stale. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
+**Two different things happen to a Chrono project the config does not cover, and only one of them is silent.** Only projects whose name ends in `DevPro - Work` or `DevPro/Work` are considered at all; everything else is dropped without a word. That is the silent one, and it is why a day short on hours usually means the Chrono project is named outside that suffix rather than missing from `mappings`. A project that *does* end in the suffix but has no mapping is the opposite: the run stops with an error naming the project, printing the YAML block to paste into `~/.tt-config.yaml`, and listing what is configured today. Silence points at the Chrono name; a crash points at the config.
+
+**Meeting detection reads `~/knowledge-base` off disk**, outside the YAML config. On startup the normalizer walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk swallows every failure: a missing or unreadable knowledge base yields *no meetings* rather than an error, so every entry is then treated as scalable work. That is silent, so if a day's meetings are suddenly being scaled, check that `~/knowledge-base` is where the tool expects it.
+
+`project_ids` is a **fallback, not an override.** Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` warns on stderr naming the project and the id it used, since a hardcoded id can quietly go stale. A stale configured id silently beating a correct live one would post worklogs to the wrong project unnoticed, which is worse than the crash the fallback prevents. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
 
 ## Development
 
-Sources live in `src/main/kotlin/pro/dev/tt/`. The Gradle wrapper (`./gradlew`)
-is committed, so you don't need a system Gradle — you only need a GraalVM JDK on
-`JAVA_HOME` for the native build (see [Build toolchain](#build-toolchain-one-time);
-`make`/`install.sh` set it automatically from SDKMAN).
-
-Typical loop — **edit → test → reinstall**:
+Sources live in `src/`, tests in `src/` (unit) and `tests/` (integration). Typical loop — **edit → test → reinstall**:
 
 ```bash
-# 1. make your change under src/main/kotlin/...
-make test          # 2. run the suite (fast; add tests under src/test/kotlin/...)
-make install       # 3. rebuild the native image AND reinstall it to ~/.local/bin
+# 1. make your change under src/...
+make test          # 2. run the suite
+make install       # 3. rebuild the release binary AND reinstall it to ~/.local/bin
 tt-devpro settle --dry-run   # 4. exercise the installed binary
 ```
 
-`make install` (or `./install.sh`) always rebuilds *and* reinstalls, so the
-global `tt-devpro` on your `PATH` reflects your latest changes — there is no
-separate "deploy" step. Other targets:
+`make install` (or `./install.sh`) always rebuilds *and* reinstalls, so the global `tt-devpro` on your `PATH` reflects your latest changes — there is no separate "deploy" step. Other targets:
 
 ```bash
-make build     # Build the native image only (build/native/nativeCompile/tt-devpro)
+make build     # Build the release binary only (target/release/tt-devpro)
 make test      # Run the test suite
 make clean     # Remove build artifacts
 ```
 
-If you change how the app uses reflection (new serialized types, new HTTP
-paths), regenerate the native-image metadata so the binary keeps working:
+The gates the suite is expected to pass clean:
 
 ```bash
-JAVA_HOME=$(ls -d ~/.sdkman/candidates/java/*graal* | tail -1) \
-  ./gradlew -Pagent run --args="settle --dry-run"           # capture with the tracing agent
-./gradlew metadataCopy --task run \
-  --dir src/main/resources/META-INF/native-image             # copy config into the repo
-make install                                                 # rebuild with the new metadata
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-See `CLAUDE.md` for architecture notes.
+## Resolving the `*.kt` citations in the sources
+
+The Rust sources and tests carry citations of the form `SomeFile.kt:NNN`, each pointing at the Kotlin implementation the behaviour was derived from. **That Kotlin tree is no longer on any branch.** It was deleted when the Rust port took over, and its final state is commit **`06fb43e`**, which is the only place those line numbers resolve.
+
+Every such citation — both the ones naming implementation files under `src/main/kotlin/` and the ones naming test files under `src/test/kotlin/` — refers to that tree at `06fb43e`. Read any cited file with:
+
+```bash
+git show 06fb43e:<path>
+```
+
+Worked examples, one from each half of the tree:
+
+```bash
+git show 06fb43e:src/main/kotlin/pro/dev/tt/commands/SettleCommand.kt
+git show 06fb43e:src/test/kotlin/pro/dev/tt/SettleWindowTest.kt
+```
+
+To jump straight to a cited line, pipe it: `git show 06fb43e:<path> | sed -n '197p'`.
