@@ -3,6 +3,7 @@
 //! Ports `Main.kt`. The clap root mirrors Clikt's `TtCli`; subcommands are wired
 //! in as their modules land.
 
+mod api;
 mod commands;
 mod config;
 mod cookie;

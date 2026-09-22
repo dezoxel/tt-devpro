@@ -1524,12 +1524,19 @@ mod tests {
     ///
     /// The source hours are reconstructed from the capture's borrowed hours (each is
     /// a quarter multiple that the cap never bound, except the last), and the source
-    /// dates are the capture's `sourceDate` values verbatim. The ordering is the
-    /// point: `"Sync w Ivan"`, `"Analyze the Cursor usage export…"` and
-    /// `"Program management discussion"` all tie at 0.5h, so the stable sort's
-    /// insertion order — itself the normalizer's `(date, devproProjectName)` order —
-    /// is what makes the total land on 4.0h with `"Send Omar…"` taking the last
-    /// 0.25h rather than being cut off.
+    /// dates are the capture's `sourceDate` values verbatim.
+    ///
+    /// What the capture witnesses is the *set*: five titles, their hours, their source
+    /// dates, and the 4.0h total. It does not witness the row order asserted below —
+    /// the capture's JSON is grouped by project, which is the renderer's doing,
+    /// downstream of `borrow_for_day` — and the order is not what lands the total on
+    /// 4.0h either: `"Sync w Ivan"`, `"Analyze the Cursor usage export…"` and
+    /// `"Program management discussion"` all tie at 0.5h and all three fit, while
+    /// `"Send Omar…"` at 0.25h sorts last under every permutation. The order is
+    /// asserted here as a consequence of the stable sort, and the sort's tie-break is
+    /// pinned where it actually decides an outcome, in
+    /// `a_tie_in_frequency_is_broken_by_first_encounter_order` and
+    /// `a_tie_block_that_the_sort_must_actually_move_keeps_its_encounter_order`.
     #[test]
     fn the_captured_2026_09_18_day_borrows_the_five_entries_the_incumbent_logged() {
         let inveniam = "Inveniam Measurabl - Presales - DevPro - Work";
