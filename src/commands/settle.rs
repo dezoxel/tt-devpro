@@ -1577,10 +1577,9 @@ impl Settle<'_> {
         last_settleable_day(self.today, self.args.include_today)
     }
 
-    /// True when the invocation named at least one end of a range, which is the
-    /// condition three separate places in the incumbent branch on.
+    /// [`explicit_range`] against this run's arguments.
     fn explicit_range(&self) -> bool {
-        self.args.from.is_some() || self.args.to.is_some()
+        explicit_range(self.args)
     }
 
     /// [`resolve_range`] against this run's clock, with the note echoed to stderr.
@@ -2102,6 +2101,52 @@ fn report_failure(error: &anyhow::Error, io: &mut dyn Console) {
     }
 }
 
+/// Which of the four modes an invocation selects.
+///
+/// The incumbent has no such type: its four arms are the four branches of one `if`
+/// chain inside `SettleCommand.run` (`SettleCommand.kt:91-104`). Naming the choice
+/// is what lets the precedence be asserted without a portal, a cookie or a clock —
+/// see [`mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Json,
+    DryRun,
+    Batch,
+    DayByDay,
+}
+
+/// The incumbent's mode precedence (`SettleCommand.kt:91-104`), as a function of
+/// the arguments alone: `--json` wins over `--dry-run`, an explicit range wins over
+/// the scan, and the scan is the default.
+///
+/// Pure on purpose. `dispatch` builds both clients from [`crate::api::portal::BASE_URL`]
+/// and `~/.tt-cookie` inline, so the chain that used to live there could not be
+/// driven from a test, and the test harness carried a second verbatim copy of it
+/// that no test compared against the first. Both now route on this one object, so
+/// the two cannot drift apart. `mode` names the mode and resolves nothing — the
+/// range is still resolved by the caller, inside the `Batch` arm.
+fn mode(args: &SettleArgs) -> Mode {
+    if args.json {
+        Mode::Json
+    } else if args.dry_run {
+        Mode::DryRun
+    } else if explicit_range(args) {
+        Mode::Batch
+    } else {
+        Mode::DayByDay
+    }
+}
+
+/// True when the invocation named at least one end of a range, which is the
+/// condition three separate places in the incumbent branch on (`SettleCommand.kt:97`,
+/// `:283`, `:317`).
+///
+/// It is an `or`: one end is enough, because `resolveRange` defaults the other
+/// (C22). Free rather than a method so that [`mode`] needs no [`Settle`].
+fn explicit_range(args: &SettleArgs) -> bool {
+    args.from.is_some() || args.to.is_some()
+}
+
 /// The body of `SettleCommand.run` after the config has loaded
 /// (`SettleCommand.kt:88-102`), as one fallible unit so that the two catch clauses
 /// have a single `Err` to look at.
@@ -2131,17 +2176,16 @@ async fn dispatch(
         today,
     };
 
-    // `:90-102`, in order: `--json` wins over `--dry-run`, an explicit range wins
-    // over the scan, and the scan is the default.
-    if args.json {
-        settle.run_json_mode(io).await
-    } else if args.dry_run {
-        settle.run_dry_run_mode(io).await
-    } else if settle.explicit_range() {
-        let range = settle.resolve_range(io);
-        settle.run_batch_mode(range.from, range.to, io).await
-    } else {
-        settle.run_day_by_day_mode(io).await
+    // `:91-104`. The precedence itself lives in `mode`, which is where it is
+    // tested; this is only the wiring from a named mode to the run that serves it.
+    match mode(args) {
+        Mode::Json => settle.run_json_mode(io).await,
+        Mode::DryRun => settle.run_dry_run_mode(io).await,
+        Mode::Batch => {
+            let range = settle.resolve_range(io);
+            settle.run_batch_mode(range.from, range.to, io).await
+        }
+        Mode::DayByDay => settle.run_day_by_day_mode(io).await,
     }
 }
 
@@ -2457,6 +2501,176 @@ mod tests {
             }),
             aspect: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Mode precedence (`SettleCommand.kt:91-104`)
+    // -----------------------------------------------------------------------
+    //
+    // The four-way choice carries no number of its own in "Behavioural contracts
+    // — the parity oracle". Its numbered neighbours are C7, whose `quiet`
+    // predicate is the same `--json || --dry-run` pair, and C22, which owns the
+    // explicit range; each test below cites the one it borders.
+    //
+    // It is also the one rule the differential parity harness cannot reach: every
+    // argv that harness is allowed to run carries `--dry-run` or `--json`, so
+    // `Batch` and `DayByDay` are never taken there and only one of the three
+    // precedence edges is exercised. Recorded as limitation 3 in
+    // `~/.cache/tt-devpro-rewrite/parity/README.md`, "What this instrument CANNOT
+    // establish". These tests are that coverage, and they are why `mode` is a
+    // function of `SettleArgs` alone.
+
+    /// C7's `--json || --dry-run` pair, first half. `SettleCommand.kt:91-93`:
+    /// `--json` on its own routes to `runJsonMode`.
+    #[test]
+    fn json_alone_selects_json_mode() {
+        let args = SettleArgs {
+            json: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Json);
+    }
+
+    /// C7's pair, second half. `SettleCommand.kt:94-96`: `--dry-run` on its own
+    /// routes to `runDryRunMode`, not to the interactive scan.
+    #[test]
+    fn dry_run_alone_selects_dry_run_mode() {
+        let args = SettleArgs {
+            dry_run: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::DryRun);
+    }
+
+    /// C7, and the first of the three precedence edges.
+    /// `SettleCommand.kt:91-96`: the `--json` test comes first, so both flags
+    /// together are JSON. The incumbent's own `--dry-run` help text says it —
+    /// "(--json wins if both are given)". Swap the two branches and this fails.
+    #[test]
+    fn json_wins_over_dry_run_when_both_are_given() {
+        let args = SettleArgs {
+            json: true,
+            dry_run: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Json);
+    }
+
+    /// C7 against C22. `SettleCommand.kt:91-99`: the `--json` test is
+    /// unconditional, not "JSON unless a range was named". Without this case a
+    /// port could guard the first branch with `json && !explicit_range(args)` and
+    /// still pass `json_wins_over_dry_run_when_both_are_given`, because that one
+    /// names no range.
+    #[test]
+    fn json_wins_over_dry_run_even_with_an_explicit_range() {
+        let args = SettleArgs {
+            from: Some(d("2026-09-01")),
+            to: Some(d("2026-09-15")),
+            json: true,
+            dry_run: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Json);
+    }
+
+    /// C22 yielding to C7. `SettleCommand.kt:94-99`: the `--dry-run` test is
+    /// reached before the range test, so a dry run over a named range is still a
+    /// dry run and still writes nothing. Hoist the range branch above it and this
+    /// fails — with `Batch`, which applies worklogs.
+    #[test]
+    fn dry_run_wins_over_an_explicit_range() {
+        let args = SettleArgs {
+            from: Some(d("2026-09-01")),
+            to: Some(d("2026-09-15")),
+            dry_run: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::DryRun);
+    }
+
+    /// C22, and the second precedence edge, held as a contrast so the swap is
+    /// visible in one place. `SettleCommand.kt:97-104`: the same arguments minus
+    /// the range ends fall through to `runDayByDayMode`. Exchange the last two
+    /// branches and both halves fail at once.
+    #[test]
+    fn an_explicit_range_displaces_the_scan_that_would_otherwise_run() {
+        let scan = SettleArgs::default();
+        let ranged = SettleArgs {
+            from: Some(d("2026-09-01")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&scan), Mode::DayByDay);
+        assert_eq!(mode(&ranged), Mode::Batch);
+    }
+
+    /// C22. `SettleCommand.kt:97` is `from != null || to != null`, so one end is
+    /// enough — `resolveRange` defaults `--to` to the cutoff. Turn the `||` into
+    /// an `&&` and this is the first of the three tests that catches it.
+    #[test]
+    fn a_from_alone_is_enough_to_select_batch_mode() {
+        let args = SettleArgs {
+            from: Some(d("2026-09-01")),
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Batch);
+    }
+
+    /// C22, the other end. `SettleCommand.kt:97`, same `||`: a lone `--to` is a
+    /// range too, with `--from` defaulting to the 1st of the month. An `&&` fails
+    /// here as well, and a port that only checked `from` fails here and nowhere
+    /// else.
+    #[test]
+    fn a_to_alone_is_enough_to_select_batch_mode() {
+        let args = SettleArgs {
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Batch);
+    }
+
+    /// C22, both ends. `SettleCommand.kt:97`: the ordinary spelling, and the one
+    /// case an exclusive-or would let through while still passing the two
+    /// single-end tests above.
+    #[test]
+    fn both_range_ends_together_select_batch_mode() {
+        let args = SettleArgs {
+            from: Some(d("2026-09-01")),
+            to: Some(d("2026-09-15")),
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&args), Mode::Batch);
+    }
+
+    /// C7 by contrast, and the third precedence edge: the default is the one
+    /// interactive mode. `SettleCommand.kt:101-104` — no flag and no range end
+    /// falls all the way through to `runDayByDayMode`, which prompts. Any branch
+    /// rewritten to catch the bare invocation fails here.
+    #[test]
+    fn neither_a_flag_nor_a_range_end_selects_day_by_day_mode() {
+        let args = SettleArgs::default();
+        assert_eq!(mode(&args), Mode::DayByDay);
+    }
+
+    /// C1, not C22. `--include-today` moves the cutoff (`SettleCommand.kt:77`)
+    /// and is absent from the routing switch at `:91-104`, so it must not reach
+    /// the mode choice. A port that wrote `explicit_range(args) ||
+    /// args.include_today` — plausible, since both concern which days are in
+    /// scope — would turn a bare `settle --include-today` into a batch run over a
+    /// defaulted range instead of the interactive scan, and fails here.
+    #[test]
+    fn include_today_is_not_part_of_the_mode_choice() {
+        let bare = SettleArgs {
+            include_today: true,
+            ..SettleArgs::default()
+        };
+        let ranged = SettleArgs {
+            from: Some(d("2026-09-01")),
+            include_today: true,
+            ..SettleArgs::default()
+        };
+        assert_eq!(mode(&bare), Mode::DayByDay);
+        assert_eq!(mode(&ranged), Mode::Batch);
     }
 
     // -----------------------------------------------------------------------
@@ -4836,20 +5050,20 @@ mod tests {
             normalizer: &normalizer,
             today,
         };
-        // `dispatch`'s own routing, verbatim. It used to stop at the two read-only
-        // modes, which left the `!io.present()` branches of the other two — the C7
-        // contract the project's CLAUDE.md states as "when stdout is not a TTY,
-        // settle prints the readable --dry-run summary instead of prompting" —
-        // with no test able to reach them.
-        if args.json {
-            settle.run_json_mode(io).await
-        } else if args.dry_run {
-            settle.run_dry_run_mode(io).await
-        } else if settle.explicit_range() {
-            let range = settle.resolve_range(io);
-            settle.run_batch_mode(range.from, range.to, io).await
-        } else {
-            settle.run_day_by_day_mode(io).await
+        // `dispatch`'s own routing — the same `mode` call, not a second copy of
+        // the chain. It used to stop at the two read-only modes, which left the
+        // `!io.present()` branches of the other two — the C7 contract the
+        // project's CLAUDE.md states as "when stdout is not a TTY, settle prints
+        // the readable --dry-run summary instead of prompting" — with no test
+        // able to reach them.
+        match mode(args) {
+            Mode::Json => settle.run_json_mode(io).await,
+            Mode::DryRun => settle.run_dry_run_mode(io).await,
+            Mode::Batch => {
+                let range = settle.resolve_range(io);
+                settle.run_batch_mode(range.from, range.to, io).await
+            }
+            Mode::DayByDay => settle.run_day_by_day_mode(io).await,
         }
     }
 
