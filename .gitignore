@@ -8,6 +8,7 @@ package-lock.json
 # Build
 build/
 .gradle/
+target/
 
 # Local settings / agent scaffolding
 .claude/settings.local.json
