@@ -2038,6 +2038,28 @@ impl Settle<'_> {
         io.out("Done! All unfilled days processed.");
         Ok(())
     }
+
+    /// The incumbent's `if` chain (`SettleCommand.kt:91-104`) reduced to its wiring
+    /// alone: which run serves the mode [`mode`] has already named.
+    ///
+    /// It sits on `Settle` because every arm's target is already a `&self` method
+    /// and both callers hold a `Settle` by the time they route — `dispatch` one
+    /// built from the real clients, the test harness one built from stubs. The four
+    /// arms used to exist twice, verbatim, and only the harness's copy was ever
+    /// executed by a test, so the production copy could have exchanged two arms and
+    /// stayed green. Keeping them in one place is the whole point of the method; do
+    /// not inline it back into either caller.
+    async fn run_chosen_mode(&self, io: &mut dyn Console) -> Result<()> {
+        match mode(self.args) {
+            Mode::Json => self.run_json_mode(io).await,
+            Mode::DryRun => self.run_dry_run_mode(io).await,
+            Mode::Batch => {
+                let range = self.resolve_range(io);
+                self.run_batch_mode(range.from, range.to, io).await
+            }
+            Mode::DayByDay => self.run_day_by_day_mode(io).await,
+        }
+    }
 }
 
 /// Appends `name` under `date`, keeping both levels in first-encounter order and
@@ -2122,9 +2144,11 @@ enum Mode {
 /// Pure on purpose. `dispatch` builds both clients from [`crate::api::portal::BASE_URL`]
 /// and `~/.tt-cookie` inline, so the chain that used to live there could not be
 /// driven from a test, and the test harness carried a second verbatim copy of it
-/// that no test compared against the first. Both now route on this one object, so
-/// the two cannot drift apart. `mode` names the mode and resolves nothing — the
-/// range is still resolved by the caller, inside the `Batch` arm.
+/// that no test compared against the first. The arms now exist once, in
+/// [`Settle::run_chosen_mode`], which both callers go through; this function is the
+/// precedence alone and is asserted on all four outcomes directly. `mode` names the
+/// mode and resolves nothing — the range is still resolved by its caller, inside
+/// the `Batch` arm.
 fn mode(args: &SettleArgs) -> Mode {
     if args.json {
         Mode::Json
@@ -2177,22 +2201,17 @@ async fn dispatch(
         today,
     };
 
-    // `:91-104`. The precedence itself is C34 and lives in `mode`, which is where
-    // it is tested; this is only the wiring from a named mode to the run that
-    // serves it. That wiring has no unit-test seam — the two clients above are
-    // built from `BASE_URL` and `~/.tt-cookie` inline — and it is not meant to
-    // have one: the differential parity harness covers it live, where the
-    // `settle-dryrun-and-json` case passes both flags and expects JSON, so these
-    // two arms cannot be exchanged unnoticed.
-    match mode(args) {
-        Mode::Json => settle.run_json_mode(io).await,
-        Mode::DryRun => settle.run_dry_run_mode(io).await,
-        Mode::Batch => {
-            let range = settle.resolve_range(io);
-            settle.run_batch_mode(range.from, range.to, io).await
-        }
-        Mode::DayByDay => settle.run_day_by_day_mode(io).await,
-    }
+    // `:91-104`. The precedence itself is C34 and lives in `mode`; the wiring from
+    // a named mode to the run that serves it is `run_chosen_mode`, and this caller
+    // and the test harness share that one copy of it. So the wiring does have a
+    // unit-test seam: the harness builds the same `Settle` from stubs and routes
+    // through the same method, and an exchanged pair of arms fails there. What is
+    // still unique to this function is the composition above it — the two clients
+    // built from `BASE_URL` and `~/.tt-cookie` inline, which no unit test can
+    // construct — and that live composition is what the differential parity
+    // harness covers, where the `settle-dryrun-and-json` case passes both flags and
+    // expects JSON.
+    settle.run_chosen_mode(io).await
 }
 
 /// `tt-devpro settle`.
@@ -5040,11 +5059,14 @@ mod tests {
         }
     }
 
-    /// The tail of [`dispatch`] with the two clients pointed at stubs instead of at
-    /// the portal and at `~/.tt-cookie`. `dispatch` itself builds them from
-    /// [`crate::api::portal::BASE_URL`] and the cookie file, so it cannot be driven
-    /// from a test without a production seam this port does not have — which is why
-    /// the mode precedence it encodes is left to the CLI-level tests.
+    /// The head of [`dispatch`] with the two clients pointed at stubs instead of at
+    /// the portal and at `~/.tt-cookie`, followed by the very
+    /// [`Settle::run_chosen_mode`] call `dispatch` ends on. `dispatch` builds its
+    /// clients from [`crate::api::portal::BASE_URL`] and the cookie file, so that
+    /// construction cannot be driven from a test without a production seam this
+    /// port does not have. The routing after it can be, and is: it is one method
+    /// and this harness calls it, so what these tests pin about an arm they pin
+    /// about production too.
     async fn run_settle(
         args: &SettleArgs,
         config: &Config,
@@ -5063,21 +5085,15 @@ mod tests {
             normalizer: &normalizer,
             today,
         };
-        // `dispatch`'s own routing — the same `mode` call, not a second copy of
-        // the chain. It used to stop at the two read-only modes, which left the
+        // `dispatch`'s own routing, reached by calling the same method `dispatch`
+        // calls — the four arms exist once, so a test that pins an arm here pins
+        // the production one. This used to be a second verbatim copy of the chain,
+        // and before that it stopped at the two read-only modes, which left the
         // `!io.present()` branches of the other two — the C7 contract the
         // project's CLAUDE.md states as "when stdout is not a TTY, settle prints
         // the readable --dry-run summary instead of prompting" — with no test
         // able to reach them.
-        match mode(args) {
-            Mode::Json => settle.run_json_mode(io).await,
-            Mode::DryRun => settle.run_dry_run_mode(io).await,
-            Mode::Batch => {
-                let range = settle.resolve_range(io);
-                settle.run_batch_mode(range.from, range.to, io).await
-            }
-            Mode::DayByDay => settle.run_day_by_day_mode(io).await,
-        }
+        settle.run_chosen_mode(io).await
     }
 
     fn json_args(from: &str, to: &str) -> SettleArgs {
