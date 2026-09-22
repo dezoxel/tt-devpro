@@ -178,7 +178,7 @@ fn hyphenated_values_allowed(cmd: clap::Command) -> clap::Command {
 
 /// The `*_HELP` constant for a command path, `[]` being the root.
 ///
-/// `None` is unreachable — [`tests::every_command_in_the_clap_tree_has_a_help_constant`]
+/// `None` is unreachable — `tests::every_command_in_the_clap_tree_has_a_help_constant`
 /// walks the tree and fails if a command is ever added without one — and is returned
 /// rather than defaulted so that adding a command without its help text cannot
 /// quietly serve the wrong text.
@@ -205,7 +205,7 @@ fn help_for(path: &[&str]) -> Option<&'static str> {
 /// (`ApiCommand.kt:74`) has the same name and does **not** convert — the text goes
 /// to the portal as typed. Clikt shows the difference only in the metavar
 /// (`<value>` against `<text>`), which is why this is a table and not an inference.
-/// [`tests::exactly_the_date_converting_options_reject_a_non_date_at_parse_time`]
+/// `tests::exactly_the_date_converting_options_reject_a_non_date_at_parse_time`
 /// holds it against what clap's own value parsers do.
 fn converts_a_date(path: &[&str], long: &str) -> bool {
     matches!(
