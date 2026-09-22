@@ -1,11 +1,14 @@
 #!/bin/bash
 # auth.sh - Refresh DevPro session cookie via browser
 #
-# This script runs the authentication flow on the host machine (not in Docker)
-# because Playwright cannot open a GUI browser inside Docker containers on macOS.
+# The login cannot be done headlessly, which is why authentication is a separate
+# host-side script rather than something the tt-devpro binary does itself: auth.js
+# launches Firefox with `headless: false` and waits for the portal's Google OAuth
+# round-trip — including MFA the first time — to be completed by hand in a visible
+# window. It needs a desktop session with a display; the binary never opens one.
 #
-# The session cookie will be saved to ~/.tt-cookie and will be available to the
-# Docker container via volume mount.
+# On success the cookie the portal accepted is written to ~/.tt-cookie, which is
+# exactly where the binary reads it from (src/cookie.rs).
 
 set -e
 
