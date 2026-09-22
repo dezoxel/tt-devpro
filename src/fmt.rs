@@ -146,7 +146,9 @@ pub fn java_dbl(v: f64) -> String {
     // `{:e}` normalises to one digit before the point, which is the form Java's
     // "d.dddEn" is specified in.
     let sci = format!("{:e}", v.abs());
-    let (mant, exp) = sci.split_once('e').expect("LowerExp always emits an exponent");
+    let (mant, exp) = sci
+        .split_once('e')
+        .expect("LowerExp always emits an exponent");
     let exp: i32 = exp.parse().expect("exponent");
     let digits: String = mant.chars().filter(|c| *c != '.').collect();
 

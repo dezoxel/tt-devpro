@@ -28,7 +28,10 @@ pub fn session_cookie() -> Result<String> {
     } else {
         None
     };
-    resolve(file_contents.as_deref(), std::env::var(COOKIE_ENV).ok().as_deref())
+    resolve(
+        file_contents.as_deref(),
+        std::env::var(COOKIE_ENV).ok().as_deref(),
+    )
 }
 
 /// The whole of `Main.kt:24-39` once the two lookups are parameters.
@@ -153,9 +156,6 @@ mod tests {
     /// Interior whitespace is not touched — only the ends, and only for the file.
     #[test]
     fn interior_whitespace_survives_the_trim() {
-        assert_eq!(
-            resolve(Some("  a=1; b=2  "), None).unwrap(),
-            "a=1; b=2"
-        );
+        assert_eq!(resolve(Some("  a=1; b=2  "), None).unwrap(), "a=1; b=2");
     }
 }

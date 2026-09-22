@@ -94,7 +94,11 @@ pub fn load() -> Result<Config> {
 
 pub fn load_from(path: &Path) -> Result<Config> {
     if !path.exists() {
-        bail!("Config file not found: {}{}", path.display(), MISSING_CONFIG_HELP);
+        bail!(
+            "Config file not found: {}{}",
+            path.display(),
+            MISSING_CONFIG_HELP
+        );
     }
 
     let content = std::fs::read_to_string(path)
@@ -212,7 +216,10 @@ max_synthetic_hours: 2.5
         assert_eq!(config.fillers[0].max_hours_per_period, Some(10.0));
         assert_eq!(config.overrides[0].max_hours, Some(1.5));
         assert_eq!(
-            config.project_ids.get("Delivery Practices").map(String::as_str),
+            config
+                .project_ids
+                .get("Delivery Practices")
+                .map(String::as_str),
             Some("cf84fdca-4809-4678-98b1-2e7cc56537c0")
         );
         assert_eq!(config.max_synthetic_hours, 2.5);

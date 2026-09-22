@@ -306,7 +306,12 @@ mod tests {
     fn a_non_borrowed_action_omits_every_defaulted_field() {
         let json = serde_json::to_value(action()).expect("serialize");
         let object = json.as_object().expect("object");
-        for key in ["isBorrowed", "sourceDate", "existingWorklogId", "isManuallyFixed"] {
+        for key in [
+            "isBorrowed",
+            "sourceDate",
+            "existingWorklogId",
+            "isManuallyFixed",
+        ] {
             assert!(!object.contains_key(key), "{key} should have been omitted");
         }
     }
@@ -334,7 +339,12 @@ mod tests {
         a.is_borrowed = true;
         a.source_date = Some(NaiveDate::from_ymd_opt(2026, 9, 14).unwrap());
         let json = serde_json::to_string(&a).expect("serialize");
-        assert!(json.contains(r#""isFiller":false,"isBorrowed":true,"sourceDate":"2026-09-14","taskTitle""#), "unexpected shape: {json}");
+        assert!(
+            json.contains(
+                r#""isFiller":false,"isBorrowed":true,"sourceDate":"2026-09-14","taskTitle""#
+            ),
+            "unexpected shape: {json}"
+        );
     }
 
     /// `maxHours` defaults to null in `Aggregator.kt:22` and is absent from every
@@ -349,9 +359,18 @@ mod tests {
     /// kotlinx-serialization encodes an enum by its declared name.
     #[test]
     fn action_type_encodes_as_the_kotlin_enum_name() {
-        assert_eq!(serde_json::to_string(&ActionType::Create).unwrap(), r#""CREATE""#);
-        assert_eq!(serde_json::to_string(&ActionType::Update).unwrap(), r#""UPDATE""#);
-        assert_eq!(serde_json::to_string(&ActionType::Skip).unwrap(), r#""SKIP""#);
+        assert_eq!(
+            serde_json::to_string(&ActionType::Create).unwrap(),
+            r#""CREATE""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ActionType::Update).unwrap(),
+            r#""UPDATE""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ActionType::Skip).unwrap(),
+            r#""SKIP""#
+        );
     }
 
     /// `Models.kt:118,120` pin these two keys with `@SerialName`; everything else
@@ -410,7 +429,10 @@ mod tests {
         let json = serde_json::to_string(&body).expect("serialize");
         assert!(!json.contains("googleCalendarEventId"));
         assert!(json.starts_with(r#"{"uniqueId":"w","worklogDate""#));
-        assert!(json.contains(r#""duration":1.0"#), "unexpected shape: {json}");
+        assert!(
+            json.contains(r#""duration":1.0"#),
+            "unexpected shape: {json}"
+        );
     }
 
     /// `isDeletable` defaults to true in `Models.kt:34`, unlike every other
