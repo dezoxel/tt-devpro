@@ -180,6 +180,20 @@ fn suggestion_tail(plural: &str, possibilities: &[&str]) -> String {
     }
 }
 
+/// The usage line a command prints when it fails, which is the **first line of its
+/// own help text** — measured, not assumed. `api get-projects --help` opens with
+/// `Usage: tt-devpro api get-projects [<options>]`, and
+/// `~/.cache/tt-devpro-rewrite/baseline/cli-errors/option-needs-value.err` opens with
+/// the same bytes. That holds for the group commands too, whose usage carries
+/// `<command> [<args>]...`, and for `delete-worklog`, whose usage carries `<id>`.
+///
+/// Deriving it rather than storing a second constant is the point: two constants can
+/// disagree, and the disagreement would show up only on a failing invocation, which
+/// is exactly where nobody is looking.
+pub fn usage_line(help: &str) -> &str {
+    help.split('\n').next().unwrap_or("")
+}
+
 /// The whole stderr body of a usage failure: the usage line, a blank line, then one
 /// `Error: ` line per message. No trailing newline — the caller's `eprintln!` adds
 /// the one the incumbent emits.
