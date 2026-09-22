@@ -204,67 +204,7 @@ pub fn update_request(args: &UpdateWorklogArgs) -> Result<UpdateWorklogRequest> 
 /// is not a form any caller uses. Rejecting is visible; a subtly mis-rounded hex
 /// parser would not be.
 fn parse_hours(raw: &str) -> Result<f64> {
-    java_parse_double(raw).map_err(|message| anyhow::anyhow!(message))
-}
-
-/// The measured `Double.parseDouble` surface, including its two error messages.
-fn java_parse_double(raw: &str) -> Result<f64, String> {
-    // `Double.parseDouble` strips every code unit `<= ' '`, then reports the
-    // *stripped* string in its message: `" abc "` fails with `"abc"`.
-    let trimmed = raw.trim_matches(|c: char| c <= ' ');
-    if trimmed.is_empty() {
-        return Err("empty String".to_string());
-    }
-    parse_trimmed_double(trimmed).ok_or_else(|| format!("For input string: \"{trimmed}\""))
-}
-
-fn parse_trimmed_double(trimmed: &str) -> Option<f64> {
-    let (negative, body) = match trimmed.strip_prefix(['+', '-']) {
-        Some(rest) => (trimmed.starts_with('-'), rest),
-        None => (false, trimmed),
-    };
-
-    // These two are exact and take no type suffix, so they are settled first.
-    if body == "Infinity" {
-        return Some(if negative {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        });
-    }
-    if body == "NaN" {
-        return Some(f64::NAN);
-    }
-    let body = body.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(body);
-    if body.is_empty() {
-        return None;
-    }
-    // Everything Java spells with letters has been handled above, so any remaining
-    // letter other than an exponent marker is Rust being the more permissive of the
-    // two — `inf`, `nan` and friends land here and must be refused.
-    //
-    // It is **not** what refuses the hexadecimal form. An explicit `starts_with("0x")`
-    // guard stood here until a mutation round deleted it with every test still green,
-    // and a second mutation — relaxing this screen to let `x` and `p` through — also
-    // left every test green. Both times the refusal came from the same place it always
-    // did: `str::parse::<f64>` does not read hex floats either. The named divergence in
-    // `parse_hours`' doc comment is therefore a property of the Rust parser rather than
-    // of anything written here, and
-    // `tests::a_hexadecimal_float_is_refused_although_the_jvm_reads_it` pins the
-    // outcome without claiming a mechanism.
-    if body
-        .bytes()
-        .any(|b| b.is_ascii_alphabetic() && b != b'e' && b != b'E')
-    {
-        return None;
-    }
-
-    let signed = if negative {
-        format!("-{body}")
-    } else {
-        body.to_string()
-    };
-    signed.parse::<f64>().ok()
+    crate::commands::java_parse_double(raw).map_err(|message| anyhow::anyhow!(message))
 }
 
 // ---------------------------------------------------------------------------

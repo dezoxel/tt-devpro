@@ -27,6 +27,7 @@
 
 pub mod api;
 pub mod holidays;
+pub mod settle;
 pub mod settle_render;
 pub mod settle_window;
 
@@ -205,6 +206,92 @@ pub fn usage_error(usage: &str, messages: &[String]) -> String {
         out.push_str(message);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Kotlin's two ways of reading a number out of a string
+// ---------------------------------------------------------------------------
+//
+// `ApiCommand.kt:120` uses `String.toDouble()` and `SettleCommand.kt:766` uses
+// `String.toDoubleOrNull()`. They are the same parser: `toDoubleOrNull` screens
+// the input against `ScreenFloatValueRegEx` and then calls `parseDouble` anyway,
+// and the screen was measured to accept exactly what `parseDouble` accepts.
+// Measured by calling the shipped `kotlin-stdlib-1.9.22.jar`'s own function over a
+// 49-value corpus — `~/.cache/tt-devpro-rewrite/measurements/kotlin/NumProbe.java`
+// and `toOrNull.out` — rather than read off the regex: `0x1p3` is accepted (8.0),
+// `0x10` is not, `010` is decimal 10, `\u00a0` is not whitespace and `1_000` is
+// not a number. So one parser serves both, and the hex divergence named in
+// [`api`]'s `parse_hours` applies to the settle prompt too.
+
+/// The measured `Double.parseDouble` surface, including its two error messages.
+pub fn java_parse_double(raw: &str) -> Result<f64, String> {
+    // `Double.parseDouble` strips every code unit `<= ' '`, then reports the
+    // *stripped* string in its message: `" abc "` fails with `"abc"`.
+    let trimmed = raw.trim_matches(|c: char| c <= ' ');
+    if trimmed.is_empty() {
+        return Err("empty String".to_string());
+    }
+    parse_trimmed_double(trimmed).ok_or_else(|| format!("For input string: \"{trimmed}\""))
+}
+
+fn parse_trimmed_double(trimmed: &str) -> Option<f64> {
+    let (negative, body) = match trimmed.strip_prefix(['+', '-']) {
+        Some(rest) => (trimmed.starts_with('-'), rest),
+        None => (false, trimmed),
+    };
+
+    // These two are exact and take no type suffix, so they are settled first.
+    if body == "Infinity" {
+        return Some(if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        });
+    }
+    if body == "NaN" {
+        return Some(f64::NAN);
+    }
+    let body = body.strip_suffix(['d', 'D', 'f', 'F']).unwrap_or(body);
+    if body.is_empty() {
+        return None;
+    }
+    // Everything Java spells with letters has been handled above, so any remaining
+    // letter other than an exponent marker is Rust being the more permissive of the
+    // two — `inf`, `nan` and friends land here and must be refused.
+    //
+    // It is **not** what refuses the hexadecimal form. An explicit `starts_with("0x")`
+    // guard stood here until a mutation round deleted it with every test still green,
+    // and a second mutation — relaxing this screen to let `x` and `p` through — also
+    // left every test green. Both times the refusal came from the same place it always
+    // did: `str::parse::<f64>` does not read hex floats either. The named divergence in
+    // `parse_hours`' doc comment is therefore a property of the Rust parser rather than
+    // of anything written here, and
+    // `tests::a_hexadecimal_float_is_refused_although_the_jvm_reads_it` pins the
+    // outcome without claiming a mechanism.
+    if body
+        .bytes()
+        .any(|b| b.is_ascii_alphabetic() && b != b'e' && b != b'E')
+    {
+        return None;
+    }
+
+    let signed = if negative {
+        format!("-{body}")
+    } else {
+        body.to_string()
+    };
+    signed.parse::<f64>().ok()
+}
+
+/// Kotlin's `String.toDoubleOrNull()` — `SettleCommand.kt:766`, the `New hours:`
+/// prompt. Same accepted set as [`java_parse_double`], with `None` where that one
+/// returns its message, because the caller has its own: `Invalid. Must be >= 0.25`.
+pub fn kotlin_double_or_null(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim_matches(|c: char| c <= ' ');
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_trimmed_double(trimmed)
 }
 
 #[cfg(test)]

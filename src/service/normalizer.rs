@@ -309,7 +309,7 @@ fn java_math_round(a: f64) -> i64 {
 /// `round_to_quarter` panics on NaN before `java_max` could see one. The
 /// transcription is kept and tested anyway, because the function is *named* as a JDK
 /// method and the next caller will take that at face value.
-fn java_max(a: f64, b: f64) -> f64 {
+pub fn java_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {
         return f64::NAN;
     }

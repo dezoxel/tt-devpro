@@ -169,6 +169,51 @@ pub fn java_dbl(v: f64) -> String {
     format!("{sign}{}.{frac}E{exp}", &digits[..1])
 }
 
+
+// ---------------------------------------------------------------------------
+// Java string semantics
+// ---------------------------------------------------------------------------
+//
+// The three below are `java.lang.String` behaviour rather than number formatting,
+// and they live here for the same reason the rest of this module does: they are
+// JVM library semantics that the obvious Rust spelling gets wrong. Each had two
+// private copies before `settle.rs` needed a third — `aggregator.rs` and
+// `settle_render.rs` — which is the shape C27 warns about, so they are one copy
+// now and both of those call this one.
+
+/// `String.length` — UTF-16 code units.
+///
+/// This is the number `%-Ns` pads to and the unit `take(n)` counts, so a port
+/// that reaches for `chars().count()` is right only until a description carries
+/// an emoji. `"A\u{1F600}B"` is 4 to Java and 3 to Rust.
+pub fn utf16_len(s: &str) -> usize {
+    s.encode_utf16().count()
+}
+
+/// `java.lang.String.compareTo` — lexicographic over UTF-16 code units.
+///
+/// Rust's `str` ordering compares UTF-8 bytes, i.e. code points. Measured
+/// divergence: Java puts U+1F600 before U+E000, Rust puts U+E000 first.
+pub fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    a.encode_utf16().cmp(b.encode_utf16())
+}
+
+/// `String.format("%-<width>s", s)`. Left-justified, space-padded to `width`
+/// UTF-16 units, never truncated.
+pub fn pad_right(s: &str, width: usize) -> String {
+    let len = utf16_len(s);
+    if len >= width {
+        s.to_string()
+    } else {
+        let mut padded = String::with_capacity(s.len() + (width - len));
+        padded.push_str(s);
+        for _ in 0..(width - len) {
+            padded.push(' ');
+        }
+        padded
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

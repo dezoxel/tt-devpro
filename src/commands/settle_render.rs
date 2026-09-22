@@ -33,12 +33,11 @@
 //! Values inside each group keep input order, which matters because `sumOf` is a
 //! left fold over `f64` and is therefore order-sensitive. See C28.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use chrono::{Datelike, NaiveDate, Weekday};
 
-use crate::fmt::{java_fmt, java_fmt_width};
+use crate::fmt::{java_fmt, java_fmt_width, pad_right, utf16_cmp, utf16_len};
 use crate::model::{ActionType, SettleAction};
 use crate::service::normalizer::strip_date_suffix;
 
@@ -243,41 +242,15 @@ fn group_by_date(actions: &[SettleAction]) -> BTreeMap<NaiveDate, Vec<&SettleAct
 
 /// Kotlin's `sumOf { it.normalizedHours }` — a left fold from `0.0`, which for
 /// `f64` is not the same as any other association order.
-fn sum_hours<'a>(actions: impl IntoIterator<Item = &'a SettleAction>) -> f64 {
+pub(crate) fn sum_hours<'a>(actions: impl IntoIterator<Item = &'a SettleAction>) -> f64 {
     actions
         .into_iter()
         .fold(0.0, |acc, a| acc + a.normalized_hours)
 }
 
-/// `String.length` — UTF-16 code units, which is what `%-Ns` pads to.
-fn utf16_len(s: &str) -> usize {
-    s.encode_utf16().count()
-}
-
-/// `java.lang.String.compareTo` — lexicographic over UTF-16 code units.
-fn utf16_cmp(a: &str, b: &str) -> Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
-}
-
-/// `String.format("%-<width>s", s)`. Left-justified, space-padded to `width`
-/// UTF-16 units, never truncated.
-fn pad_right(s: &str, width: usize) -> String {
-    let len = utf16_len(s);
-    if len >= width {
-        s.to_string()
-    } else {
-        let mut padded = String::with_capacity(s.len() + (width - len));
-        padded.push_str(s);
-        for _ in 0..(width - len) {
-            padded.push(' ');
-        }
-        padded
-    }
-}
-
 /// Kotlin's `name.lowercase().replaceFirstChar { it.uppercase() }`: `CREATE` →
 /// `Create`, `MONDAY` → `Monday`.
-fn title_case(name: &str) -> String {
+pub(crate) fn title_case(name: &str) -> String {
     let lowered = name.to_lowercase();
     let mut chars = lowered.chars();
     match chars.next() {
@@ -288,7 +261,7 @@ fn title_case(name: &str) -> String {
 
 /// `date.dayOfWeek.name.lowercase().replaceFirstChar { it.uppercase() }.take(3)`,
 /// `SettleRenderer.kt:56`. `java.time.DayOfWeek` names are the source strings.
-fn weekday_abbreviation(date: NaiveDate) -> String {
+pub(crate) fn weekday_abbreviation(date: NaiveDate) -> String {
     let name = match date.weekday() {
         Weekday::Mon => "MONDAY",
         Weekday::Tue => "TUESDAY",
@@ -303,7 +276,7 @@ fn weekday_abbreviation(date: NaiveDate) -> String {
 
 /// `a.action.name.lowercase().replaceFirstChar { it.uppercase() }`,
 /// `SettleRenderer.kt:64`. kotlinx enum names are the declared ones.
-fn action_label(action: ActionType) -> String {
+pub(crate) fn action_label(action: ActionType) -> String {
     let name = match action {
         ActionType::Create => "CREATE",
         ActionType::Update => "UPDATE",
@@ -318,6 +291,8 @@ fn action_label(action: ActionType) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
 
     // -----------------------------------------------------------------------

@@ -32,13 +32,13 @@
 //! of the C3 fallback warnings. Every ordered structure below is a `Vec` walked
 //! in order for exactly that reason.
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 
 use crate::config::{Config, OverrideRule};
+use crate::fmt::utf16_cmp;
 use crate::model::{ChronoTimeEntry, DayProjectAggregate, Project};
 
 /// `Aggregator.kt:26`. A DevPro project name resolved from the config's
@@ -394,14 +394,6 @@ fn simple_lowercase(c: char) -> char {
     }
 }
 
-/// `String.compareTo` compares UTF-16 code units; `str::cmp` compares UTF-8
-/// bytes. The two orders agree on everything in the Basic Multilingual Plane and
-/// disagree once an astral character meets one in U+E000..U+FFFF. One line to
-/// remove the dependency on what the data happens to contain.
-fn utf16_cmp(a: &str, b: &str) -> Ordering {
-    a.encode_utf16().cmp(b.encode_utf16())
-}
-
 /// `Aggregator.kt:135-150`, after `trimMargin()`.
 fn unmapped_project_error(chrono_project: &str, config: &Config) -> String {
     let configured = config
@@ -450,6 +442,8 @@ fn devpro_not_found_error(name: &str, available: &[Project]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
     use crate::config::ProjectMapping;
     use crate::model::ChronoProject;
