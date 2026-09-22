@@ -24,10 +24,14 @@ tt-devpro settle --include-today       # Also settle today, whose hours aren't f
 tt-devpro settle --from 2026-07-01 --to 2026-07-15   # Batch a specific range
 ```
 
-- **Interactive** (stdin *and* stdout are both terminals): steps through each unfilled day for `[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all`.
+- **Interactive** (stdin *and* stdout are both terminals): `settle` shows a draft table and asks before it writes anything. Day-by-day that is one question per unfilled day — `[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all`; over an explicit range it is a single question for the whole range, described below.
 - **Piped / non-interactive** (either stream redirected): prints the same readable summary as `--dry-run` instead of prompting.
 - `--dry-run` and `--json` compute the proposals without applying them. If both are given, `--json` wins.
 - Without `--from`/`--to`, `settle` runs day-by-day over a 45-day scan. With either given, it runs as a batch over the range: `--from` defaults to the 1st of the current month, `--to` to the last completed day.
+
+**There are two interactive prompts, and `--from`/`--to` reaches the second one.** The mode comes from the arguments alone, in this order: `--json`, then `--dry-run`, then a batch run as soon as *either* end of a range is named (one end is enough, the other is defaulted), then the day-by-day scan. The day-by-day run asks once per day and accepts `[A]pprove / [E]dit / [D]elete / [S]kip / [C]ancel all`. The batch run does none of that. It prints one draft table for the whole range — one dated row per proposed worklog — and asks a single question: `[A]pprove / [C]ancel:`, or `[A]pprove anyway / [C]ancel:` when the under-8h warning fired, exactly as the day prompt swaps its own first word. There is no loop and no per-day review there, so `[A]` writes every row of the range in one go: the answer is all-or-nothing over every day in it, and the `[E]`/`[D]`/`[S]` of the day prompt do not exist at this one.
+
+**That prompt has three branches, not two.** `a` approves and writes. `c`, or end of input, cancels and prints `Cancelled.` Anything else — a typo, an `e` or `s` carried over from the day prompt, or a bare empty line — is an unknown option and prints `Unknown option. Cancelled.` Nothing is written on either cancelling branch, so the two differ in the message and not in the outcome. What makes the difference worth knowing is that an empty line and end of input are *not* the same input — a read comes back empty-handed only at EOF, never as an empty string — and that `e` means Edit at one prompt and "cancel the entire range" at the other. The day prompt treats an unrecognised answer the same way: it cancels everything, remaining days included.
 
 Direct portal calls live under `api`:
 
