@@ -233,8 +233,8 @@ fn generate_fillers_for_day<R: FillerRandom + ?Sized>(
     budgets: Option<&mut Budgets>,
     rng: &mut R,
 ) -> Vec<FillerEntry> {
-    // `FillerService.kt:56-57` — the gate. One scalable entry anywhere in the day and the normalizer
-    // can reach 8h on its own, so nothing is synthesized.
+    // `FillerService.kt:56-57` — the gate. One scalable entry anywhere in the day and the
+    // normalizer can reach 8h on its own, so nothing is synthesized.
     let all_meetings = day_entries.iter().all(|e| e.is_meeting);
     if !all_meetings {
         return Vec::new();
@@ -256,9 +256,10 @@ fn generate_fillers_for_day<R: FillerRandom + ?Sized>(
     // synthetic budget.
     let capped_remaining_hours = java_min(remaining_hours, max_synthetic_hours);
 
-    // `FillerService.kt:69`. A `toSet()` in Kotlin, but only ever asked `contains` (`FillerService.kt:93`), so the
-    // dedupe and the insertion order are both unobservable — a `Vec` answers the
-    // same question without inviting a hash-order question that does not exist here.
+    // `FillerService.kt:69`. A `toSet()` in Kotlin, but only ever asked `contains`
+    // (`FillerService.kt:93`), so the dedupe and the insertion order are both
+    // unobservable — a `Vec` answers the same question without inviting a hash-order
+    // question that does not exist here.
     let present_projects: Vec<&str> = day_entries
         .iter()
         .map(|e| e.original.devpro_project_name.as_str())
@@ -1320,12 +1321,12 @@ mod tests {
     /// `FillerService.kt:145` — the `consumed >= HOUR_INCREMENT` guard is dead on
     /// every reachable path, and this test is the proof rather than a claim.
     ///
-    /// The chain: `hours > 0` at `FillerService.kt:139` plus quantization at `FillerService.kt:137` makes `hours >=
-    /// 0.25`; selection at `FillerService.kt:96` already required `available >= 0.25`; nothing
-    /// mutates the map between the two; and `consumeBudget` returns
-    /// `min(requested, available)`, so `consumed >= 0.25`. The tightest case the
-    /// guard can be handed is a budget of exactly one quarter against a larger
-    /// request, and it still passes.
+    /// The chain: `hours > 0` at `FillerService.kt:139` plus quantization at
+    /// `FillerService.kt:137` makes `hours >= 0.25`; selection at `FillerService.kt:96`
+    /// already required `available >= 0.25`; nothing mutates the map between the two; and
+    /// `consumeBudget` returns `min(requested, available)`, so `consumed >= 0.25`. The
+    /// tightest case the guard can be handed is a budget of exactly one quarter against a
+    /// larger request, and it still passes.
     #[test]
     fn consumption_below_the_increment_is_unreachable_by_construction() {
         let normalized = vec![agg(day(18), "A", 2.0, true)];
@@ -1404,8 +1405,8 @@ mod tests {
                 &mut NoDrawRandom,
             );
             assert_eq!(out.len(), 1, "budget {budget}");
-            // `hours` at `FillerService.kt:137` is `roundToQuarter(budget)`, since the budget is the
-            // tightest of the three ceilings and the range is degenerate.
+            // `hours` at `FillerService.kt:137` is `roundToQuarter(budget)`, since the
+            // budget is the tightest of the three ceilings and the range is degenerate.
             assert_eq!(out[0].hours, round_to_quarter(budget), "budget {budget}");
         }
     }
