@@ -5,16 +5,19 @@
 //! while every gate in the suite stays green — `cargo test`, `cargo clippy`, `cargo fmt
 //! --check` and `cargo doc` all read over it without a word.
 //!
-//! That is not hypothetical, and it is not fixed by being careful once. Measured with the
-//! rule below, the rounds that gave the Kotlin citations their file names — turning `:NNN`
-//! into `SettleCommand.kt:NNN` — took the tree from 5 over-wide comment lines to 67, every
-//! gate green throughout. A wrap pass (`84dcb03`) then brought it to 49 and stopped there,
-//! and 49 is what stood until the rewrap this gate arrived with. Point the rule at any of
-//! those commits and it fails: that is where the evidence it *can* fail lives, together
-//! with the three tests under it, since a green run says something only while the rule
-//! still recognises a wide line. The first count of the 49 was itself wrong: `awk
-//! 'length>100'` on macOS counts bytes and not characters, so the em-dashes these comments
-//! are full of inflated 49 into 58. This gate counts characters, and pins that.
+//! That is not hypothetical, and it is not fixed by being careful once. Two counts run
+//! through the history below and they are not the same number: lines wider than 100
+//! characters, and the subset of those this gate calls violations — the exemption further
+//! down excuses the rest. The rounds that gave the Kotlin citations their file names —
+//! turning `:NNN` into `SettleCommand.kt:NNN` — took the tree from 5 wide lines, 3 of them
+//! violations, to 67 and 65, every gate green throughout. A wrap pass (`84dcb03`) brought
+//! it back to 49 and 47 and stopped there, and that is where it stood until the rewrap
+//! this gate arrived with. Point the rule at `4ee5ce7`, `8c44703` or `84dcb03` and it
+//! reports 3, 65 and 47: that is where the evidence it *can* fail lives, together with the
+//! four tests under it, since a green run says something only while the rule still
+//! recognises a wide line. The first count of the 49 was itself wrong: `awk 'length>100'`
+//! on macOS counts bytes and not characters, so the em-dashes these comments are full of
+//! inflated 49 into 58. This gate counts characters, and pins that.
 //!
 //! Scope is every `*.rs` under `src/` and `tests/`, this file included. Code lines are not
 //! checked: rustfmt already owns them, and a long string literal it cannot break is not a
@@ -140,7 +143,7 @@ fn relative(path: &Path) -> String {
 /// rather than repeating it on each line.
 ///
 /// Failing on the first violation would turn a fix into one `cargo test` run per defect,
-/// and the round that prompted this gate left 49 at a time.
+/// and the round that prompted this gate left 47 of them to report at a time.
 fn report(header: &str, violations: &[String], remedy: &str) {
     if violations.is_empty() {
         return;
@@ -203,13 +206,6 @@ fn no_comment_line_is_wider_than_the_limit() {
     );
 }
 
-/// Pins that the rule reads characters and not bytes.
-///
-/// This is the measurement mistake itself, written down. The first count of the violations
-/// this gate was built for used `awk 'length>100'`, whose `length` on macOS is a byte
-/// count, and it reported 58 violations where there were 49 — nine lines that fit, blamed
-/// for the width of their own em-dashes. A gate that repeated that mistake would send its
-/// reader to rewrap lines that are already within the limit.
 /// A comment body of `n` characters with a space in the middle of it.
 ///
 /// Every fixture below needs one. A body of `n` identical characters is a single token,
@@ -220,6 +216,13 @@ fn wrappable(n: usize) -> String {
     format!("{} {}", "x".repeat(head), "y".repeat(n - head - 1))
 }
 
+/// Pins that the rule reads characters and not bytes.
+///
+/// This is the measurement mistake itself, written down. The first count of the wide lines
+/// this gate was built for used `awk 'length>100'`, whose `length` on macOS is a byte
+/// count, and it reported 58 where there were 49 — nine lines that fit, blamed for the
+/// width of their own em-dashes. A gate that repeated that mistake would send its reader
+/// to rewrap lines that are already within the limit.
 #[test]
 fn the_rule_counts_characters_and_not_bytes() {
     let ascii = format!("// {}", wrappable(98));
