@@ -422,10 +422,11 @@ pub async fn run_create_worklog(args: &CreateWorklogArgs, io: &mut dyn Console) 
 
 /// `ApiCommand.kt:118-145`, in the incumbent's order, which is load-bearing twice.
 ///
-/// **The request is built first** (`ApiCommand.kt:118-126`), and `hours.toDouble()` at `ApiCommand.kt:123` is
-/// inside that construction — so an unparseable `--hours` ends the command before the
-/// header at `ApiCommand.kt:128` has printed a single line. A port that echoed first would leave a
-/// seven-line header on stdout in front of the failure.
+/// **The request is built first** (`ApiCommand.kt:118-126`), and `hours.toDouble()` at
+/// `ApiCommand.kt:123` is inside that construction — so an unparseable `--hours` ends
+/// the command before the header at `ApiCommand.kt:128` has printed a single line. A
+/// port that echoed first would leave a seven-line header on stdout in front of the
+/// failure.
 ///
 /// **The header is printed before the call** and is therefore on stdout even when the
 /// write then fails.
@@ -2137,9 +2138,10 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `ApiCommand.kt:128-134` runs **before** `ApiCommand.kt:137`, so the seven-line header is on stdout even
-    /// when the portal then refuses the write. A port that printed it afterwards would
-    /// lose it on exactly the run where the operator needs to know what was attempted.
+    /// `ApiCommand.kt:128-134` runs **before** `ApiCommand.kt:137`, so the seven-line
+    /// header is on stdout even when the portal then refuses the write. A port that
+    /// printed it afterwards would lose it on exactly the run where the operator needs
+    /// to know what was attempted.
     #[tokio::test]
     async fn the_create_header_is_on_stdout_even_when_the_write_is_refused() {
         let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::response(
@@ -2166,11 +2168,11 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `hours.toDouble()` at `ApiCommand.kt:123` is inside the request construction at `ApiCommand.kt:118-126`,
-    /// which runs before the header at `ApiCommand.kt:128`. So a bad `--hours` is the whole output:
-    /// no header, and — the part a reader would not guess — no request either. A port
-    /// that echoed the header first would leave seven lines on stdout describing a
-    /// worklog it never tried to write.
+    /// `hours.toDouble()` at `ApiCommand.kt:123` is inside the request construction at
+    /// `ApiCommand.kt:118-126`, which runs before the header at `ApiCommand.kt:128`. So
+    /// a bad `--hours` is the whole output: no header, and — the part a reader would
+    /// not guess — no request either. A port that echoed the header first would leave
+    /// seven lines on stdout describing a worklog it never tried to write.
     #[tokio::test]
     async fn unparseable_hours_stop_the_create_before_its_header_and_before_the_request() {
         let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
@@ -2257,8 +2259,9 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `ApiCommand.kt:176-182` echoes the header **before** the `try` at `ApiCommand.kt:184`, so the
-    /// seven lines stand on stdout when the portal then refuses the write.
+    /// `ApiCommand.kt:176-182` echoes the header **before** the `try` at
+    /// `ApiCommand.kt:184`, so the seven lines stand on stdout when the portal then
+    /// refuses the write.
     ///
     /// This is the create path's `the_create_header_is_on_stdout_even_when_the_write_is_refused`
     /// said again for update, and the symmetry is the point rather than the thoroughness:
@@ -2316,8 +2319,9 @@ mod tests {
         );
     }
 
-    /// `ApiCommand.kt:187` says `Updated`, `ApiCommand.kt:139` says `Created`. One word, two commands, and the
-    /// operator reads it to decide whether a worklog was added or edited.
+    /// `ApiCommand.kt:187` says `Updated`, `ApiCommand.kt:139` says `Created`. One
+    /// word, two commands, and the operator reads it to decide whether a worklog was
+    /// added or edited.
     #[tokio::test]
     async fn the_update_success_line_names_updating_and_not_creating() {
         let portal = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("{}")]);
@@ -2648,11 +2652,11 @@ mod tests {
     /// The cookie is read **before** the request body is built, so a run that is both
     /// cookie-less and carrying an unparseable `--hours` reports the cookie.
     ///
-    /// `ApiCommand.kt:116` precedes `ApiCommand.kt:118-126`, and the two failures are one line apart
-    /// in the port — `connect()` in the wrapper, `create_request` in the body. A port
-    /// that hoisted the parse into the wrapper "to fail fast on bad arguments" would
-    /// report `For input string: "eight"` to an operator whose actual problem is an
-    /// expired session, and every other test here would still pass.
+    /// `ApiCommand.kt:116` precedes `ApiCommand.kt:118-126`, and the two failures are
+    /// one line apart in the port — `connect()` in the wrapper, `create_request` in the
+    /// body. A port that hoisted the parse into the wrapper "to fail fast on bad
+    /// arguments" would report `For input string: "eight"` to an operator whose actual
+    /// problem is an expired session, and every other test here would still pass.
     #[tokio::test]
     async fn a_missing_cookie_is_reported_before_unparseable_hours_are() {
         let _env = ScopedEnv::without_a_cookie();

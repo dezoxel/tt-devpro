@@ -62,8 +62,9 @@ impl Outcome {
 }
 
 /// `java.time.LocalDate.parse`, which is `ISO_LOCAL_DATE` and is strict about every
-/// character. Measured on GraalVM JDK 21.0.11 (`~/.cache/tt-devpro-rewrite/measurements/jdk/parse-date.tsv`):
-/// `2026-1-15`, `2026-01-5`, `26-01-15`, `2026-01-15T00:00:00`, `" 2026-01-15"` and
+/// character. Measured on GraalVM JDK 21.0.11
+/// (`~/.cache/tt-devpro-rewrite/measurements/jdk/parse-date.tsv`): `2026-1-15`,
+/// `2026-01-5`, `26-01-15`, `2026-01-15T00:00:00`, `" 2026-01-15"` and
 /// `"2026-01-15 "` are all rejected, so `chrono`'s `%Y-%m-%d` cannot be used on its
 /// own — it accepts single-digit months and days.
 ///

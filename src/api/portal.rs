@@ -451,9 +451,10 @@ mod tests {
         assert_eq!(classify_read_status(600, "Nonsense"), None);
     }
 
-    /// `TtApiClient.kt:60-63` against `TtApiClient.kt:49-53`. Same statuses, deliberately different text: the
-    /// write gate repeats the code in parentheses and quotes the response **body**
-    /// where the read gate quotes the reason phrase, and it has no 404 arm at all.
+    /// `TtApiClient.kt:60-63` against `TtApiClient.kt:49-53`. Same statuses,
+    /// deliberately different text: the write gate repeats the code in parentheses and
+    /// quotes the response **body** where the read gate quotes the reason phrase, and
+    /// it has no 404 arm at all.
     #[test]
     fn the_write_gate_quotes_the_body_and_has_no_404_arm() {
         assert_eq!(
