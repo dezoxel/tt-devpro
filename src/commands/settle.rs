@@ -55,6 +55,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Datelike, Days, Local, NaiveDate, Weekday};
 use clap::Args;
 use serde::Serialize;
+use serde_json::ser::{Formatter, PrettyFormatter};
 
 use crate::api::chrono::ChronoClient;
 use crate::api::portal::{ApiError, TtApiClient};
@@ -2105,23 +2106,139 @@ fn push_name(slots: &mut Vec<(NaiveDate, Vec<String>)>, date: NaiveDate, name: &
     }
 }
 
+/// kotlinx-serialization's pretty composer, in the one place it disagrees with
+/// `serde_json`'s.
+///
+/// `StreamingJsonEncoder.endStructure` calls the composer's `nextItem` and only
+/// then prints the closing bracket, and the pretty composer's `nextItem` writes
+/// the newline and the enclosing indent unconditionally. kotlinx therefore closes
+/// a sequence that took no values on its own line, and `PrettyFormatter::end_array`
+/// — which writes both only `if self.has_value` — does not.
+///
+/// **Measured**, 2026-09-23, against the pinned incumbent at
+/// `~/.cache/tt-devpro-rewrite/tt-devpro.kotlin-incumbent`: `settle --json` and
+/// `settle --from 2026-08-08 --to 2026-08-09 --json` each print the bytes
+/// `5b0a 5d0a`, where the port at `59f1503` printed `5b5d 0a`. stderr was
+/// byte-identical on both, so the whole divergence is those two stdout bytes.
+/// `SettleCommand.kt:303-304` builds the encoder and hands it the list.
+///
+/// **Reasoned, not measured**: a *nested* empty array. kotlinx's rule is
+/// unconditional rather than top-level-only, so this formatter closes one the same
+/// way — but no capture under `~/.cache/tt-devpro-rewrite/baseline/` holds the
+/// case and no run of the incumbent produced it here, so those bytes are read off
+/// the composer rather than off a run. The case is reachable all the same:
+/// [`crate::service::aggregator::aggregate_in_zone`] leaves `descriptions` empty
+/// for a Chrono entry whose description is blank, and
+/// `DayProjectAggregate::descriptions` carries no `skip_serializing_if`, so the
+/// empty array is serialized rather than dropped.
+///
+/// `end_object` deliberately keeps `serde_json`'s behaviour. Every object this
+/// command emits is a `SettleAction` or a `DayProjectAggregate`, and both declare
+/// fields with no `skip_serializing_if` on them, so an empty object is not
+/// reachable here and widening the override would be a rule nothing measures.
+struct KotlinxPrettyFormatter {
+    inner: PrettyFormatter<'static>,
+}
+
+impl KotlinxPrettyFormatter {
+    /// The other half of C29: kotlinx indents four spaces per level where
+    /// `serde_json`'s default is two.
+    fn new() -> Self {
+        KotlinxPrettyFormatter {
+            inner: PrettyFormatter::with_indent(b"    "),
+        }
+    }
+}
+
+/// Only `end_array` carries a rule of its own. The other eight are forwarded
+/// because they have to be: the `Formatter` methods `PrettyFormatter` leaves alone
+/// are the compact ones, so any of its nine left unforwarded here would print
+/// without an indent.
+impl Formatter for KotlinxPrettyFormatter {
+    fn begin_array<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.begin_array(writer)
+    }
+
+    /// The fix. `end_array_value` writes no bytes — it only records that the array
+    /// held something — so calling it on the way out makes the close unconditional,
+    /// which is kotlinx's rule. An array that did take values has that flag set
+    /// already, so this changes nothing for it.
+    fn end_array<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.end_array_value(writer)?;
+        self.inner.end_array(writer)
+    }
+
+    fn begin_array_value<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.begin_array_value(writer, first)
+    }
+
+    fn end_array_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.end_array_value(writer)
+    }
+
+    fn begin_object<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.begin_object(writer)
+    }
+
+    fn end_object<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.end_object(writer)
+    }
+
+    fn begin_object_key<W>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.begin_object_key(writer, first)
+    }
+
+    fn begin_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.begin_object_value(writer)
+    }
+
+    fn end_object_value<W>(&mut self, writer: &mut W) -> std::io::Result<()>
+    where
+        W: ?Sized + Write,
+    {
+        self.inner.end_object_value(writer)
+    }
+}
+
 /// C29 — `Json { prettyPrint = true }.encodeToString(ListSerializer(...))`.
 ///
-/// kotlinx-serialization's pretty printer indents with **four** spaces and
-/// `serde_json`'s `PrettyFormatter` defaults to two, so the formatter is
-/// constructed rather than taken from `to_string_pretty`. Verified against
+/// The indent is four spaces, verified against
 /// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out`, whose second line opens
-/// with four spaces and whose third with eight.
+/// with four spaces and whose third with eight. The empty list is a bracket, a
+/// newline and a bracket, which `KotlinxPrettyFormatter` holds and which
+/// `serde_json`'s own pretty formatter gets wrong.
 ///
 /// The field-level part of C29 is on the model: kotlinx omits a property that
 /// equals its declared default, which `SettleAction`'s `skip_serializing_if`
 /// attributes reproduce.
 pub fn json_body(actions: &[SettleAction]) -> Result<String> {
     let mut buffer = Vec::new();
-    let mut serializer = serde_json::Serializer::with_formatter(
-        &mut buffer,
-        serde_json::ser::PrettyFormatter::with_indent(b"    "),
-    );
+    let mut serializer =
+        serde_json::Serializer::with_formatter(&mut buffer, KotlinxPrettyFormatter::new());
     actions
         .serialize(&mut serializer)
         .context("encoding the proposed actions as JSON")?;
@@ -4852,12 +4969,64 @@ mod tests {
         );
     }
 
-    /// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out` opens `[` and closes
-    /// `]` with the elements between, so an empty run is those two characters and a
-    /// newline — not `[]` on one line, which is what a compact encoder gives.
+    /// C29 at its empty boundary, measured on 2026-09-23 against the pinned
+    /// incumbent: `settle --json` and `settle --from 2026-08-08 --to 2026-08-09
+    /// --json` — a range holding no Chrono entries at all — both print the bytes
+    /// `5b0a 5d0a`, where the port at `59f1503` printed `5b5d 0a`.
+    ///
+    /// `SettleCommand.kt:303` is where those bytes come from. Its composer writes
+    /// the newline and the indent in front of a closing bracket whether or not the
+    /// sequence took a value, so an empty list is a bracket, a newline and a
+    /// bracket. The version of this test that asserted `[]` cited
+    /// `~/.cache/tt-devpro-rewrite/baseline/settle-json.out`, which cannot speak to
+    /// the case: that capture holds nine elements.
     #[test]
-    fn an_empty_action_list_is_an_empty_json_array() {
-        assert_eq!(json_body(&[]).expect("json"), "[]");
+    fn an_empty_action_list_closes_its_bracket_on_the_next_line() {
+        assert_eq!(json_body(&[]).expect("json"), "[\n]");
+    }
+
+    /// The same rule one level down, and the reason it is not academic: an entry
+    /// whose Chrono description is blank reaches the group-key branch of
+    /// `aggregate_in_zone` with nothing to put in `descriptions`, and
+    /// `DayProjectAggregate::descriptions` carries no `skip_serializing_if`, so the
+    /// empty array is serialized rather than dropped.
+    ///
+    /// Reasoned rather than measured. No capture under
+    /// `~/.cache/tt-devpro-rewrite/baseline/` holds a blank description, so these
+    /// bytes are read off kotlinx's composer — `endStructure` closes every
+    /// structure the same way — and not off a run of the incumbent.
+    #[test]
+    fn an_empty_nested_array_closes_on_its_own_line_at_its_own_indent() {
+        let action = Row::new("2026-09-18", "Alpha", 1.0)
+            .descriptions(&[])
+            .build();
+        let body = json_body(&[action]).expect("json");
+
+        assert!(
+            body.contains("\"descriptions\": [\n            ]"),
+            "the close sits one level in from where an element would, at twelve spaces: {body}"
+        );
+    }
+
+    /// The half the fix must not trade away. A formatter that wrote the newline
+    /// and the indent itself on the way out, rather than letting
+    /// `PrettyFormatter::end_array` write them, would be right about the empty case
+    /// and would close every populated array after a blank line.
+    ///
+    /// Two elements, so the separator between them is asserted alongside the close.
+    /// Both are what `~/.cache/tt-devpro-rewrite/baseline/settle-json.out` shows
+    /// between its own elements and at its end.
+    #[test]
+    fn a_populated_array_closes_after_a_single_newline_and_no_blank_line() {
+        let body = json_body(&[
+            Row::new("2026-09-18", "Alpha", 1.0).build(),
+            Row::new("2026-09-19", "Alpha", 2.0).build(),
+        ])
+        .expect("json");
+
+        assert!(body.starts_with("[\n    {\n"), "{body}");
+        assert!(body.contains("\n    },\n    {\n"), "{body}");
+        assert!(body.ends_with("\n    }\n]"), "{body}");
     }
 
     /// Byte for byte against the first element of
@@ -5503,7 +5672,9 @@ mod tests {
     /// `SettleCommand.kt:418-421`. An empty Chrono answer ends `prepareActions`
     /// before the portal is asked anything at all — so a day with no tracked time
     /// costs one request, not five, and `--json` still emits a well-formed empty
-    /// array.
+    /// array: a bracket, a newline and a bracket, the shape
+    /// `KotlinxPrettyFormatter` holds and the shape measured out of the incumbent
+    /// on 2026-09-23.
     #[tokio::test]
     async fn an_empty_chrono_answer_stops_before_the_portal_is_asked_anything() {
         let chrono = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("[]")]);
@@ -5523,7 +5694,7 @@ mod tests {
         .await
         .expect("the run completes");
 
-        assert_eq!(io.out_text(), "[]");
+        assert_eq!(io.out_text(), "[\n]");
         assert!(portal.seen().is_empty(), "{:?}", portal.seen());
         assert!(
             io.err_text()
@@ -5538,7 +5709,8 @@ mod tests {
     /// "unmapped Chrono projects are silently skipped" is this one and not the
     /// mapping lookup: a project whose name does not end in `DevPro - Work` never
     /// reaches the lookup at all. The portal is still never asked anything, because
-    /// the aggregate list is empty before the first read.
+    /// the aggregate list is empty before the first read, and the body on stdout is
+    /// the same empty array `KotlinxPrettyFormatter` writes for C29.
     #[tokio::test]
     async fn a_chrono_project_outside_devpro_work_is_dropped_silently_and_costs_no_portal_request()
     {
@@ -5562,7 +5734,7 @@ mod tests {
         .await
         .expect("a non-DevPro project is not an error");
 
-        assert_eq!(io.out_text(), "[]");
+        assert_eq!(io.out_text(), "[\n]");
         assert!(portal.seen().is_empty(), "{:?}", portal.seen());
         assert!(
             io.err_text().contains("No work entries to process"),
