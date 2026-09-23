@@ -94,10 +94,27 @@ pub(crate) fn build_client(
 /// captured order the request order.
 #[cfg(test)]
 pub(crate) mod stub {
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
+    use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
+    use std::time::{Duration, Instant};
+
+    /// How long the server thread waits for a connection that never comes before it
+    /// gives up on the rest of its canned responses.
+    ///
+    /// The bound is what makes a client that sent too few requests fail with a
+    /// message instead of parking `cargo test` on `accept` for the life of the
+    /// process. It is not a bound an honest test can reach: the longest a
+    /// stub-backed test can legitimately wait for is one client request, and that is
+    /// bounded at [`super::REQUEST_TIMEOUT`] — fifteen seconds, half of this.
+    pub(crate) const ACCEPT_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// How long the accept loop sleeps between polls of the non-blocking listener.
+    /// Short enough that each of the 104 stub servers this tree starts pays it at
+    /// most once per request, long enough not to burn a core while a stalled test
+    /// is being read.
+    const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
     /// What the server saw, in the order it saw it.
     #[derive(Debug, Clone)]
@@ -121,7 +138,15 @@ pub(crate) mod stub {
 
     pub(crate) struct StubServer {
         pub base_url: String,
-        handle: Option<JoinHandle<()>>,
+        /// Yields the number of canned responses the server actually handed out,
+        /// which is what lets `requests` tell a shortfall from a clean run.
+        handle: Option<JoinHandle<usize>>,
+        /// How many responses this server was told to serve, kept so that the
+        /// shortfall panic can name both sides of the comparison.
+        canned: usize,
+        /// The accept deadline this server was started with, kept for the same
+        /// message: "it waited this long" is half the answer to "what was missing".
+        deadline: Duration,
         /// Written by the server thread as each request lands, so that a test can
         /// read what arrived without first waiting for every canned response to be
         /// consumed. `seen` needs that; `requests` does not.
@@ -149,29 +174,57 @@ pub(crate) mod stub {
     }
 
     impl StubServer {
-        /// Serves exactly `responses.len()` requests, then stops.
+        /// Serves exactly `responses.len()` requests, then stops — and stops anyway
+        /// once [`ACCEPT_DEADLINE`] has passed with no connection, so that a client
+        /// which sent too few requests ends in `requests`'s panic instead of in a
+        /// `join` that never returns.
         pub fn start(responses: Vec<String>) -> Self {
+            Self::start_with_deadline(responses, ACCEPT_DEADLINE)
+        }
+
+        /// `start` with the accept deadline named, which exists so that the test
+        /// covering the deadline itself does not have to wait [`ACCEPT_DEADLINE`] to
+        /// observe it. Everything else takes `start`, whose signature this method
+        /// exists to leave untouched at its 104 call sites.
+        pub fn start_with_deadline(responses: Vec<String>, deadline: Duration) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind the stub server");
             let port = listener.local_addr().expect("stub server port").port();
+            listener
+                .set_nonblocking(true)
+                .expect("the stub listener goes non-blocking so accept can time out");
 
+            let canned = responses.len();
             let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&captured);
 
             let handle = std::thread::spawn(move || {
+                let mut served = 0usize;
                 for canned in responses {
-                    let (mut stream, _) = listener.accept().expect("accept");
+                    let Some(mut stream) = accept_before(&listener, deadline) else {
+                        break;
+                    };
+                    // On the BSD sockets macOS inherits, an accepted socket carries
+                    // the listener's non-blocking flag. Reading the request has to
+                    // block, so the flag comes straight back off.
+                    stream
+                        .set_nonblocking(false)
+                        .expect("the accepted socket goes back to blocking");
                     let request = read_request(&mut stream);
                     stream
                         .write_all(canned.as_bytes())
                         .expect("write the canned response");
                     stream.flush().ok();
                     sink.lock().expect("the capture lock").push(request);
+                    served += 1;
                 }
+                served
             });
 
             Self {
                 base_url: format!("http://127.0.0.1:{port}"),
                 handle: Some(handle),
+                canned,
+                deadline,
                 captured,
             }
         }
@@ -180,20 +233,30 @@ pub(crate) mod stub {
         /// client sent fewer requests than the server was told to serve, which is
         /// the failure mode worth failing on.
         pub fn requests(mut self) -> Vec<CapturedRequest> {
-            self.handle
+            let canned = self.canned;
+            let deadline = self.deadline;
+            let served = self
+                .handle
                 .take()
                 .expect("the server was already joined")
                 .join()
                 .expect("the stub server thread panicked");
+            assert_eq!(
+                served, canned,
+                "the stub server was told to serve {canned} responses but the client fetched only \
+                 {served}; it then waited {deadline:?} for the next connection and gave up"
+            );
             self.captured.lock().expect("the capture lock").clone()
         }
 
         /// Everything that has arrived so far, without joining. This is for the test
-        /// that cans *more* responses than a correct client will ask for: `requests`
-        /// would block forever on the response nobody fetches, and the surplus canned
-        /// response is the whole instrument — if it is ever consumed, the client did
-        /// something it must not do. The server thread is left parked on `accept`
-        /// and ends with the test process, the same bargain `start_black_hole` makes.
+        /// that cans *more* responses than a correct client will ask for: the surplus
+        /// canned response is the whole instrument — if it is ever consumed, the
+        /// client did something it must not do — which makes `requests` the wrong
+        /// call here, since a deliberate surplus is precisely the shortfall it
+        /// panics on. The server thread spends [`ACCEPT_DEADLINE`] waiting for the
+        /// connection nobody makes and then ends by itself; nothing joins it, so the
+        /// test returns as soon as it has read the capture.
         pub fn seen(&self) -> Vec<CapturedRequest> {
             self.captured.lock().expect("the capture lock").clone()
         }
@@ -216,6 +279,27 @@ pub(crate) mod stub {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// Polls a non-blocking listener until a connection arrives or `deadline` runs
+    /// out, answering `None` on the deadline. `None` is not an error here: it is the
+    /// server thread learning that the client is finished asking, which is what
+    /// `StubServer::requests` turns into a legible panic and what `seen` relies on
+    /// to let its surplus-response thread retire.
+    fn accept_before(listener: &TcpListener, deadline: Duration) -> Option<TcpStream> {
+        let give_up_at = Instant::now() + deadline;
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => return Some(stream),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    if Instant::now() >= give_up_at {
+                        return None;
+                    }
+                    std::thread::sleep(ACCEPT_POLL_INTERVAL);
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        }
     }
 
     fn read_request(stream: &mut std::net::TcpStream) -> CapturedRequest {
@@ -301,6 +385,35 @@ mod tests {
                 "`{crate_name}` is in Cargo.toml; C31 says a write is never retried"
             );
         }
+    }
+
+    /// The deadline on `accept` is only half the fix, and this is the half that is
+    /// easy to get wrong: a server thread that gives up and returns quietly makes
+    /// `requests` join at once and hand back a short capture, so a test that
+    /// under-sent its requests goes *green* rather than hanging — and that wrong
+    /// implementation passes every other test in this tree, because every other test
+    /// sends exactly as many requests as it cans. The `expected` text guards the
+    /// second half: a panic reading only "the stub server served too few" leaves the
+    /// reader of a red test to work out how many were missing and how long it waited.
+    #[test]
+    #[should_panic(expected = "told to serve 2 responses but the client fetched only 1")]
+    fn requests_names_both_counts_when_a_canned_response_is_never_fetched() {
+        use std::io::{Read, Write};
+
+        let server = stub::StubServer::start_with_deadline(
+            vec![stub::json_200("{}"), stub::json_200("{}")],
+            Duration::from_millis(200),
+        );
+
+        let address = server.base_url.trim_start_matches("http://").to_string();
+        let mut socket = std::net::TcpStream::connect(&address).expect("connect to the stub");
+        socket
+            .write_all(b"GET /one HTTP/1.1\r\nHost: stub\r\nConnection: close\r\n\r\n")
+            .expect("send the one request");
+        let mut answer = String::new();
+        socket.read_to_string(&mut answer).expect("read the answer");
+
+        let _ = server.requests();
     }
 
     /// Reads follow redirects and writes do not. Nothing about a built `Client`
