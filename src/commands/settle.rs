@@ -1783,11 +1783,38 @@ impl Settle<'_> {
     ///
     /// `SettleCommand.kt:465-474` asks the portal for the assignments held on
     /// `from` and resolves the **union** of every name in the range against that one
-    /// list. Measured: `--from 2026-08-01 --to 2026-08-15 --json` exits having
-    /// printed nothing but `✗ Error: DevPro project 'Inveniam SOW #5' not found.`,
-    /// because `#5` is assigned later in the range and is in neither 08-01's list
-    /// nor `project_ids`. Per day, each name is asked of the list that was in force
-    /// when the work happened, and the whole class of failure goes away.
+    /// list. Per day, each name is asked of the list that was in force when the work
+    /// happened. That mechanism is fixed here. The class of failure it was found
+    /// through is not removed, and the range this comment names is where that shows.
+    ///
+    /// **Measured on `--from 2026-08-01 --to 2026-08-15 --json`, both binaries:**
+    /// stdout empty, stderr byte-identical, carrying the same
+    /// `✗ Error: DevPro project 'Inveniam SOW #5' not found.`. Only the exit status
+    /// differs — 1 here against the incumbent's 0 — and that is the separate decision
+    /// that a failed command exits non-zero doing its job, not this function working.
+    ///
+    /// The residual cause is not a resolution date. `mappings` in `~/.tt-config.yaml`
+    /// sends `Inveniam Measurabl - Presales - DevPro - Work` to the static name
+    /// `Inveniam SOW #5`, while the portal's assignments moved underneath it:
+    /// `Inveniam SOW #3` on 08-01..08-07, neither name on 08-08 and 08-09, `#5` only
+    /// from 08-10. Per-day resolution asks the right day and honestly fails to find
+    /// the name — single-day runs on 08-01 and on 08-03..08-07 each fail alone with
+    /// it. A static name in `mappings` meeting an assignment that changed over time is
+    /// configuration, not code: the remedy is a `project_ids` fallback entry, and that
+    /// is the operator's call, not this function's.
+    ///
+    /// **The price of the fix: one request per day with proposals, not one per
+    /// range.** `SettleCommand.kt:466` makes a single `getAssignedProjects` call for
+    /// the whole range; the loop below makes one per day that has proposals. On
+    /// 2026-09-01..15 that is eleven requests against one. The transport is 15 s
+    /// request / 5 s connect with no retries (`src/api/mod.rs`), carried over from the
+    /// incumbent deliberately, so the number of attempts on which a timeout can land
+    /// grew elevenfold and one timeout fails the whole range. That is the cost of the
+    /// fix rather than a defect to repair: reverting it restores the bug this function
+    /// exists to remove, and adding retries breaks transport parity. Observed once in
+    /// 16 port runs against zero in 15 incumbent runs, the one slow run at 16.50 s
+    /// against a typical 3.4-3.9 s — too few runs to claim a frequency difference. The
+    /// mechanism is what is credible here; the frequency is not established.
     ///
     /// **The fallback warnings are deduplicated across days.** The incumbent prints
     /// one line per fallback for the whole run; resolving per day would otherwise
