@@ -112,6 +112,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`cargo fmt` holds code to 100 columns and leaves comments at whatever width they were typed: the option that would wrap them, `wrap_comments`, is nightly-only and off by default. An over-wide comment is therefore seen by nothing above — not `cargo test`, not clippy, not `cargo fmt --check`, not `cargo doc`. The blind spot is measurable rather than theoretical: the rounds that gave the citations their file names took this tree from 5 over-wide comment lines to 67, with every gate green throughout. `tests/comment_width.rs` closes it. It measures every line under `src/` and `tests/` whose indent is followed by `//`, and fails with all the offenders at once — path, line number, width. Rewrap those by hand; rustfmt will not do it for you. Measure with `chars().count()` rather than `awk 'length>100'`: macOS awk counts bytes, so on comments full of em-dashes it reports 58 violations where there are 49.
+
 ## Resolving the `*.kt` citations in the sources
 
 The Rust sources and tests carry citations of the form `SomeFile.kt:NNN`, each pointing at the Kotlin implementation the behaviour was derived from. **That Kotlin tree is no longer on any branch.** It was deleted when the Rust port took over, and its final state is commit **`06fb43e`**, which is the only place those line numbers resolve.
