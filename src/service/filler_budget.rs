@@ -120,7 +120,7 @@ pub fn billing_periods_in_range(start_date: NaiveDate, end_date: NaiveDate) -> V
 /// Every filler starts at its configured cap, or at [`UNLIMITED`] when it has none.
 /// Worklogs inside `billing_period` whose `(projectShortName, taskTitle)` matches a
 /// filler then reduce that filler's allowance, floored at zero. An unlimited
-/// allowance is never reduced (`:87` guards on `< Double.MAX_VALUE`), and a worklog
+/// allowance is never reduced (`FillerBudgetService.kt:87` guards on `< Double.MAX_VALUE`), and a worklog
 /// matching no filler creates no entry.
 pub fn calculate_remaining_budgets(
     fillers: &[Filler],
@@ -129,7 +129,7 @@ pub fn calculate_remaining_budgets(
 ) -> Budgets {
     let mut budgets: Budgets = HashMap::new();
 
-    // `:75-79`. Two fillers sharing a key is last-wins, as `LinkedHashMap.put` is.
+    // `FillerBudgetService.kt:75-79`. Two fillers sharing a key is last-wins, as `LinkedHashMap.put` is.
     for filler in fillers {
         let key = FillerKey {
             devpro_project: filler.devpro_project.clone(),
@@ -138,7 +138,7 @@ pub fn calculate_remaining_budgets(
         budgets.insert(key, filler.max_hours_per_period.unwrap_or(UNLIMITED));
     }
 
-    // `:82-90`.
+    // `FillerBudgetService.kt:82-90`.
     for (worklog, date) in existing_worklogs {
         if !billing_period.contains(*date) {
             continue;
@@ -178,7 +178,7 @@ pub fn has_remaining_budget(
 /// `FillerBudgetService.kt:112-130` (`consumeBudget`). Returns what was actually
 /// granted, which may be less than requested.
 ///
-/// The `>= Double.MAX_VALUE - 1` test at `:121` is ported verbatim. In `f64` the
+/// The `>= Double.MAX_VALUE - 1` test at `FillerBudgetService.kt:121` is ported verbatim. In `f64` the
 /// `- 1.0` changes nothing — one is far below `MAX`'s ULP — so the test is exactly
 /// "is this the sentinel", and a merely enormous finite budget is consumed like any
 /// other. An unlimited budget grants the full request and writes nothing back, so a
@@ -259,7 +259,7 @@ impl PeriodBudgets {
 
         let mut periods = billing_periods_in_range(from, to);
         if periods.is_empty() {
-            // `:452`'s `?: getBillingPeriod(from)` — an inverted range still gets a
+            // `SettleCommand.kt:452`'s `?: getBillingPeriod(from)` — an inverted range still gets a
             // period rather than an empty budget set.
             periods.push(billing_period(from));
         }
@@ -298,7 +298,7 @@ impl PeriodBudgets {
     /// The periods this was built for, in chronological order.
     ///
     /// Test-only. The incumbent's period *list* is enumerated at
-    /// `SettleCommand.kt:449` and then only `.firstOrNull()`'d at `:452` — D2's
+    /// `SettleCommand.kt:449` and then only `.firstOrNull()`'d at `SettleCommand.kt:452` — D2's
     /// third facet moved that enumeration inside `calculate_if_configured`
     /// precisely so no caller can hold the list and pick one. Nothing in the port
     /// should want this; the tests want it, to prove the enumeration happened.
@@ -544,7 +544,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// C6. A range wholly inside one period collapses to that period once — the
-    /// `mutableSetOf` at `:50` is what dedupes the day-by-day walk.
+    /// `mutableSetOf` at `FillerBudgetService.kt:50` is what dedupes the day-by-day walk.
     #[test]
     fn a_range_inside_one_period_yields_that_period_exactly_once() {
         assert_eq!(
@@ -685,7 +685,7 @@ mod tests {
     // calculate_remaining_budgets (`FillerBudgetService.kt:67-93`)
     // -----------------------------------------------------------------------
 
-    /// C6. `:77` — `filler.maxHoursPerPeriod ?: Double.MAX_VALUE`. G4 says this is
+    /// C6. `FillerBudgetService.kt:77` — `filler.maxHoursPerPeriod ?: Double.MAX_VALUE`. G4 says this is
     /// the branch every real run takes today.
     #[test]
     fn a_filler_without_a_period_cap_starts_unlimited() {
@@ -700,7 +700,7 @@ mod tests {
         );
     }
 
-    /// C6. `:77-78` — a configured cap is the starting allowance verbatim.
+    /// C6. `FillerBudgetService.kt:77-78` — a configured cap is the starting allowance verbatim.
     #[test]
     fn a_configured_cap_is_the_starting_budget() {
         let budgets = calculate_remaining_budgets(
@@ -718,7 +718,7 @@ mod tests {
         );
     }
 
-    /// C6. `:82-89` — worklogs inside the period reduce the allowance.
+    /// C6. `FillerBudgetService.kt:82-89` — worklogs inside the period reduce the allowance.
     #[test]
     fn worklogs_inside_the_period_reduce_the_budget_by_their_logged_hours() {
         let budgets = calculate_remaining_budgets(
@@ -739,7 +739,7 @@ mod tests {
         );
     }
 
-    /// C6. `:83` — `if (!billingPeriod.contains(date)) continue`. The two worklogs
+    /// C6. `FillerBudgetService.kt:83` — `if (!billingPeriod.contains(date)) continue`. The two worklogs
     /// here sit one day outside each end and must not be counted; the two on the
     /// boundary days must.
     #[test]
@@ -783,7 +783,7 @@ mod tests {
         );
     }
 
-    /// C6. `:87` — the guard is `currentBudget < Double.MAX_VALUE`, so an
+    /// C6. `FillerBudgetService.kt:87` — the guard is `currentBudget < Double.MAX_VALUE`, so an
     /// uncapped filler is never reduced no matter how many hours match it.
     ///
     /// This case pins the outcome, not the guard: the mutation check found that
@@ -812,7 +812,7 @@ mod tests {
         );
     }
 
-    /// C6, `:87`, and **synthetic by construction** — it says so rather than
+    /// C6, `FillerBudgetService.kt:87`, and **synthetic by construction** — it says so rather than
     /// pretending to be a regression test for observed behaviour.
     ///
     /// `if (currentBudget != null && currentBudget < Double.MAX_VALUE)` is the only
@@ -842,7 +842,7 @@ mod tests {
         assert_eq!(UNLIMITED - 1.0e290, UNLIMITED);
     }
 
-    /// C6. `:86-87` — `budgets[key]` is null for a worklog matching no filler, so
+    /// C6. `FillerBudgetService.kt:86-87` — `budgets[key]` is null for a worklog matching no filler, so
     /// nothing is written. The map holds only configured fillers.
     #[test]
     fn a_worklog_matching_no_filler_creates_no_budget_entry() {
@@ -862,7 +862,7 @@ mod tests {
         assert!(!budgets.contains_key(&key("Velocitor: NLP", "Development work")));
     }
 
-    /// C6. `:88` — `maxOf(0.0, currentBudget - loggedHours)`. Over-consumption
+    /// C6. `FillerBudgetService.kt:88` — `maxOf(0.0, currentBudget - loggedHours)`. Over-consumption
     /// floors at zero; the budget never goes negative on this path. This is the
     /// answer to "what does Kotlin do when the budget goes into the red": it does
     /// not let it.
@@ -910,7 +910,7 @@ mod tests {
         );
     }
 
-    /// C6. `:82` iterates every worklog, so several in one period accumulate
+    /// C6. `FillerBudgetService.kt:82` iterates every worklog, so several in one period accumulate
     /// against the same allowance rather than each being measured against the full
     /// cap.
     #[test]
@@ -1026,7 +1026,7 @@ mod tests {
         assert_eq!(budgets[&key("Velocitor: NLP", "Internal activities")], 7.0);
     }
 
-    /// C6. `:85` keys the subtraction on `worklog.projectShortName`, not on the
+    /// C6. `FillerBudgetService.kt:85` keys the subtraction on `worklog.projectShortName`, not on the
     /// worklog's project id or its billability — a worklog carrying the right title
     /// under the wrong project spends nothing.
     #[test]
@@ -1055,7 +1055,7 @@ mod tests {
         );
     }
 
-    /// C6. `:78` is an unconditional `put`, so two filler configs sharing a key
+    /// C6. `FillerBudgetService.kt:78` is an unconditional `put`, so two filler configs sharing a key
     /// leave the **last** one's cap in the map. `entry().or_insert()` keeps the
     /// first and would silently reverse it — the same last-wins shape the plan
     /// flags at `BorrowerService.kt:122-123` and `Aggregator.kt:105`.
@@ -1115,7 +1115,7 @@ mod tests {
     // has_remaining_budget (`FillerBudgetService.kt:98-107`)
     // -----------------------------------------------------------------------
 
-    /// C6. `:105` — `budgets[key] ?: Double.MAX_VALUE`. An unconfigured filler is
+    /// C6. `FillerBudgetService.kt:105` — `budgets[key] ?: Double.MAX_VALUE`. An unconfigured filler is
     /// unlimited, which is how the whole feature stays dead under the live config.
     #[test]
     fn an_unknown_key_is_treated_as_unlimited() {
@@ -1128,7 +1128,7 @@ mod tests {
         ));
     }
 
-    /// C6. `:106` — `remaining >= minRequired`. Exactly on the minimum is
+    /// C6. `FillerBudgetService.kt:106` — `remaining >= minRequired`. Exactly on the minimum is
     /// available; a strict `>` would refuse the last quarter-hour of every budget.
     #[test]
     fn a_budget_sitting_exactly_on_the_minimum_is_still_available() {
@@ -1176,7 +1176,7 @@ mod tests {
         ));
     }
 
-    /// C6. `:102` — the Kotlin default parameter, which Rust has no syntax for.
+    /// C6. `FillerBudgetService.kt:102` — the Kotlin default parameter, which Rust has no syntax for.
     /// The constant is what `FillerService.kt:96` gets by omitting the argument.
     #[test]
     fn the_default_minimum_required_is_a_quarter_hour() {
@@ -1206,7 +1206,7 @@ mod tests {
     // consume_budget (`FillerBudgetService.kt:112-130`)
     // -----------------------------------------------------------------------
 
-    /// C6. `:121-123` — an unlimited budget grants the full request and writes
+    /// C6. `FillerBudgetService.kt:121-123` — an unlimited budget grants the full request and writes
     /// nothing back, so an absent key stays absent rather than being created with
     /// `MAX_VALUE - hours`.
     #[test]
@@ -1237,7 +1237,7 @@ mod tests {
         );
     }
 
-    /// C6. `:126-128` — a request under the allowance is granted in full and
+    /// C6. `FillerBudgetService.kt:126-128` — a request under the allowance is granted in full and
     /// deducted.
     #[test]
     fn consuming_less_than_available_grants_it_all_and_deducts_it() {
@@ -1258,7 +1258,7 @@ mod tests {
         );
     }
 
-    /// C6. `:126` — `minOf(requestedHours, available)`. Over-request is granted
+    /// C6. `FillerBudgetService.kt:126` — `minOf(requestedHours, available)`. Over-request is granted
     /// only what is left, and the remainder lands on zero rather than going
     /// negative. The returned value, not the request, is what the filler books.
     #[test]
@@ -1368,7 +1368,7 @@ mod tests {
         );
     }
 
-    /// C6. `:121`'s `available >= Double.MAX_VALUE - 1` is a sentinel test, not a
+    /// C6. `FillerBudgetService.kt:121`'s `available >= Double.MAX_VALUE - 1` is a sentinel test, not a
     /// "this budget is large" test, and the `- 1.0` is a no-op — one is far below
     /// `MAX`'s ULP, so the comparison is exactly "is this the sentinel".
     ///
@@ -1598,7 +1598,7 @@ mod tests {
         );
     }
 
-    /// D2, third facet. `:450`'s `any` fires on one capped filler among many, and
+    /// D2, third facet. `SettleCommand.kt:450`'s `any` fires on one capped filler among many, and
     /// the uncapped ones still get their unlimited entries in each period's map.
     #[test]
     fn one_capped_filler_among_uncapped_ones_still_builds_the_budget_set() {
@@ -1624,7 +1624,7 @@ mod tests {
         assert_eq!(day[&key("Velocitor: NLP", "Development work")], 6.0);
     }
 
-    /// D2, third facet. `:452`'s `firstOrNull() ?: getBillingPeriod(from)` — an
+    /// D2, third facet. `SettleCommand.kt:452`'s `firstOrNull() ?: getBillingPeriod(from)` — an
     /// inverted range enumerates no periods, and the fallback puts `from`'s own
     /// period in rather than leaving the caller with an empty set.
     #[test]

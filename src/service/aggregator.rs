@@ -6,7 +6,7 @@
 //! - **C2** — `start_time` is an RFC3339 instant and every use of it here is
 //!   re-dated through the system zone to a *local* date, in two independent
 //!   places: the `date_from`/`date_to` filter (`Aggregator.kt:49`) and the group
-//!   key (`:53`). The Chrono fetch pads `+1 day` on the UTC axis so a late local
+//!   key (`Aggregator.kt:53`). The Chrono fetch pads `+1 day` on the UTC axis so a late local
 //!   evening stored under the next UTC day is still fetched; this re-dating is
 //!   what puts it back on its own local day. It must never turn into a bound on
 //!   the UTC date, and it must never turn into a bound the fetch applies —
@@ -109,7 +109,7 @@ pub fn aggregate_in_zone<Tz: TimeZone>(
 
     // C11 grouping, in encounter order (`Aggregator.kt:45-57`). A `Vec` walked in
     // order rather than a map: `groupBy` returns a `LinkedHashMap` and the stable
-    // sort at `:87` preserves that order on ties.
+    // sort at `Aggregator.kt:87` preserves that order on ties.
     type GroupKey = (NaiveDate, String, String);
     let mut groups: Vec<(GroupKey, Vec<&ChronoTimeEntry>)> = Vec::new();
 
@@ -585,7 +585,7 @@ mod tests {
         );
     }
 
-    /// C3. `ProjectIdResolutionTest.kt:28-43` — "name missing from the live list
+    /// C3. `ProjectIdResolutionTest.kt:28-41` — "name missing from the live list
     /// falls back to the configured id".
     #[test]
     fn a_name_missing_from_the_live_list_falls_back_to_the_configured_id() {
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(resolution.fallbacks[0].id, "configured-inveniam");
     }
 
-    /// C3. `ProjectIdResolutionTest.kt:45-61` — "name missing from both fails
+    /// C3. `ProjectIdResolutionTest.kt:43-58` — "name missing from both fails
     /// with the available projects listed".
     #[test]
     fn a_name_missing_from_both_fails_with_the_available_projects_listed() {
@@ -642,7 +642,7 @@ mod tests {
         );
     }
 
-    /// C3. `ProjectIdResolutionTest.kt:63-76` — "matching is case-insensitive on
+    /// C3. `ProjectIdResolutionTest.kt:60-71` — "matching is case-insensitive on
     /// both the live list and the config keys".
     #[test]
     fn resolution_is_case_insensitive_on_both_the_live_list_and_the_config_keys() {
@@ -674,7 +674,7 @@ mod tests {
         );
     }
 
-    /// C3. `ProjectIdResolutionTest.kt:78-90` — "fully live resolution reports no
+    /// C3. `ProjectIdResolutionTest.kt:73-86` — "fully live resolution reports no
     /// fallbacks". Also pins `distinct()`: `Presales` appears twice and the
     /// resolved map holds two entries.
     #[test]
@@ -696,7 +696,7 @@ mod tests {
         assert!(resolution.fallbacks.is_empty());
     }
 
-    /// C3. `ProjectIdResolutionTest.kt:92-102` — "an empty config leaves the
+    /// C3. `ProjectIdResolutionTest.kt:88-98` — "an empty config leaves the
     /// previous behaviour intact".
     #[test]
     fn an_empty_config_leaves_the_previous_behaviour_intact() {

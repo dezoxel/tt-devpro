@@ -76,8 +76,8 @@ impl TimeNormalizer {
     /// Every directory named `Calendar` the walk found, in walk order.
     ///
     /// Test-only, matching the incumbent, whose `calendarDirs` is `private` and
-    /// read at `TimeNormalizer.kt:136` alone. `normalize_day` reads the field
-    /// directly (`:223`), so exposing it buys production nothing; C26 — which
+    /// read at `TimeNormalizer.kt:136` alone. [`TimeNormalizer::is_meeting_entry`]
+    /// reads the field directly, so exposing it buys production nothing; C26 — which
     /// directories the depth-10 walk finds — is only checkable through it.
     #[cfg(test)]
     pub fn calendar_dirs(&self) -> &[PathBuf] {
@@ -106,7 +106,7 @@ impl TimeNormalizer {
 
     /// `TimeNormalizer.normalizeDay` (`TimeNormalizer.kt:49-109`).
     fn normalize_day(&self, aggregates: &[&DayProjectAggregate]) -> Vec<NormalizedAggregate> {
-        // :51-54 — flag first, hours untouched.
+        // `TimeNormalizer.kt:51-54` — flag first, hours untouched.
         let with_meeting_flag: Vec<NormalizedAggregate> = aggregates
             .iter()
             .map(|agg| NormalizedAggregate {
@@ -116,7 +116,7 @@ impl TimeNormalizer {
             })
             .collect();
 
-        // :57-58 — fixed = meetings OR anything carrying a cap.
+        // `TimeNormalizer.kt:57-58` — fixed = meetings OR anything carrying a cap.
         let fixed_entries: Vec<NormalizedAggregate> = with_meeting_flag
             .iter()
             .filter(|e| e.is_meeting || e.original.max_hours.is_some())
@@ -124,7 +124,7 @@ impl TimeNormalizer {
             .collect();
         let fixed_hours = sum_hours(&fixed_entries);
 
-        // :61-63.
+        // `TimeNormalizer.kt:61-63`.
         let work_entries: Vec<NormalizedAggregate> = with_meeting_flag
             .iter()
             .filter(|e| !e.is_meeting && e.original.max_hours.is_none())
@@ -133,24 +133,24 @@ impl TimeNormalizer {
         let work_hours = sum_hours(&work_entries);
         let total_hours = fixed_hours + work_hours;
 
-        // :66-68 — already 8h within half an increment: round everything and stop.
+        // `TimeNormalizer.kt:66-68` — already 8h within half an increment: round everything and stop.
         // Note what this branch does *not* do: no 0.25h floor, and no final sort.
         if (total_hours - TARGET_HOURS).abs() < HOUR_INCREMENT / 2.0 {
             return rounded(&with_meeting_flag);
         }
 
-        // :71.
+        // `TimeNormalizer.kt:71`.
         let target_work_hours = TARGET_HOURS - fixed_hours;
 
-        // :74-76.
+        // `TimeNormalizer.kt:74-76`.
         if work_entries.is_empty() || target_work_hours <= 0.0 {
             return rounded(&with_meeting_flag);
         }
 
-        // :79.
+        // `TimeNormalizer.kt:79`.
         let scale_factor = target_work_hours / work_hours;
 
-        // :82-85 — scale, round, floor at one increment so nothing lands on zero.
+        // `TimeNormalizer.kt:82-85` — scale, round, floor at one increment so nothing lands on zero.
         let scaled_work: Vec<NormalizedAggregate> = work_entries
             .iter()
             .map(|entry| {
@@ -161,14 +161,14 @@ impl TimeNormalizer {
             })
             .collect();
 
-        // :89-95.
+        // `TimeNormalizer.kt:89-95`.
         let scaled_work_total = sum_hours(&scaled_work);
         let rounded_fixed = rounded(&fixed_entries);
         let rounded_fixed_total = sum_hours(&rounded_fixed);
         let adjusted_target = TARGET_HOURS - rounded_fixed_total;
         let diff = adjusted_target - scaled_work_total;
 
-        // :97-105 — the whole residual goes to the largest scalable entry.
+        // `TimeNormalizer.kt:97-105` — the whole residual goes to the largest scalable entry.
         //
         // C28: `sortedByDescending {}.first()` is a *stable* TimSort, so a tie at the
         // top keeps the entry seen first. Rust's `max_by` returns the **last**
@@ -189,7 +189,7 @@ impl TimeNormalizer {
             scaled_work
         };
 
-        // :107-108 — fixed entries lead the concatenation, so a `(date, project)` tie
+        // `TimeNormalizer.kt:107-108` — fixed entries lead the concatenation, so a `(date, project)` tie
         // between a fixed and a scaled row puts the fixed one first whatever the
         // input order was. The early-return branches above keep the input order.
         let mut out = rounded_fixed;
@@ -200,22 +200,22 @@ impl TimeNormalizer {
 
     /// `TimeNormalizer.isMeetingEntry` (`TimeNormalizer.kt:111-145`) — C26.
     pub fn is_meeting_entry(&self, agg: &DayProjectAggregate) -> bool {
-        // :113-115 — admin work is a meeting unconditionally, before any I/O.
+        // `TimeNormalizer.kt:113-115` — admin work is a meeting unconditionally, before any I/O.
         if agg.chrono_project.starts_with("Operations -") {
             return true;
         }
 
-        // :117-119.
+        // `TimeNormalizer.kt:117-119`.
         let Some(raw_description) = agg.descriptions.first() else {
             return false;
         };
 
-        // :123-129.
+        // `TimeNormalizer.kt:123-129`.
         let project_suffix = format!(" - {}", agg.chrono_project);
         let meeting_name = strip_date_suffix(remove_suffix(raw_description, &project_suffix));
         let sanitized = sanitize(&meeting_name);
 
-        // :130-134 — the middle candidate's double space is load-bearing: it catches a
+        // `TimeNormalizer.kt:130-134` — the middle candidate's double space is load-bearing: it catches a
         // trailing space in the upstream `display_name`. Deleting it reclassifies real
         // meetings as scalable work.
         let date = agg.date.to_string();
@@ -225,7 +225,7 @@ impl TimeNormalizer {
             format!("{sanitized}.md"),
         ];
 
-        // :136-144.
+        // `TimeNormalizer.kt:136-144`.
         for dir in &self.calendar_dirs {
             for filename in &candidates {
                 if dir.join(filename).exists() {

@@ -153,7 +153,7 @@ pub struct ChronoProject {
     pub aspect: Option<ChronoAspect>,
 }
 
-/// No `rename_all` here on purpose: `Models.kt:118,120` pin `start_time` and
+/// No `rename_all` here on purpose: `Models.kt:111,113` pin `start_time` and
 /// `end_time` with `@SerialName`, and every other key is already a single word,
 /// so Rust's own snake_case field names reproduce the wire format exactly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,7 +373,7 @@ mod tests {
         );
     }
 
-    /// `Models.kt:118,120` pin these two keys with `@SerialName`; everything else
+    /// `Models.kt:111,113` pin these two keys with `@SerialName`; everything else
     /// on the Chrono side is a single word.
     #[test]
     fn a_chrono_entry_reads_snake_case_time_keys() {

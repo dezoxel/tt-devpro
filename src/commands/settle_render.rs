@@ -263,7 +263,7 @@ pub(crate) fn title_case(name: &str) -> String {
 /// `Monday`, `Tuesday`, … `java.time.DayOfWeek` names are the source strings.
 ///
 /// `SettleCommand.kt:360-362` prints this one in the day-by-day header and
-/// `:351-353` prints [`weekday_abbreviation`] nine lines above it, off the same
+/// `SettleCommand.kt:351-353` prints [`weekday_abbreviation`] nine lines above it, off the same
 /// expression with a `.take(3)` on the end. One table, therefore, and not two
 /// that can drift.
 pub(crate) fn weekday_name(date: NaiveDate) -> String {
@@ -760,7 +760,7 @@ mod tests {
     }
 
     /// The same rule on the day header and the grand total, which are separate
-    /// format sites (`SettleRenderer.kt:59` and `:73`).
+    /// format sites (`SettleRenderer.kt:59` and `SettleRenderer.kt:73`).
     #[test]
     fn day_header_and_grand_total_use_the_same_half_up_rule() {
         let out = render_day_summary(&[action("2026-07-03", "A", 0.125, "x")]);
@@ -977,7 +977,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Singular and plural on both counters, which are decided separately
-    /// (`SettleRenderer.kt:58` and `:72`).
+    /// (`SettleRenderer.kt:58` and `SettleRenderer.kt:72`).
     #[test]
     fn entry_and_day_words_are_singular_only_at_one() {
         let one = render_day_summary(&[action("2026-07-03", "A", 8.0, "x")]);

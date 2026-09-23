@@ -688,7 +688,7 @@ mod tests {
     // The two halves wired together, as `SettleCommand` uses them.
     // -----------------------------------------------------------------------
 
-    /// C1 + C23, `SettleCommand.kt:248-250` and `:335`. The end-to-end shape of
+    /// C1 + C23, `SettleCommand.kt:248-250` and `SettleCommand.kt:335`. The end-to-end shape of
     /// an ordinary morning: yesterday and today scanned, today held back, and the
     /// two messages that come out of it agreeing with each other.
     #[test]

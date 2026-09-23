@@ -36,8 +36,8 @@ pub fn session_cookie() -> Result<String> {
 
 /// The whole of `Main.kt:24-39` once the two lookups are parameters.
 ///
-/// The asymmetry in the middle is the part a port loses: `Main.kt:26` calls
-/// `.trim()` on the file contents and `:34` does not call it on the environment
+/// The asymmetry in the middle is the part a port loses: `Main.kt:27` calls
+/// `.trim()` on the file contents and `Main.kt:34` does not call it on the environment
 /// value, so `TT_COOKIE=" abc "` is used with its spaces intact. It is reproduced
 /// rather than tidied up, because a cookie header is sent verbatim and "obviously
 /// harmless whitespace" is exactly the kind of difference that turns into a 401
@@ -93,7 +93,7 @@ mod tests {
         assert_eq!(cookie, "from-env");
     }
 
-    /// C20, case 3. `Main.kt:26`: the file value is trimmed before it is returned,
+    /// C20, case 3. `Main.kt:27`: the file value is trimmed before it is returned,
     /// so the surrounding newline `make auth` leaves behind never reaches a header.
     #[test]
     fn the_file_value_is_trimmed() {
@@ -101,8 +101,8 @@ mod tests {
         assert_eq!(cookie, "SESSION=abc123");
     }
 
-    /// C20, case 4 — the one a port loses. `Main.kt:34` tests the environment
-    /// value for emptiness **without** trimming it, and `:35` returns it as it
+    /// C20, case 4 — the one a port loses. `Main.kt:35` tests the environment
+    /// value for emptiness **without** trimming it, and `Main.kt:36` returns it as it
     /// came. The asymmetry against the file branch is real behaviour, not a
     /// transcription slip.
     #[test]
