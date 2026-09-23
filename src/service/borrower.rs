@@ -11,13 +11,13 @@
 //!   shortfall day** (`BorrowerService.kt:76-78`). `byDate.keys.minOrNull()` is taken
 //!   once, so a shortfall day two weeks after the earliest day still borrows from the
 //!   week before that *earliest* day. Plan, `## Kotlin→Rust semantics`.
-//! - **The frequency map is last-wins** (`:122-123`). A description met under two
+//! - **The frequency map is last-wins** (`BorrowerService.kt:122-123`). A description met under two
 //!   aggregates accumulates both sets of hours and keeps the **last** aggregate's
 //!   project, billability and source date. `entry().or_insert()` keeps the first and
 //!   is therefore the wrong idiom here.
-//! - **A failed history fetch is swallowed in silence** (`:80-85`). No message, no
+//! - **A failed history fetch is swallowed in silence** (`BorrowerService.kt:80-85`). No message, no
 //!   error, no borrowing. D3's non-zero exit path must not capture it.
-//! - **The hours handed out may exceed the shortfall** (`:155-156`). `maxAllowed` is
+//! - **The hours handed out may exceed the shortfall** (`BorrowerService.kt:155-156`). `maxAllowed` is
 //!   capped at `hoursToFill` and *then* rounded, so a `hoursToFill` of `0.4` yields
 //!   `0.5`.
 //!
@@ -25,10 +25,10 @@
 //! which task is borrowed, and therefore how many hours land on which project in the
 //! system of record — not layout:
 //!
-//! - `taskFrequency` (`:118`) is a `mutableMapOf`, i.e. a `LinkedHashMap` in insertion
+//! - `taskFrequency` (`BorrowerService.kt:118`) is a `mutableMapOf`, i.e. a `LinkedHashMap` in insertion
 //!   order. It is a `Vec` walked in order below. A `HashMap` would randomize the
 //!   pre-sort order per process.
-//! - `sortedByDescending` (`:128`) is a stable TimSort, so tasks tying on accumulated
+//! - `sortedByDescending` (`BorrowerService.kt:128`) is a stable TimSort, so tasks tying on accumulated
 //!   hours keep that insertion order. `sort_by` with the comparator reversed, never
 //!   `sort_unstable_by`; `total_cmp`, never `partial_cmp`, because Kotlin compares
 //!   through `Double.compareTo`'s total order.
@@ -94,8 +94,8 @@ pub trait HistorySource {
 /// what is left of it after the day's fillers is the borrowing budget.
 ///
 /// Returns `Err` only where Kotlin throws: an unparseable Chrono timestamp or an
-/// unmapped Chrono project out of [`aggregator::aggregate`] at `:92`, which sits
-/// outside the `try` at `:80-85`. The fetch itself never produces an `Err`.
+/// unmapped Chrono project out of [`aggregator::aggregate`] at `BorrowerService.kt:92`, which sits
+/// outside the `try` at `BorrowerService.kt:80-85`. The fetch itself never produces an `Err`.
 pub async fn borrow_for_meeting_only_days<H: HistorySource>(
     normalized: &[NormalizedAggregate],
     fillers: &[FillerEntry],
@@ -104,7 +104,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
     max_synthetic_hours: f64,
     normalizer: &TimeNormalizer,
 ) -> Result<Vec<BorrowedEntry>> {
-    // `:42` — `groupBy { it.original.date }`. C28: a `LinkedHashMap`, so keys are in
+    // `BorrowerService.kt:42` — `groupBy { it.original.date }`. C28: a `LinkedHashMap`, so keys are in
     // first-encounter order and each group holds its entries in input order. A `Vec`
     // of pairs walked in order, per the plan's list of faithful options.
     let mut by_date: Vec<(NaiveDate, Vec<&NormalizedAggregate>)> = Vec::new();
@@ -118,7 +118,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         }
     }
 
-    // `:43-69` — `mapNotNull { … }.toMap()`, another `LinkedHashMap`; the dates are
+    // `BorrowerService.kt:43-69` — `mapNotNull { … }.toMap()`, another `LinkedHashMap`; the dates are
     // already unique so only the order carries.
     let mut days_with_shortfall: Vec<(NaiveDate, f64)> = Vec::new();
     for (date, day_entries) in &by_date {
@@ -131,12 +131,12 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         let total_hours = entry_hours + filler_hours;
         let shortfall = TARGET_HOURS - total_hours;
 
-        // `:53-55` — what is left of the synthetic budget once the fillers have taken
+        // `BorrowerService.kt:53-55` — what is left of the synthetic budget once the fillers have taken
         // their share, and the shortfall capped to it.
         let remaining_synthetic_budget = max_synthetic_hours - filler_hours;
         let capped_shortfall = java_min(shortfall, remaining_synthetic_budget);
 
-        // `:59-61` — `>=`, not `>`. A day whose meeting hours exactly equal its work
+        // `BorrowerService.kt:59-61` — `>=`, not `>`. A day whose meeting hours exactly equal its work
         // hours is meeting-heavy.
         let meeting_hours: f64 = day_entries
             .iter()
@@ -150,25 +150,25 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
             .sum();
         let is_meeting_heavy = meeting_hours >= work_hours;
 
-        // `:63` — strictly greater, so a shortfall of exactly one increment does not
+        // `BorrowerService.kt:63` — strictly greater, so a shortfall of exactly one increment does not
         // borrow.
         if capped_shortfall > HOUR_INCREMENT && is_meeting_heavy {
             days_with_shortfall.push((*date, capped_shortfall));
         }
     }
 
-    // `:71-73`. The history fetch does not happen at all when nothing is short.
+    // `BorrowerService.kt:71-73`. The history fetch does not happen at all when nothing is short.
     if days_with_shortfall.is_empty() {
         return Ok(Vec::new());
     }
 
-    // `:76` — the minimum over **every** day in the run, not over the shortfall days.
+    // `BorrowerService.kt:76` — the minimum over **every** day in the run, not over the shortfall days.
     // Unreachable as `None`: an empty `by_date` cannot produce a shortfall day.
     let Some(earliest_date) = by_date.iter().map(|(date, _)| *date).min() else {
         return Ok(Vec::new());
     };
 
-    // `:77-78`. `LocalDate.minusDays` throws past `LocalDate.MIN`; `checked_sub_days`
+    // `BorrowerService.kt:77-78`. `LocalDate.minusDays` throws past `LocalDate.MIN`; `checked_sub_days`
     // returns `None` at `NaiveDate::MIN`, and both are errors out of this function.
     let history_start_date = earliest_date
         .checked_sub_days(Days::new(LOOKBACK_DAYS))
@@ -177,7 +177,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         .pred_opt()
         .ok_or_else(|| anyhow!("Date underflow: {earliest_date} minus 1 day"))?;
 
-    // `:81` — the fetch runs to `historyEndDate.plusDays(1)`, i.e. to `earliestDate`
+    // `BorrowerService.kt:81` — the fetch runs to `historyEndDate.plusDays(1)`, i.e. to `earliestDate`
     // itself. That is C2's `+1 day` UTC-axis padding, so a late local evening filed
     // under the next UTC day is still fetched; the aggregate filter below then puts
     // it back on its own local day and drops it if it falls outside the window. The
@@ -186,7 +186,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         .succ_opt()
         .ok_or_else(|| anyhow!("Date overflow: {history_end_date} plus 1 day"))?;
 
-    // `:80-85` — every exception swallowed, no message, no borrowing.
+    // `BorrowerService.kt:80-85` — every exception swallowed, no message, no borrowing.
     let Ok(history_entries) = history
         .get_time_entries(history_start_date, history_fetch_end)
         .await
@@ -194,12 +194,12 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         return Ok(Vec::new());
     };
 
-    // `:87-89`.
+    // `BorrowerService.kt:87-89`.
     if history_entries.is_empty() {
         return Ok(Vec::new());
     }
 
-    // `:92` — note the bounds: `[earliest-7, earliest-1]`, one day tighter than the
+    // `BorrowerService.kt:92` — note the bounds: `[earliest-7, earliest-1]`, one day tighter than the
     // fetch above.
     let historical_aggregates = aggregator::aggregate(
         &history_entries,
@@ -208,7 +208,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         Some(history_end_date),
     )?;
 
-    // `:95-98` — normalization is run only for its `isMeeting` verdict; what survives
+    // `BorrowerService.kt:95-98` — normalization is run only for its `isMeeting` verdict; what survives
     // is `it.original`, the *unnormalized* aggregate, so the hours borrowed below are
     // the raw Chrono hours and not the scaled ones. Meetings are never borrowable.
     let normalized_history = normalizer.normalize(&historical_aggregates);
@@ -218,7 +218,7 @@ pub async fn borrow_for_meeting_only_days<H: HistorySource>(
         .map(|e| e.original)
         .collect();
 
-    // `:101-103` — days in the insertion order established above.
+    // `BorrowerService.kt:101-103` — days in the insertion order established above.
     let mut result: Vec<BorrowedEntry> = Vec::new();
     for (date, shortfall) in &days_with_shortfall {
         result.extend(borrow_for_day(*date, *shortfall, &non_meeting_aggregates));
@@ -235,15 +235,15 @@ fn borrow_for_day(
     shortfall: f64,
     historical_aggregates: &[DayProjectAggregate],
 ) -> Vec<BorrowedEntry> {
-    // `:112`.
+    // `BorrowerService.kt:112`.
     if historical_aggregates.is_empty() {
         return Vec::new();
     }
 
-    // `:118-125`. C28's first structure: insertion-ordered, because the stable sort
+    // `BorrowerService.kt:118-125`. C28's first structure: insertion-ordered, because the stable sort
     // below turns this order into the tie-break that decides which tasks get borrowed.
     //
-    // The write at `:122-123` is last-wins — read the pair, keep only its hours, put
+    // The write at `BorrowerService.kt:122-123` is last-wins — read the pair, keep only its hours, put
     // back `(hours + share, agg)` with the *current* aggregate. So a description met
     // under two aggregates accumulates both shares while its project, billability and
     // source date come from the later one.
@@ -251,7 +251,7 @@ fn borrow_for_day(
     for agg in historical_aggregates {
         for desc in &agg.descriptions {
             let key = desc.as_str();
-            // `:123` — `coerceAtLeast(1)`. Dead as written, since an aggregate with no
+            // `BorrowerService.kt:123` — `coerceAtLeast(1)`. Dead as written, since an aggregate with no
             // descriptions never enters this loop, but ported rather than reasoned away.
             let share = agg.total_hours / agg.descriptions.len().max(1) as f64;
             match task_frequency.iter_mut().find(|(k, _)| *k == key) {
@@ -261,14 +261,14 @@ fn borrow_for_day(
         }
     }
 
-    // `:127-129` — `sortedByDescending { it.value.first }`, a stable TimSort.
+    // `BorrowerService.kt:127-129` — `sortedByDescending { it.value.first }`, a stable TimSort.
     task_frequency.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
     let sorted_tasks: Vec<(&str, &DayProjectAggregate)> = task_frequency
         .iter()
         .map(|(key, value)| (*key, value.1))
         .collect();
 
-    // `:131`.
+    // `BorrowerService.kt:131`.
     if sorted_tasks.is_empty() {
         return Vec::new();
     }
@@ -276,22 +276,22 @@ fn borrow_for_day(
     let mut result: Vec<BorrowedEntry> = Vec::new();
     let mut hours_to_fill = shortfall;
     let mut task_index = 0usize;
-    // `:136` — a `LinkedHashSet` in Kotlin, but it is only ever probed and added to,
+    // `BorrowerService.kt:136` — a `LinkedHashSet` in Kotlin, but it is only ever probed and added to,
     // never iterated, so nothing observable depends on its order.
     let mut used_task_titles: HashSet<String> = HashSet::new();
 
-    // `:139` — `>=`, so a remaining fill of exactly one increment still runs a pass.
+    // `BorrowerService.kt:139` — `>=`, so a remaining fill of exactly one increment still runs a pass.
     while hours_to_fill >= HOUR_INCREMENT && task_index < sorted_tasks.len() {
         let (task_description, source_aggregate) = sorted_tasks[task_index];
-        // `:141` — advanced before the `continue` below, which is what stops the
+        // `BorrowerService.kt:141` — advanced before the `continue` below, which is what stops the
         // dedupe skip from spinning.
         task_index += 1;
 
-        // `:144-148` — C12's secondary site, textually identical to
+        // `BorrowerService.kt:144-148` — C12's secondary site, textually identical to
         // `SettleCommand.kt:486,490,494-496`. One function, called from both.
         let clean_title = clean_task_title(task_description, &source_aggregate.chrono_project);
 
-        // `:151-152` — the dedupe key is the *cleaned* title, and it is marked used
+        // `BorrowerService.kt:151-152` — the dedupe key is the *cleaned* title, and it is marked used
         // before the `hours > 0` test below. A task whose share rounds to zero
         // therefore still burns its title for the rest of the day.
         if used_task_titles.contains(&clean_title) {
@@ -299,7 +299,7 @@ fn borrow_for_day(
         }
         used_task_titles.insert(clean_title.clone());
 
-        // `:155-156` — the cap is applied *before* the rounding, so the result can
+        // `BorrowerService.kt:155-156` — the cap is applied *before* the rounding, so the result can
         // exceed `hoursToFill`: `0.4` becomes `0.5`. Incumbent behaviour.
         let max_allowed = java_min(
             source_aggregate.total_hours / source_aggregate.descriptions.len().max(1) as f64,
@@ -307,7 +307,7 @@ fn borrow_for_day(
         );
         let hours = round_to_quarter(max_allowed);
 
-        // `:158-168`.
+        // `BorrowerService.kt:158-168`.
         if hours > 0.0 {
             result.push(BorrowedEntry {
                 date,
@@ -447,7 +447,7 @@ mod tests {
     }
 
     /// Records the window it was asked for, so the two different bounds at
-    /// `BorrowerService.kt:78` and `:81` can be asserted separately.
+    /// `BorrowerService.kt:78` and `BorrowerService.kt:81` can be asserted separately.
     struct FixtureHistory {
         entries: Vec<ChronoTimeEntry>,
         calls: Mutex<Vec<(NaiveDate, NaiveDate)>>,
@@ -784,7 +784,7 @@ mod tests {
         assert_eq!(history.calls(), vec![(d(2026, 9, 11), d(2026, 9, 18))]);
     }
 
-    /// C6, `BorrowerService.kt:78` against `:92`. The two bounds differ by a day on
+    /// C6, `BorrowerService.kt:78` against `BorrowerService.kt:92`. The two bounds differ by a day on
     /// purpose: the padding day is fetched and then dropped by the aggregate filter,
     /// so an entry dated `earliestDate` is never borrowable. A port that passes
     /// `historyEndDate.plusDays(1)` to both would borrow from the shortfall day
@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     /// `BorrowerService.kt:42-73`. An empty input never reaches the fetch, so the
-    /// `minOrNull` fallback at `:76` is unreachable — recorded here rather than
+    /// `minOrNull` fallback at `BorrowerService.kt:76` is unreachable — recorded here rather than
     /// asserted as behaviour it does not have.
     #[tokio::test]
     async fn an_empty_normalized_list_borrows_nothing_and_never_fetches() {
@@ -1055,7 +1055,7 @@ mod tests {
 
     const TARGET: fn() -> NaiveDate = || NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
 
-    /// C28 at `BorrowerService.kt:118-129`, the last-wins write at `:122-123`. One
+    /// C28 at `BorrowerService.kt:118-129`, the last-wins write at `BorrowerService.kt:122-123`. One
     /// description under two aggregates accumulates **both** shares while its project,
     /// billability and source date come from the **second**. The idiomatic
     /// `entry().or_insert()` keeps the first and would post these hours to the wrong
@@ -1086,7 +1086,7 @@ mod tests {
         assert_eq!(borrowed[0].billability, "Billable");
         assert_eq!(borrowed[0].source_date, d(2026, 9, 15));
         // The hours come from the *last* aggregate alone (2.0), not from the summed
-        // frequency (3.0) — `:155` reads `sourceAggregate.totalHours`.
+        // frequency (3.0) — `BorrowerService.kt:155` reads `sourceAggregate.totalHours`.
         assert_eq!(borrowed[0].hours, 2.0);
     }
 
@@ -1238,7 +1238,7 @@ mod tests {
         );
     }
 
-    /// `BorrowerService.kt:141` against `:151`. `taskIndex` is advanced *before* the
+    /// `BorrowerService.kt:141` against `BorrowerService.kt:151`. `taskIndex` is advanced *before* the
     /// dedupe `continue`, so a skipped duplicate does not stall the walk and the task
     /// behind it is still reached.
     #[test]
@@ -1266,7 +1266,7 @@ mod tests {
     ///
     /// The fixture leans on the last-wins write to get a high frequency with a tiny
     /// payout: `"Weekly review - <project>"` accumulates 5.0 + 0.1 = 5.1h and so
-    /// sorts first, while `:155` reads only the last aggregate's 0.1h, which
+    /// sorts first, while `BorrowerService.kt:155` reads only the last aggregate's 0.1h, which
     /// `roundToQuarter` sends to zero.
     #[test]
     fn a_zero_hour_task_still_burns_its_title_for_the_rest_of_the_day() {
@@ -1365,7 +1365,7 @@ mod tests {
 
     /// `BorrowerService.kt:120,131`. An aggregate with no descriptions contributes no
     /// key at all, so `sortedTasks` stays empty and the `coerceAtLeast(1)` guard at
-    /// `:123` is never the thing standing between this and a division by zero.
+    /// `BorrowerService.kt:123` is never the thing standing between this and a division by zero.
     #[test]
     fn aggregates_without_descriptions_contribute_no_borrowable_task() {
         let aggregates = vec![agg(

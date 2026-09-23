@@ -11,7 +11,7 @@
 //! **The randomness is injected, and that is the only structural change.** G2 says
 //! filler selection is random and therefore not reproducible, which is why this
 //! module has no Kotlin test at all. `FillerService.kt:107` (`availableFillers
-//! .random()`) and `:133` (`Random.nextDouble(minAllowed, maxAllowed)`) both go
+//! .random()`) and `FillerService.kt:133` (`Random.nextDouble(minAllowed, maxAllowed)`) both go
 //! through [`FillerRandom`]. The production implementation [`ThreadFillerRandom`]
 //! is `rand`'s thread RNG behind Kotlin's own `nextDouble(from, until)` algorithm,
 //! so the shipped behaviour is what it was; the tests get a stub and C6 becomes
@@ -24,10 +24,10 @@
 //! the map — the key, the unlimited sentinel, the `>=` comparisons — is verbatim.
 //!
 //! **The loop terminates on the `usedProjects` set, not on the hours.** Two of the
-//! four ways an iteration can end (`continue` at `:125-127`, and a consumption that
+//! four ways an iteration can end (`continue` at `FillerService.kt:125-127`, and a consumption that
 //! adds no entry) leave `hoursToFill` untouched. What bounds the loop is that a
-//! filler is marked used at `:108`, *before* either of those exits, and the
-//! candidate filter at `:94` excludes used projects — so every non-breaking
+//! filler is marked used at `FillerService.kt:108`, *before* either of those exits, and the
+//! candidate filter at `FillerService.kt:94` excludes used projects — so every non-breaking
 //! iteration removes at least one project from the candidate set. Moving the
 //! `usedProjects.add` below the `continue` would turn a filler with
 //! `max_hours < 0.25` into an infinite loop.
@@ -163,7 +163,7 @@ pub fn kotlin_next_double_in(from: f64, until: f64, unit: f64) -> f64 {
 
 /// `FillerService.kt:32-46` (`generateFillers`).
 ///
-/// Days are grouped in first-encounter order (C28, `:41` — `groupBy` returns a
+/// Days are grouped in first-encounter order (C28, `FillerService.kt:41` — `groupBy` returns a
 /// `LinkedHashMap`) and flat-mapped in that order, so the returned list's order is
 /// the input's order of dates, and within a date the order fillers were chosen.
 ///
@@ -179,15 +179,15 @@ pub fn generate_fillers<R: FillerRandom + ?Sized>(
     mut period_budgets: Option<&mut PeriodBudgets>,
     rng: &mut R,
 ) -> Vec<FillerEntry> {
-    // `:38`.
+    // `FillerService.kt:38`.
     if fillers.is_empty() {
         return Vec::new();
     }
 
-    // `:41` — `normalized.groupBy { it.original.date }`.
+    // `FillerService.kt:41` — `normalized.groupBy { it.original.date }`.
     let by_date = group_by_date_in_encounter_order(normalized);
 
-    // `:43-45` — `flatMap`, so days concatenate in the grouping's order.
+    // `FillerService.kt:43-45` — `flatMap`, so days concatenate in the grouping's order.
     let mut result = Vec::new();
     for (date, day_entries) in by_date {
         let budgets = period_budgets
@@ -207,7 +207,7 @@ pub fn generate_fillers<R: FillerRandom + ?Sized>(
 
 /// Kotlin's `groupBy`: keys in first-encounter order, values in input order within
 /// a group (C28). A `HashMap` would randomize the day order per process and a
-/// `BTreeMap` would sort the dates, and neither is what `:41` does.
+/// `BTreeMap` would sort the dates, and neither is what `FillerService.kt:41` does.
 fn group_by_date_in_encounter_order(
     normalized: &[NormalizedAggregate],
 ) -> Vec<(NaiveDate, Vec<&NormalizedAggregate>)> {
@@ -233,30 +233,30 @@ fn generate_fillers_for_day<R: FillerRandom + ?Sized>(
     budgets: Option<&mut Budgets>,
     rng: &mut R,
 ) -> Vec<FillerEntry> {
-    // `:56-57` — the gate. One scalable entry anywhere in the day and the normalizer
+    // `FillerService.kt:56-57` — the gate. One scalable entry anywhere in the day and the normalizer
     // can reach 8h on its own, so nothing is synthesized.
     let all_meetings = day_entries.iter().all(|e| e.is_meeting);
     if !all_meetings {
         return Vec::new();
     }
 
-    // `:60-61`. Summed left to right, as `sumOf` is: `f64` addition is not
+    // `FillerService.kt:60-61`. Summed left to right, as `sumOf` is: `f64` addition is not
     // associative and the order is part of the answer.
     let current_hours = day_entries
         .iter()
         .fold(0.0_f64, |acc, e| acc + e.normalized_hours);
     let remaining_hours = TARGET_HOURS - current_hours;
 
-    // `:63`.
+    // `FillerService.kt:63`.
     if remaining_hours <= 0.0 {
         return Vec::new();
     }
 
-    // `:66` — leave room for the borrower, which spends the other half of the same
+    // `FillerService.kt:66` — leave room for the borrower, which spends the other half of the same
     // synthetic budget.
     let capped_remaining_hours = java_min(remaining_hours, max_synthetic_hours);
 
-    // `:69`. A `toSet()` in Kotlin, but only ever asked `contains` (`:93`), so the
+    // `FillerService.kt:69`. A `toSet()` in Kotlin, but only ever asked `contains` (`FillerService.kt:93`), so the
     // dedupe and the insertion order are both unobservable — a `Vec` answers the
     // same question without inviting a hash-order question that does not exist here.
     let present_projects: Vec<&str> = day_entries
@@ -285,22 +285,22 @@ fn fill_gap<R: FillerRandom + ?Sized>(
 ) -> Vec<FillerEntry> {
     let mut result: Vec<FillerEntry> = Vec::new();
     let mut hours_to_fill = remaining_hours;
-    // `:84` — read only through `contains`/`add`, like `presentProjects`.
+    // `FillerService.kt:84` — read only through `contains`/`add`, like `presentProjects`.
     let mut used_projects: Vec<&str> = Vec::new();
 
-    // `:87`. The first conjunct is redundant — `HOUR_INCREMENT` is positive, so
+    // `FillerService.kt:87`. The first conjunct is redundant — `HOUR_INCREMENT` is positive, so
     // `>= 0.25` already implies `> 0`, and NaN fails both — and is ported because it
     // is there. `expect` rather than `allow`: if a later edit makes the conjunct
     // meaningful, the attribute itself fails the build instead of going stale.
     #[expect(clippy::redundant_comparisons)]
     while hours_to_fill > 0.0 && hours_to_fill >= HOUR_INCREMENT {
-        // `:92-100`.
+        // `FillerService.kt:92-100`.
         let available_fillers: Vec<&Filler> = fillers
             .iter()
             .filter(|filler| {
                 let is_present = present_projects.contains(&filler.devpro_project.as_str());
                 let not_used_today = !used_projects.contains(&filler.devpro_project.as_str());
-                // `:96` — the default `minRequired` of the Kotlin signature.
+                // `FillerService.kt:96` — the default `minRequired` of the Kotlin signature.
                 let has_budget = match budgets.as_deref() {
                     Some(b) => has_remaining_budget(
                         b,
@@ -314,20 +314,20 @@ fn fill_gap<R: FillerRandom + ?Sized>(
             })
             .collect();
 
-        // `:102-105`.
+        // `FillerService.kt:102-105`.
         if available_fillers.is_empty() {
             break;
         }
 
-        // `:107-108`. The `add` happens here, above every later exit — see the
+        // `FillerService.kt:107-108`. The `add` happens here, above every later exit — see the
         // termination note at the top of the file.
         let filler = available_fillers[rng.choose_index(available_fillers.len())];
         used_projects.push(filler.devpro_project.as_str());
 
-        // `:111`.
+        // `FillerService.kt:111`.
         let mut max_allowed = java_min(filler.max_hours, hours_to_fill);
 
-        // `:114-120`. A key with no entry reads as the unlimited sentinel and the
+        // `FillerService.kt:114-120`. A key with no entry reads as the unlimited sentinel and the
         // `< Double.MAX_VALUE` guard then skips the cap, so a present-but-silent map
         // and an absent map agree.
         if let Some(b) = budgets.as_deref() {
@@ -341,36 +341,36 @@ fn fill_gap<R: FillerRandom + ?Sized>(
             }
         }
 
-        // `:122`. Note the direction: a configured minimum *above* the ceiling is
+        // `FillerService.kt:122`. Note the direction: a configured minimum *above* the ceiling is
         // pulled down to the ceiling, never the other way round.
         let min_allowed = java_min(filler.min_hours, max_allowed);
 
-        // `:125-127` — `continue`, not `break`. The project has already been marked
+        // `FillerService.kt:125-127` — `continue`, not `break`. The project has already been marked
         // used, so the next iteration sees a strictly smaller candidate set.
         if max_allowed < HOUR_INCREMENT {
             continue;
         }
 
-        // `:130-134`.
+        // `FillerService.kt:130-134`.
         let raw_hours = if max_allowed <= min_allowed {
             min_allowed
         } else {
             rng.next_double_in(min_allowed, max_allowed)
         };
 
-        // `:137` — C27's *rounding* quantizer, the one where `0.375` becomes `0.5`.
+        // `FillerService.kt:137` — C27's *rounding* quantizer, the one where `0.375` becomes `0.5`.
         // The interactive edit path truncates the same value to `0.25`; both are
         // contracts and unifying them changes hours on real days.
         let hours = round_to_quarter(raw_hours);
 
         if hours > 0.0 {
-            // `:141-143`.
+            // `FillerService.kt:141-143`.
             let consumed = match budgets.as_deref_mut() {
                 Some(b) => consume_budget(b, &filler.devpro_project, &filler.task_title, hours),
                 None => hours,
             };
 
-            // `:145`. Always true when reached — see the module's test
+            // `FillerService.kt:145`. Always true when reached — see the module's test
             // `consumption_below_the_increment_is_unreachable_by_construction`.
             if consumed >= HOUR_INCREMENT {
                 result.push(FillerEntry {
@@ -383,7 +383,7 @@ fn fill_gap<R: FillerRandom + ?Sized>(
                 hours_to_fill -= round_to_quarter(consumed);
             }
         } else {
-            // `:156-158` — `break`, not `continue`. A draw that rounds to zero ends
+            // `FillerService.kt:156-158` — `break`, not `continue`. A draw that rounds to zero ends
             // the day's synthesis entirely, even though other projects are still
             // available.
             break;
@@ -1320,8 +1320,8 @@ mod tests {
     /// `FillerService.kt:145` — the `consumed >= HOUR_INCREMENT` guard is dead on
     /// every reachable path, and this test is the proof rather than a claim.
     ///
-    /// The chain: `hours > 0` at `:139` plus quantization at `:137` makes `hours >=
-    /// 0.25`; selection at `:96` already required `available >= 0.25`; nothing
+    /// The chain: `hours > 0` at `FillerService.kt:139` plus quantization at `FillerService.kt:137` makes `hours >=
+    /// 0.25`; selection at `FillerService.kt:96` already required `available >= 0.25`; nothing
     /// mutates the map between the two; and `consumeBudget` returns
     /// `min(requested, available)`, so `consumed >= 0.25`. The tightest case the
     /// guard can be handed is a budget of exactly one quarter against a larger
@@ -1348,7 +1348,7 @@ mod tests {
     /// budget handed back.
     ///
     /// With 0.4h left, the ceiling is 0.4, the draw is 0.4, `roundToQuarter` lifts
-    /// it to 0.5, `consumeBudget` grants only the 0.4 that exists — and then `:151`
+    /// it to 0.5, `consumeBudget` grants only the 0.4 that exists — and then `FillerService.kt:151`
     /// rounds that 0.4 straight back up to 0.5 for the worklog. The portal gets
     /// 0.5h against a 0.4h allowance and the budget lands on zero. Incumbent
     /// behaviour, ported verbatim; only a fractional `max_hours_per_period` can
@@ -1381,10 +1381,10 @@ mod tests {
     }
 
     /// C6, `FillerService.kt:151`. `roundToQuarter(consumed)` is always exactly the
-    /// `hours` computed at `:137`, so the entry cannot disagree with what was asked
+    /// `hours` computed at `FillerService.kt:137`, so the entry cannot disagree with what was asked
     /// for — even in the overspend case above, where `consumed` is strictly less.
     ///
-    /// Why it holds: `maxAllowed <= budget` (`:118`), `raw <= maxAllowed`, and
+    /// Why it holds: `maxAllowed <= budget` (`FillerService.kt:118`), `raw <= maxAllowed`, and
     /// `roundToQuarter` is monotone, so `hours = roundToQuarter(raw) <=
     /// roundToQuarter(budget)`; when `hours > budget` the grant is the budget and
     /// `roundToQuarter(budget)` is squeezed back onto `hours`. Recorded as an
@@ -1404,7 +1404,7 @@ mod tests {
                 &mut NoDrawRandom,
             );
             assert_eq!(out.len(), 1, "budget {budget}");
-            // `hours` at `:137` is `roundToQuarter(budget)`, since the budget is the
+            // `hours` at `FillerService.kt:137` is `roundToQuarter(budget)`, since the budget is the
             // tightest of the three ceilings and the range is degenerate.
             assert_eq!(out[0].hours, round_to_quarter(budget), "budget {budget}");
         }
