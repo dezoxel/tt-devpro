@@ -130,3 +130,7 @@ git show 06fb43e:src/test/kotlin/pro/dev/tt/SettleWindowTest.kt
 ```
 
 To jump straight to a cited line, pipe it: `git show 06fb43e:<path> | sed -n '197p'`.
+
+`cargo test` checks all of this for you. `tests/citations.rs` resolves every `SomeFile.kt:NNN` in `src/` against `06fb43e` and fails on any that names a file the pin does not carry, or a line the file does not reach. It is a test rather than a one-off audit because a wrong citation is not a loud failure: `git show` answers a bad line with real, unrelated Kotlin, so the reader who follows it is misled rather than stopped — and nothing about it looks different from the citations that are right.
+
+The same test rejects a citation that leaves its file out — a bare `:NNN`, to be resolved against whichever Kotlin file the surrounding Rust happens to port. That inference is not as safe as it reads: when the citations were last counted by hand, 204 of them omitted the file and 27 of those pointed somewhere other than where their author meant, each one landing on a real line of a real file. So name the file every time. It is what turns a citation from a guess the reader has to make into something the suite can check.
