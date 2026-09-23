@@ -18,7 +18,8 @@
 //!
 //! Scope is every `*.rs` under `src/` and `tests/`, this file included. Code lines are not
 //! checked: rustfmt already owns them, and a long string literal it cannot break is not a
-//! defect anyone can fix.
+//! defect anyone can fix. A comment whose text is a single token is not checked either, on
+//! the same ground and under a named exemption — see `is_unbreakable`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -61,9 +62,40 @@ fn width(line: &str) -> usize {
     line.chars().count()
 }
 
+/// What a comment line says, with its indent and its `//`, `///` or `//!` taken off.
+fn comment_text(line: &str) -> &str {
+    let after_slashes = line.trim_start().trim_start_matches('/');
+    after_slashes
+        .strip_prefix('!')
+        .unwrap_or(after_slashes)
+        .trim()
+}
+
+/// A comment whose text is a single token, with nothing in it to wrap at.
+///
+/// The limit is a demand on the author, so it has to be a demand that can be met. Wrapping
+/// happens at a space; a comment whose whole text is one token — a path, a URL, a long
+/// identifier — offers none. What is left is to shorten the token or to re-indent the code
+/// the comment is nested in, and neither of those is a decision about the comment. The rule
+/// measures what the author controls, so it stops here.
+///
+/// The exemption cannot be stretched by someone who wants it, which is what makes it safe
+/// to have: prose has spaces in it, so nothing can be hidden inside one token.
+///
+/// Two lines take it today, both in `src/main.rs` and both the same measurement path under
+/// `~/.cache/tt-devpro-rewrite/` — 75 characters of it, 24 columns deep, with no space
+/// after the marker at all. Those paths are absolute so they can be pasted into a shell,
+/// and the depth is the nesting of the code they document. The count is worth watching
+/// rather than trusting: a third line reaching for this is likelier to be a comment that
+/// wants rewriting than a third genuinely unbreakable token.
+fn is_unbreakable(line: &str) -> bool {
+    let text = comment_text(line);
+    !text.is_empty() && !text.chars().any(char::is_whitespace)
+}
+
 /// The whole rule, in one place so the tests below can put lines through it directly.
 fn is_too_wide(line: &str) -> bool {
-    is_comment(line) && width(line) > MAX_WIDTH
+    is_comment(line) && width(line) > MAX_WIDTH && !is_unbreakable(line)
 }
 
 /// Every `*.rs` under `src/` and `tests/`, sorted, so a failing run lists its findings in
@@ -178,17 +210,27 @@ fn no_comment_line_is_wider_than_the_limit() {
 /// count, and it reported 58 violations where there were 49 — nine lines that fit, blamed
 /// for the width of their own em-dashes. A gate that repeated that mistake would send its
 /// reader to rewrap lines that are already within the limit.
+/// A comment body of `n` characters with a space in the middle of it.
+///
+/// Every fixture below needs one. A body of `n` identical characters is a single token,
+/// which the unbreakable exemption answers for, and a fixture answered by the exemption
+/// stops testing the rule it was written for.
+fn wrappable(n: usize) -> String {
+    let head = n / 2;
+    format!("{} {}", "x".repeat(head), "y".repeat(n - head - 1))
+}
+
 #[test]
 fn the_rule_counts_characters_and_not_bytes() {
-    let ascii = format!("// {}", "x".repeat(98));
+    let ascii = format!("// {}", wrappable(98));
     assert_eq!(width(&ascii), 101);
     assert!(
         is_too_wide(&ascii),
         "101 ASCII characters is over the limit"
     );
 
-    // 99 characters, 291 bytes: every em-dash is three bytes.
-    let dashes = format!("// {}", "—".repeat(96));
+    // 99 characters, 195 bytes: every em-dash is three bytes.
+    let dashes = format!("// {}", "— ".repeat(48));
     assert_eq!(width(&dashes), 99);
     assert!(
         dashes.len() > MAX_WIDTH,
@@ -213,13 +255,46 @@ fn a_long_code_line_is_not_a_violation_but_a_long_comment_is() {
     assert!(!is_too_wide(&literal), "code is rustfmt's business");
 
     for marker in ["//", "///", "//!"] {
-        let comment = format!("    {marker} {}", "x".repeat(120));
+        let comment = format!("    {marker} {}", wrappable(120));
         assert!(
             is_too_wide(&comment),
             "a {marker} line of {} characters is a violation",
             width(&comment)
         );
     }
+}
+
+/// Pins the unbreakable exemption, and pins that it stops where it stops.
+///
+/// The exemption exists for two real lines: a 75-character measurement path in
+/// `src/main.rs`, nested 24 columns deep, with no space anywhere after the marker. It has
+/// to be narrow or it is a hole — one space in the text and the comment has somewhere to
+/// wrap, so the limit applies again. Both halves are asserted here, off one fixture, so
+/// widening the rule breaks the second half immediately.
+#[test]
+fn a_comment_of_one_unbreakable_token_is_exempt_but_one_with_a_space_is_not() {
+    let indent = " ".repeat(24);
+    let token = format!("`~/.cache/tt-devpro-rewrite/{}.md`", "x".repeat(60));
+    let unbreakable = format!("{indent}// {token}");
+
+    assert!(width(&unbreakable) > MAX_WIDTH);
+    assert!(
+        !is_too_wide(&unbreakable),
+        "one token has nowhere to wrap, so the limit asks for nothing"
+    );
+    // The real pair carries a full stop after the path; that is still one token.
+    assert!(!is_too_wide(&format!("{unbreakable}.")));
+
+    // The same line with a single space in it is wrappable, and therefore checked.
+    let with_a_space = unbreakable.replacen("tt-devpro-rewrite/", "tt-devpro-rewrite /", 1);
+    assert_eq!(width(&with_a_space), width(&unbreakable) + 1);
+    assert!(
+        is_too_wide(&with_a_space),
+        "one space is all it takes for the limit to apply again"
+    );
+
+    // Prose cannot reach the exemption at all, which is what keeps it from spreading.
+    assert!(is_too_wide(&format!("{indent}// {}", wrappable(90))));
 }
 
 /// Pins that the width includes the indent.
@@ -230,7 +305,7 @@ fn a_long_code_line_is_not_a_violation_but_a_long_comment_is() {
 /// it respects — and the deeper the nesting, the more it would be let through.
 #[test]
 fn the_width_is_measured_from_the_start_of_the_line_including_its_indent() {
-    let body = "x".repeat(94);
+    let body = wrappable(94);
 
     let flush = format!("// {body}");
     assert_eq!(width(&flush), 97);
