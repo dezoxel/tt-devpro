@@ -39,7 +39,7 @@ pub struct ChronoClient {
 
 impl ChronoClient {
     /// `ChronoClient.kt:14-24`. `base_url` is the config's `chrono_api` verbatim,
-    /// trailing slash and all, because `:27` concatenates it verbatim.
+    /// trailing slash and all, because `ChronoClient.kt:27` concatenates it verbatim.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         Self::with_timeouts(base_url, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
     }
@@ -89,7 +89,7 @@ impl ChronoClient {
                 .with_context(|| format!("parsing the Chrono response from {url}"));
         }
 
-        // `:36` — `error(…)` throws `IllegalStateException`; the message is the
+        // `ChronoClient.kt:36` — `error(…)` throws `IllegalStateException`; the message is the
         // contract, down to the blank line before the question.
         bail!(
             "Chrono API error ({status}): {body}\n\nIs Chrono running at {}?",
@@ -145,7 +145,7 @@ mod tests {
         );
     }
 
-    /// The base URL is concatenated verbatim (`:27`), so a configured value carrying
+    /// The base URL is concatenated verbatim (`ChronoClient.kt:27`), so a configured value carrying
     /// a path prefix keeps it. `~/.tt-config.yaml` holds a bare origin today, which
     /// is exactly why nothing else would notice a port that parsed and rebuilt it.
     #[tokio::test]
@@ -184,7 +184,7 @@ mod tests {
         server.requests();
     }
 
-    /// `:32` is `in 200..299`, so the top of the range parses and the first status
+    /// `ChronoClient.kt:33` is `in 200..299`, so the top of the range parses and the first status
     /// outside it does not. `is_success()` would agree on both; `status == 200`
     /// would fail the first, and that is the port this test exists to catch.
     ///
@@ -217,7 +217,7 @@ mod tests {
         server.requests();
     }
 
-    /// `:36`'s message verbatim: the status in parentheses, the raw body, a blank
+    /// `ChronoClient.kt:36`'s message verbatim: the status in parentheses, the raw body, a blank
     /// line, and the base URL in the question. The blank line is `\n\n` in the Kotlin
     /// string and is the part a retyped port drops.
     #[tokio::test]

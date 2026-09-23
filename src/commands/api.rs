@@ -345,7 +345,7 @@ fn connect() -> Result<TtApiClient> {
 
 /// `ApiGetProjectsCommand.run` (`ApiCommand.kt:56-67`).
 pub async fn run_get_projects(args: &GetProjectsArgs, io: &mut dyn Console) -> Outcome {
-    // `.default(LocalDate.now())` at `:54`, read once so that a run that straddles
+    // `.default(LocalDate.now())` at `ApiCommand.kt:54`, read once so that a run that straddles
     // midnight queries and prints the same date.
     let today = Local::now().date_naive();
     let result = match connect() {
@@ -358,7 +358,7 @@ pub async fn run_get_projects(args: &GetProjectsArgs, io: &mut dyn Console) -> O
 /// `ApiCommand.kt:60-63`.
 ///
 /// C8: the date is queried **and** printed, and it is the same date in both places.
-/// The contact id comes from `getCurrentUser()` at `:60` — there is no configured
+/// The contact id comes from `getCurrentUser()` at `ApiCommand.kt:60` — there is no configured
 /// id — and `assignedProjectsOnDate` takes the date as `dateFrom`, which is the whole
 /// reason this command exists in its date-scoped form. `today` is a parameter rather
 /// than a clock read, because a test that cannot fix today can only assert the shape
@@ -389,7 +389,7 @@ pub async fn run_get_worklogs(args: &GetWorklogsArgs, io: &mut dyn Console) -> O
 
 /// `ApiCommand.kt:80-96`.
 ///
-/// **`--date` is not converted and not validated** (`:74` has no `.convert`), so the
+/// **`--date` is not converted and not validated** (`ApiCommand.kt:74` has no `.convert`), so the
 /// text goes to `getNormalView` exactly as typed and the portal decides what a period
 /// is. `get-projects` parses its `--date` and this one does not; the asymmetry is the
 /// incumbent's.
@@ -422,16 +422,16 @@ pub async fn run_create_worklog(args: &CreateWorklogArgs, io: &mut dyn Console) 
 
 /// `ApiCommand.kt:118-145`, in the incumbent's order, which is load-bearing twice.
 ///
-/// **The request is built first** (`:118-126`), and `hours.toDouble()` at `:123` is
+/// **The request is built first** (`ApiCommand.kt:118-126`), and `hours.toDouble()` at `ApiCommand.kt:123` is
 /// inside that construction — so an unparseable `--hours` ends the command before the
-/// header at `:128` has printed a single line. A port that echoed first would leave a
-/// six-line header on stdout in front of the failure.
+/// header at `ApiCommand.kt:128` has printed a single line. A port that echoed first would leave a
+/// seven-line header on stdout in front of the failure.
 ///
 /// **The header is printed before the call** and is therefore on stdout even when the
 /// write then fails.
 ///
 /// **`checkStatus` tests `status == HttpStatusCode.OK`** (`TtApiClient.kt:65`), not
-/// `isSuccess()`, and `:137-142` *reads* the boolean it returns. So a 201 — the other
+/// `isSuccess()`, and `ApiCommand.kt:137-142` *reads* the boolean it returns. So a 201 — the other
 /// status a create plausibly answers with — prints `✗ Create failed` on stderr, and
 /// under D3 that is a non-zero exit. The incumbent prints the same line and exits 0;
 /// the line is where the incumbent puts it and only the code changes.
@@ -470,7 +470,7 @@ pub async fn run_update_worklog(args: &UpdateWorklogArgs, io: &mut dyn Console) 
 }
 
 /// `ApiCommand.kt:165-193`. The same five-step shape as the create path, with
-/// `:186-190`'s two messages naming the other verb — `✓ Updated successfully!` and
+/// `ApiCommand.kt:186-190`'s two messages naming the other verb — `✓ Updated successfully!` and
 /// `✗ Update failed`. The two bodies are near-identical in the source and their only
 /// visible differences are the endpoint, the header and these two words.
 async fn update_worklog_with(
@@ -1793,7 +1793,7 @@ mod tests {
         );
     }
 
-    /// `.default(LocalDate.now())` at `:54`. With no `--date` the query carries
+    /// `.default(LocalDate.now())` at `ApiCommand.kt:54`. With no `--date` the query carries
     /// today, not a fixed date and not an empty parameter — the two shapes a port
     /// reaches for when it forgets the default.
     #[tokio::test]
@@ -2137,7 +2137,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `:128-134` runs **before** `:137`, so the six-line header is on stdout even
+    /// `ApiCommand.kt:128-134` runs **before** `ApiCommand.kt:137`, so the seven-line header is on stdout even
     /// when the portal then refuses the write. A port that printed it afterwards would
     /// lose it on exactly the run where the operator needs to know what was attempted.
     #[tokio::test]
@@ -2166,10 +2166,10 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `hours.toDouble()` at `:123` is inside the request construction at `:118-126`,
-    /// which runs before the header at `:128`. So a bad `--hours` is the whole output:
+    /// `hours.toDouble()` at `ApiCommand.kt:123` is inside the request construction at `ApiCommand.kt:118-126`,
+    /// which runs before the header at `ApiCommand.kt:128`. So a bad `--hours` is the whole output:
     /// no header, and — the part a reader would not guess — no request either. A port
-    /// that echoed the header first would leave six lines on stdout describing a
+    /// that echoed the header first would leave seven lines on stdout describing a
     /// worklog it never tried to write.
     #[tokio::test]
     async fn unparseable_hours_stop_the_create_before_its_header_and_before_the_request() {
@@ -2257,7 +2257,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `ApiCommand.kt:176-182` echoes the header **before** the `try` at `:184`, so the
+    /// `ApiCommand.kt:176-182` echoes the header **before** the `try` at `ApiCommand.kt:184`, so the
     /// seven lines stand on stdout when the portal then refuses the write.
     ///
     /// This is the create path's `the_create_header_is_on_stdout_even_when_the_write_is_refused`
@@ -2316,7 +2316,7 @@ mod tests {
         );
     }
 
-    /// `:187` says `Updated`, `:139` says `Created`. One word, two commands, and the
+    /// `ApiCommand.kt:187` says `Updated`, `ApiCommand.kt:139` says `Created`. One word, two commands, and the
     /// operator reads it to decide whether a worklog was added or edited.
     #[tokio::test]
     async fn the_update_success_line_names_updating_and_not_creating() {
@@ -2342,7 +2342,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `:171` is the update's copy of the same out-of-`try` parse, so the update has
+    /// `ApiCommand.kt:171` is the update's copy of the same out-of-`try` parse, so the update has
     /// the same ordering contract: no header, no request.
     #[tokio::test]
     async fn unparseable_hours_stop_the_update_before_its_header_too() {
@@ -2443,7 +2443,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// `:206` precedes the call, so the header stands even when the portal refuses —
+    /// `ApiCommand.kt:206` precedes the call, so the header stands even when the portal refuses —
     /// and on a 404 the write gate has no `Resource not found.` arm, so the message is
     /// `Client error (404): ` with the response body after it, not the read gate's
     /// sentence.
@@ -2648,7 +2648,7 @@ mod tests {
     /// The cookie is read **before** the request body is built, so a run that is both
     /// cookie-less and carrying an unparseable `--hours` reports the cookie.
     ///
-    /// `ApiCommand.kt:116` precedes `:118-126`, and the two failures are one line apart
+    /// `ApiCommand.kt:116` precedes `ApiCommand.kt:118-126`, and the two failures are one line apart
     /// in the port — `connect()` in the wrapper, `create_request` in the body. A port
     /// that hoisted the parse into the wrapper "to fail fast on bad arguments" would
     /// report `For input string: "eight"` to an operator whose actual problem is an

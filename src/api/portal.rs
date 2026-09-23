@@ -56,9 +56,9 @@ pub struct ApiError {
 /// the first into the second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Failure {
-    /// `AuthRequiredException` (`:19`).
+    /// `AuthRequiredException` (`TtApiClient.kt:19`).
     AuthRequired,
-    /// `ApiException` (`:17`).
+    /// `ApiException` (`TtApiClient.kt:17`).
     Api(ApiError),
 }
 
@@ -234,7 +234,7 @@ impl TtApiClient {
     }
 
     /// `getNormalView` (`TtApiClient.kt:95-102`). The page size is the literal 500
-    /// from `:100`, not a paging loop: one page is the whole answer for one person's
+    /// from `TtApiClient.kt:100`, not a paging loop: one page is the whole answer for one person's
     /// month, and adding paging would be a behaviour the incumbent does not have.
     pub async fn get_normal_view(&self, period: &str) -> Result<NormalViewResponse> {
         let url = format!("{}/timeTracking/normalView", self.base_url);
@@ -322,7 +322,7 @@ impl TtApiClient {
     }
 
     /// `checkStatus` (`TtApiClient.kt:58-66`). The body is read **first** and
-    /// unconditionally, exactly as `:59` does, and the success test is `== 200`
+    /// unconditionally, exactly as `TtApiClient.kt:59` does, and the success test is `== 200`
     /// rather than `is_success()` — so a 201 or a 302 comes back as `false` and the
     /// caller counts it as a failed write.
     async fn finish_write(&self, response: reqwest::Response, url: &str) -> Result<bool> {
@@ -404,7 +404,7 @@ mod tests {
         );
     }
 
-    /// `:50`. Both auth statuses are taken before the 4xx arm, which is what makes
+    /// `TtApiClient.kt:50`. Both auth statuses are taken before the 4xx arm, which is what makes
     /// the `make auth` instruction reachable at all.
     #[test]
     fn a_read_401_or_403_is_an_auth_failure_and_not_a_client_error() {
@@ -425,7 +425,7 @@ mod tests {
         );
     }
 
-    /// `:52-53`'s two ranges and the gap around them. Anything the `when` does not
+    /// `TtApiClient.kt:52-53`'s two ranges and the gap around them. Anything the `when` does not
     /// name falls through to the parse, which is why 200 and 302 are `None` — and
     /// the 302 is not academic: it is what an expired portal session can answer.
     #[test]
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(classify_read_status(600, "Nonsense"), None);
     }
 
-    /// `:60-63` against `:49-53`. Same statuses, deliberately different text: the
+    /// `TtApiClient.kt:60-63` against `TtApiClient.kt:49-53`. Same statuses, deliberately different text: the
     /// write gate repeats the code in parentheses and quotes the response **body**
     /// where the read gate quotes the reason phrase, and it has no 404 arm at all.
     #[test]
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(classify_write_status(302, ""), None);
     }
 
-    /// `:76-78` byte for byte: the leading blank line `println("\n…")` produces, the
+    /// `TtApiClient.kt:76-78` byte for byte: the leading blank line `println("\n…")` produces, the
     /// U+274C cross mark, the three-space indent on the second line, and the U+2014
     /// dash in the raised message. D5 is the sink being a parameter at all — every
     /// call site in this file passes `stderr`, where the incumbent passes `stdout`.
@@ -551,7 +551,7 @@ mod tests {
 
     // -- request shapes ------------------------------------------------------
 
-    /// `:83-85`. The cookie rides as a header on every call, which is the whole of
+    /// `TtApiClient.kt:83-85`. The cookie rides as a header on every call, which is the whole of
     /// the portal's authentication.
     #[tokio::test]
     async fn the_current_user_call_carries_the_cookie_to_contact_current_user() {
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(requests[0].header("Cookie"), Some("session=test"));
     }
 
-    /// `:89-91`. The contact id is a path segment and the date is a query parameter,
+    /// `TtApiClient.kt:89-91`. The contact id is a path segment and the date is a query parameter,
     /// and the endpoint name says why: assignments exist per date.
     #[tokio::test]
     async fn assigned_projects_puts_the_contact_in_the_path_and_the_date_in_the_query() {
@@ -591,7 +591,7 @@ mod tests {
         );
     }
 
-    /// `:96-100`. The two `pageInfo.` parameters are literals, dots and all, and the
+    /// `TtApiClient.kt:96-100`. The two `pageInfo.` parameters are literals, dots and all, and the
     /// page size is 500. A port that paged, or that renamed them to something a
     /// query-string builder found tidier, fails here.
     #[tokio::test]
@@ -670,7 +670,7 @@ mod tests {
         );
     }
 
-    /// `:121-123`. DELETE puts the worklog id in the path and sends no idempotency
+    /// `TtApiClient.kt:121-123`. DELETE puts the worklog id in the path and sends no idempotency
     /// key, because the incumbent sends none.
     #[tokio::test]
     async fn delete_names_the_worklog_in_the_path_and_sends_no_idempotency_key() {
@@ -688,7 +688,7 @@ mod tests {
         assert!(requests[0].body.is_empty());
     }
 
-    /// `:65` is `status == HttpStatusCode.OK`, so a 2xx that is not 200 is a *failed*
+    /// `TtApiClient.kt:65` is `status == HttpStatusCode.OK`, so a 2xx that is not 200 is a *failed*
     /// write rather than a successful one. `is_success()` would report a worklog the
     /// portal may not have stored.
     #[tokio::test]
