@@ -10,8 +10,10 @@
 //! An audit can only say how many were broken on the day it ran. This tree has already
 //! demonstrated the decay: four citations in `src/service/aggregator.rs` were written
 //! against a `ProjectIdResolutionTest.kt` that no longer existed at the cutover, and the
-//! commits that followed the audit added five fresh bare citations to `settle.rs`. Two
-//! tests here turn the snapshot into a gate.
+//! commits that followed the audit added five fresh bare citations to `settle.rs`. Three
+//! tests here turn the snapshot into a gate: every Kotlin citation resolves at the pin,
+//! none omits the file it points into, and none points into Rust by line number at all —
+//! that last form has no version a build can check, and a live file moves under it.
 //!
 //! Scope is `src/` recursively, every `*.rs`. `tests/` is not scanned: an integration
 //! test that quotes a citation form in order to describe it is not itself a citation.
@@ -128,13 +130,16 @@ impl std::fmt::Display for Span {
     }
 }
 
-/// A citation that names the file it points into.
-struct Named {
-    /// The Kotlin file name, e.g. `SettleCommand.kt`.
+/// A citation that names the file it points into, Kotlin or Rust.
+struct Cited {
+    /// The file name, e.g. `SettleCommand.kt` or `settle.rs`.
     name: String,
     /// The citation exactly as written, e.g. `SettleCommand.kt:486,490,494-496`.
     text: String,
     spans: Vec<Span>,
+    /// Byte index just past the citation, so a caller can look at what follows it.
+    /// That is the whole of how a panic location is told from a citation.
+    end: usize,
 }
 
 fn is_name_byte(c: u8) -> bool {
@@ -182,24 +187,32 @@ fn parse_number(b: &[u8], pos: usize) -> Option<(usize, usize)> {
     Some((n, end))
 }
 
-/// Every `SomeFile.kt:NNN...` on one line.
-fn named_citations(line: &str) -> Vec<Named> {
+/// Every `SomeFile<ext>:NNN...` on one line, where `dot_ext_colon` is `.kt:` or `.rs:`.
+///
+/// Kotlin and Rust citations have the same shape and differ only in the extension, so
+/// they are read by the same scanner. What the two callers do with the result differs
+/// completely — one resolves it, the other forbids it — but neither wants its own
+/// copy of the backwards walk over the file name.
+fn citations_named(line: &str, dot_ext_colon: &str) -> Vec<Cited> {
     let b = line.as_bytes();
+    let needle = dot_ext_colon.as_bytes();
+    let ext = &dot_ext_colon[..dot_ext_colon.len() - 1];
     let mut out = Vec::new();
     let mut i = 0;
-    while i + 4 <= b.len() {
-        if &b[i..i + 4] == b".kt:" {
+    while i + needle.len() <= b.len() {
+        if &b[i..i + needle.len()] == needle {
             let mut start = i;
             while start > 0 && is_name_byte(b[start - 1]) {
                 start -= 1;
             }
             if start < i {
-                let (spans, end) = parse_number_list(b, i + 4);
+                let (spans, end) = parse_number_list(b, i + needle.len());
                 if !spans.is_empty() {
-                    out.push(Named {
-                        name: format!("{}.kt", &line[start..i]),
+                    out.push(Cited {
+                        name: format!("{}{ext}", &line[start..i]),
                         text: line[start..end].to_string(),
                         spans,
+                        end,
                     });
                     i = end;
                     continue;
@@ -209,6 +222,33 @@ fn named_citations(line: &str) -> Vec<Named> {
         i += 1;
     }
     out
+}
+
+/// Every `SomeFile.kt:NNN...` on one line.
+fn kotlin_citations(line: &str) -> Vec<Cited> {
+    citations_named(line, ".kt:")
+}
+
+/// Every citation on one line that points into a Rust file by line number, such as
+/// `settle.rs:1925` or `settle.rs:1924-1927`.
+///
+/// A `:LINE:COL` tail marks a panic location rather than a citation — `panicked at
+/// src/foo.rs:12:5`, a `file!()`/`line!()` pair pasted into a message, a backtrace
+/// pinned in an assertion — so a number followed by another colon and a digit is
+/// dropped. All three shapes carry the column, and that one condition is why this
+/// rule does not have to tell a comment from a string literal. A `.rs` with no line
+/// number at all — the path in a `git show` example — never starts a citation.
+fn rust_line_citations(line: &str) -> Vec<String> {
+    let b = line.as_bytes();
+    citations_named(line, ".rs:")
+        .into_iter()
+        .filter(|cited| {
+            let carries_a_column = b.get(cited.end) == Some(&b':')
+                && b.get(cited.end + 1).is_some_and(u8::is_ascii_digit);
+            !carries_a_column
+        })
+        .map(|cited| cited.text)
+        .collect()
 }
 
 /// Every citation on one line that leaves its file to be inferred: `` `:NNN` ``,
@@ -277,18 +317,27 @@ fn relative(path: &Path) -> String {
         .to_string()
 }
 
-/// Reports every violation at once, one per line.
+/// Reports every violation at once, one per line, and prints `remedy` once underneath
+/// rather than repeating it on each line.
 ///
-/// Failing on the first one would turn a fix into one `cargo test` run per defect, and
-/// the audit that prompted this gate found 27 at a time.
-fn report(header: &str, violations: &[String]) {
-    assert!(
-        violations.is_empty(),
-        "{} {}:\n{}\n",
+/// Failing on the first violation would turn a fix into one `cargo test` run per defect,
+/// and the audit that prompted this gate found 27 at a time.
+fn report(header: &str, violations: &[String], remedy: &str) {
+    if violations.is_empty() {
+        return;
+    }
+    // The count trails the header rather than leading it, so one violation does not
+    // read as "1 citations".
+    let mut message = format!(
+        "{header} ({}):\n{}",
         violations.len(),
-        header,
         violations.join("\n")
     );
+    if !remedy.is_empty() {
+        message.push_str("\n\n");
+        message.push_str(remedy);
+    }
+    panic!("{message}\n");
 }
 
 /// Catches a citation that names a file but points nowhere in it.
@@ -312,7 +361,7 @@ fn every_kotlin_citation_resolves_to_a_line_that_exists_at_the_pin() {
 
         for (index, line) in body.lines().enumerate() {
             let at = format!("{rust}:{}", index + 1);
-            for citation in named_citations(line) {
+            for citation in kotlin_citations(line) {
                 checked += 1;
                 let Some(paths) = pin.by_name.get(&citation.name) else {
                     violations.push(format!(
@@ -358,7 +407,7 @@ fn every_kotlin_citation_resolves_to_a_line_that_exists_at_the_pin() {
         "citation gate: scanned src/ and found no `SomeFile.kt:NNN` at all — \
          the parser, not the tree, is what changed."
     );
-    report("citations do not resolve at the pin", &violations);
+    report("citations do not resolve at the pin", &violations, "");
 }
 
 /// Catches a citation that leaves its file name to be inferred from context.
@@ -390,7 +439,51 @@ fn no_citation_omits_the_file_it_points_into() {
         }
     }
 
-    report("citations omit the file they point into", &violations);
+    report("citations omit the file they point into", &violations, "");
+}
+
+/// Catches a citation that points into a Rust file by line number.
+///
+/// Without this test the form is unchecked by anything. The resolution test above only
+/// reads `*.kt`, the bare-form test above skips anything carrying a file name, and
+/// `cargo doc` never sees it because it is not a link. The form also has no safe
+/// version: the Kotlin pin is frozen, so a number there is either right or out of
+/// range, while a Rust file is live and every line inserted above a citation moves its
+/// target while leaving the number in range. That is not hypothetical — `normalizer.rs`
+/// once carried `:223` for a field read that lives at `:229`, in a different function
+/// from the one its prose named, and no arithmetic could have flagged it.
+///
+/// The form has come back once already, introduced by the very commit that was fixing
+/// citations, which is the argument for forbidding it rather than checking it.
+#[test]
+fn no_citation_points_into_rust_by_line_number() {
+    let mut violations = Vec::new();
+
+    for source in rust_sources() {
+        let body = fs::read_to_string(&source)
+            .unwrap_or_else(|e| panic!("citation gate: cannot read {}: {e}", source.display()));
+        let rust = relative(&source);
+
+        for (index, line) in body.lines().enumerate() {
+            for citation in rust_line_citations(line) {
+                violations.push(format!(
+                    "{rust}:{}: `{citation}` cites Rust by line — {}",
+                    index + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+
+    report(
+        "citations point into Rust by line number",
+        &violations,
+        "Name the element instead. Either a rustdoc link — [`run_batch_mode`], which \
+         cargo doc resolves and the crate's #![deny(warnings)] turns into an error, \
+         though only outside #[cfg(test)], where rustdoc does not look — or the element \
+         in prose with no number at all, e.g. \"the !io.present() branch of \
+         run_batch_mode\", which cannot go stale because there is nothing in it to shift.",
+    );
 }
 
 /// Pins what the named-citation parser reads, so the gate cannot pass by finding nothing.
@@ -402,7 +495,7 @@ fn no_citation_omits_the_file_it_points_into() {
 #[test]
 fn the_named_form_is_read_exactly_as_far_as_it_is_written() {
     let render = |line: &str| {
-        named_citations(line)
+        kotlin_citations(line)
             .iter()
             .map(|c| {
                 let spans: Vec<String> = c.spans.iter().map(Span::to_string).collect();
@@ -449,4 +542,40 @@ fn the_bare_form_is_recognised_and_a_json_key_is_not() {
     // A JSON key in a fixture, and the comment that quotes one.
     assert!(bare_citations(r#"body.contains("\"duration\":2.5")"#).is_empty());
     assert!(bare_citations(r#"/// `"duration":0.5` as a number"#).is_empty());
+}
+
+/// Pins the one condition that lets the Rust rule skip telling a comment from a string.
+///
+/// Without this test the rule is either too wide or too narrow, and both failures are
+/// silent. Too wide, it fires on `panicked at src/foo.rs:12:5` and on anything built
+/// from `file!()`/`line!()` — findings no author can fix, which is how a gate earns its
+/// deletion. Too narrow — say, requiring a backtick, or a leading `//` — and it stops
+/// seeing the citations it exists for, reports zero and reads as a clean tree. The
+/// column is the whole discriminator, so it is the thing worth pinning.
+#[test]
+fn the_rust_rule_reads_a_citation_but_not_a_panic_location() {
+    assert_eq!(
+        rust_line_citations("/// C7 on the batch surface (`settle.rs:1925`)."),
+        vec!["settle.rs:1925"]
+    );
+    assert_eq!(
+        rust_line_citations("/// see settle.rs:1924-1927 and normalizer.rs:229"),
+        vec!["settle.rs:1924-1927", "normalizer.rs:229"]
+    );
+    // A path carries the file name too, and the line number is what makes it a citation.
+    assert_eq!(
+        rust_line_citations("/// src/service/aggregator.rs:129 keeps only the suffix"),
+        vec!["aggregator.rs:129"]
+    );
+
+    // Panic locations: the column is what tells them apart, in a fixture or in prose.
+    assert!(rust_line_citations("panicked at src/foo.rs:12:5:").is_empty());
+    assert!(
+        rust_line_citations(r#"assert!(msg.contains("src/commands/settle.rs:1925:9"))"#).is_empty()
+    );
+    // A `.rs` inside a path with no line number is not a citation.
+    assert!(rust_line_citations("/// git show HEAD:src/commands/settle.rs").is_empty());
+    assert!(rust_line_citations("/// tests/cli.rs runs against the built binary").is_empty());
+    // Kotlin citations are the other test's business.
+    assert!(rust_line_citations("/// `SettleCommand.kt:910`").is_empty());
 }
