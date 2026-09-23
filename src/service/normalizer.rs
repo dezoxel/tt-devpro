@@ -133,8 +133,9 @@ impl TimeNormalizer {
         let work_hours = sum_hours(&work_entries);
         let total_hours = fixed_hours + work_hours;
 
-        // `TimeNormalizer.kt:66-68` — already 8h within half an increment: round everything and stop.
-        // Note what this branch does *not* do: no 0.25h floor, and no final sort.
+        // `TimeNormalizer.kt:66-68` — already 8h within half an increment: round
+        // everything and stop. Note what this branch does *not* do: no 0.25h floor,
+        // and no final sort.
         if (total_hours - TARGET_HOURS).abs() < HOUR_INCREMENT / 2.0 {
             return rounded(&with_meeting_flag);
         }
@@ -150,7 +151,8 @@ impl TimeNormalizer {
         // `TimeNormalizer.kt:79`.
         let scale_factor = target_work_hours / work_hours;
 
-        // `TimeNormalizer.kt:82-85` — scale, round, floor at one increment so nothing lands on zero.
+        // `TimeNormalizer.kt:82-85` — scale, round, floor at one increment so
+        // nothing lands on zero.
         let scaled_work: Vec<NormalizedAggregate> = work_entries
             .iter()
             .map(|entry| {
@@ -189,9 +191,10 @@ impl TimeNormalizer {
             scaled_work
         };
 
-        // `TimeNormalizer.kt:107-108` — fixed entries lead the concatenation, so a `(date, project)` tie
-        // between a fixed and a scaled row puts the fixed one first whatever the
-        // input order was. The early-return branches above keep the input order.
+        // `TimeNormalizer.kt:107-108` — fixed entries lead the concatenation, so a
+        // `(date, project)` tie between a fixed and a scaled row puts the fixed one
+        // first whatever the input order was. The early-return branches above keep
+        // the input order.
         let mut out = rounded_fixed;
         out.extend(final_work);
         out.sort_by(by_date_then_project);
@@ -215,9 +218,9 @@ impl TimeNormalizer {
         let meeting_name = strip_date_suffix(remove_suffix(raw_description, &project_suffix));
         let sanitized = sanitize(&meeting_name);
 
-        // `TimeNormalizer.kt:130-134` — the middle candidate's double space is load-bearing: it catches a
-        // trailing space in the upstream `display_name`. Deleting it reclassifies real
-        // meetings as scalable work.
+        // `TimeNormalizer.kt:130-134` — the middle candidate's double space is
+        // load-bearing: it catches a trailing space in the upstream `display_name`.
+        // Deleting it reclassifies real meetings as scalable work.
         let date = agg.date.to_string();
         let candidates = [
             format!("{sanitized} {date}.md"),
