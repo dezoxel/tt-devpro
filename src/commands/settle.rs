@@ -3983,11 +3983,11 @@ mod tests {
         assert_eq!(day_choice(Some("c")), DayChoice::Cancel);
     }
 
-    /// A bare Enter is **not** a re-prompt and not a skip: it abandons every
-    /// remaining day with `Unknown option. Cancelled.` A port that looped on a typo
-    /// is friendlier and is a different program.
+    /// A bare Enter is **not** a re-prompt and not a skip: it parses as
+    /// `DayChoice::Unknown`, the answer that prints `Unknown option. Cancelled.` A port that looped on a typo
+    /// is friendlier and is a different program. The consequence this parse feeds — every remaining day abandoned unasked — is driven by [`a_bare_enter_on_the_first_day_abandons_the_second_day_unasked`].
     #[test]
-    fn a_bare_enter_at_the_day_prompt_is_unknown_and_abandons_every_remaining_day() {
+    fn a_bare_enter_and_any_unrecognised_line_at_the_day_prompt_parse_as_unknown() {
         assert_eq!(day_choice(Some("")), DayChoice::Unknown);
         assert_eq!(day_choice(Some("yes")), DayChoice::Unknown);
         assert_eq!(
