@@ -15,17 +15,47 @@
 //! none omits the file it points into, and none points into Rust by line number at all —
 //! that last form has no version a build can check, and a live file moves under it.
 //!
-//! Scope is `src/` recursively, every `*.rs`. `tests/` is not scanned: an integration
-//! test that quotes a citation form in order to describe it is not itself a citation.
+//! Scope is every `*.rs` under `src/` and `tests/`, recursively, minus one named file:
+//! this one. A fourth test pins that the exemption stays one file wide — see `EXEMPT`
+//! for why the reason is peculiar to this file, and
+//! [`the_scan_exempts_this_file_alone_and_reads_every_other_test`] for what holds it
+//! there.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The commit the Kotlin tree was deleted at. Every `SomeFile.kt:NNN` in `src/` means
-/// a line of this commit and of no other.
+/// The commit the Kotlin tree was deleted at. Every `SomeFile.kt:NNN` under the scan
+/// roots means a line of this commit and of no other.
 const PIN: &str = "06fb43e";
+
+/// The directories the scan reads, each one recursively.
+///
+/// `tests/` is in scope because a citation in a test is a citation. The six
+/// `ApiCommand.kt:NNN` in `tests/cli.rs` are the stated reason an assertion expects the
+/// order and the wording it expects, a reader follows them exactly as they follow the
+/// ones in `src/`, and they rot the same way — the Kotlin they address is frozen at the
+/// pin while the prose around them is edited freely.
+const SCAN_ROOTS: &[&str] = &["src", "tests"];
+
+/// The files the scan does not read, named one at a time.
+///
+/// Exactly one file is here and the reason belongs to it alone: this file's body is
+/// where the citation forms are written down in order to be described.
+/// `FillerService.kt:999` on the resolution test is an out-of-range number on purpose,
+/// the parser fixtures carry `` `:33` `` and `settle.rs:1925` because those are the
+/// forms they pin, and every one of them would be reported as the defect it is
+/// imitating. There is no way to write the fixture correctly, because being incorrect
+/// is what the fixture is.
+///
+/// `tests/cli.rs` is the opposite, and is why this is a file name rather than a
+/// directory. Its `ApiCommand.kt:74` points at the Kotlin that justifies the assertion
+/// beside it — a citation in the ordinary sense, load-bearing for a reader deciding
+/// whether the expectation is right. Stating the exemption as "skip `tests/`" took a
+/// reason true of one file and applied it to a directory, and that is what left those
+/// six unchecked for as long as this gate has existed.
+const EXEMPT: &[&str] = &["tests/citations.rs"];
 
 fn repo_root() -> PathBuf {
     // Not the current directory: `cargo test` may run the binary from anywhere, while
@@ -282,15 +312,31 @@ fn bare_citations(line: &str) -> Vec<String> {
     out
 }
 
-/// Every `*.rs` under `src/`, sorted, so a failing run lists its findings in the same
-/// order every time and a fixer can work straight down the list.
+/// Whether a path is named in [`EXEMPT`], compared as a repository-relative path so
+/// that `tests/citations.rs` cannot be matched by a `citations.rs` somewhere else.
+fn is_exempt(path: &Path) -> bool {
+    EXEMPT.contains(&relative(path).as_str())
+}
+
+/// Every `*.rs` under the scan roots, exemptions dropped, sorted, so a failing run lists
+/// its findings in the same order every time and a fixer can work straight down the list.
 fn rust_sources() -> Vec<PathBuf> {
+    let root = repo_root();
     let mut out = Vec::new();
-    collect_rust(&repo_root().join("src"), &mut out);
-    assert!(
-        !out.is_empty(),
-        "citation gate: found no .rs file under src/ — the scan would pass vacuously."
-    );
+    for dir in SCAN_ROOTS {
+        let mut found = Vec::new();
+        collect_rust(&root.join(dir), &mut found);
+        found.retain(|path| !is_exempt(path));
+        // Emptiness is asserted per root, not over the total. `src/` alone holds 20 of
+        // the 22 files scanned, so a `tests/` that stopped being walked — moved, or
+        // emptied one exemption at a time — would leave the total looking healthy while
+        // the half of the scope this gate was just widened to reached nothing at all.
+        assert!(
+            !found.is_empty(),
+            "citation gate: no scannable .rs file under {dir}/ — that half would pass vacuously."
+        );
+        out.append(&mut found);
+    }
     out.sort();
     out
 }
@@ -483,6 +529,90 @@ fn no_citation_points_into_rust_by_line_number() {
          though only outside #[cfg(test)], where rustdoc does not look — or the element \
          in prose with no number at all, e.g. \"the !io.present() branch of \
          run_batch_mode\", which cannot go stale because there is nothing in it to shift.",
+    );
+}
+
+/// Catches the exemption growing, going stale, or swallowing the directory again.
+///
+/// The scope this file now has is one line of code away from the scope it replaced:
+/// walking `tests/` and filtering has the same shape as not walking `tests/` at all,
+/// and the only thing between them is the contents of [`EXEMPT`], which nothing else
+/// reads. Without this test a second entry — added to quiet whichever file failed next
+/// — would widen the hole back to a directory one name at a time, in silence.
+///
+/// Five things are asserted and each can fail alone. The list is exactly the one name,
+/// so it cannot grow. That name is a file that exists, so a rename cannot leave an
+/// exemption guarding nothing. The file is really kept out of the scan, so the entry is
+/// not decorative. `tests/cli.rs` is really in it, which is the hole the scope was
+/// widened to close and the one assertion here measuring the change rather than the
+/// guard around it. And the exempt file carries all three forms the tests above report,
+/// so the exemption is load-bearing — a clean file parked in the list would pass the
+/// four assertions before this one and fail it.
+#[test]
+fn the_scan_exempts_this_file_alone_and_reads_every_other_test() {
+    assert_eq!(
+        EXEMPT,
+        ["tests/citations.rs"],
+        "the exemption answers one situation: a file whose body writes the citation \
+         forms down in order to describe them. No other file in this tree does that."
+    );
+
+    let scanned: Vec<String> = rust_sources().iter().map(|path| relative(path)).collect();
+
+    for &exempt in EXEMPT {
+        assert!(
+            repo_root().join(exempt).is_file(),
+            "citation gate: {exempt} is exempted and is not a file. An exemption naming \
+             something that has moved guards nothing and hides the move."
+        );
+        assert!(
+            !scanned.contains(&exempt.to_string()),
+            "citation gate: {exempt} is named in EXEMPT and was scanned anyway."
+        );
+    }
+
+    assert!(
+        scanned.contains(&"tests/cli.rs".to_string()),
+        "citation gate: tests/cli.rs is outside the scan. Its Kotlin citations are the \
+         hole this scope was widened to close. Scanned: {scanned:?}"
+    );
+
+    // Each of the three forms is counted in the exempt file rather than assumed to be
+    // there. That is what tells an exemption written for a reason from one written to
+    // make a failure go away.
+    let mut pin = PinnedTree::load();
+    let body = fs::read_to_string(repo_root().join(EXEMPT[0]))
+        .unwrap_or_else(|e| panic!("citation gate: cannot read {}: {e}", EXEMPT[0]));
+    let mut unresolvable = 0usize;
+    let mut bare = 0usize;
+    let mut into_rust = 0usize;
+    for line in body.lines() {
+        for citation in kotlin_citations(line) {
+            let path = pin
+                .by_name
+                .get(&citation.name)
+                .map(|paths| paths[0].clone());
+            let broken = match path {
+                None => true,
+                Some(path) => {
+                    let len = pin.line_count(&path);
+                    citation.spans.iter().any(|span| span.to > len)
+                }
+            };
+            if broken {
+                unresolvable += 1;
+            }
+        }
+        bare += bare_citations(line).len();
+        into_rust += rust_line_citations(line).len();
+    }
+
+    assert!(
+        unresolvable > 0 && bare > 0 && into_rust > 0,
+        "citation gate: {} carries {unresolvable} unresolvable Kotlin citations, {bare} \
+         bare ones and {into_rust} pointing into Rust by line. All three have to be \
+         there, or this file is clean and its exemption is hiding nothing.",
+        EXEMPT[0]
     );
 }
 
