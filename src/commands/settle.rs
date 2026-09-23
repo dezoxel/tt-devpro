@@ -18,8 +18,8 @@
 //! - [`adjust_to_eight_hours`] — C14, and two of C27's five truncating sites.
 //! - [`renormalize_after_edit`] — C15's redistribution, and two more of them.
 //! - [`draft_table`] / [`under_eight_warning`] — the interactive display, C25.
-//! - [`day_choice`] / [`batch_choice`] — C15's dispatch, including the two ways
-//!   an unrecognised line ends the whole command.
+//! - [`day_choice`] / [`batch_choice`] — C15's dispatch: at each of the two
+//!   prompts, an unrecognised line ends the whole command.
 //! - [`non_positive_hours`] — C19, the last gate in front of the write path.
 //!
 //! **Three JVM behaviours this file reproduces rather than approximates.**
@@ -36,7 +36,7 @@
 //!    absorbs the rounding residual. [`first_max_by_hours`].
 //! 3. **`===` is reference identity, and Rust has no equivalent.** `editEntry` and
 //!    `deleteEntry` replace and remove by identity (`:774`, `:820`), and
-//!    `adjustToEightHours` does the same at `:605,619`. Every one of them is ported
+//!    `adjustToEightHours` does the same at `:605,620`. Every one of them is ported
 //!    by *index*, because `==` on `SettleAction` would hit every structurally
 //!    identical action — two 0.5h meetings on the same project are exactly that.
 //!
@@ -2178,7 +2178,7 @@ fn explicit_range(args: &SettleArgs) -> bool {
 /// have a single `Err` to look at.
 ///
 /// `session_cookie()` is inside it, which the incumbent's `getSessionCookie()` at
-/// `:86` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
+/// `:88` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
 /// raw stack trace out of Clikt. D3 names that as a fix: the same message on
 /// stderr and a non-zero code, which is what the *expired*-cookie path already did.
 async fn dispatch(
@@ -4774,7 +4774,7 @@ mod tests {
         assert_eq!(io.err_text(), "");
     }
 
-    /// `:909` sits after the loop with nothing guarding it, so the tally is printed
+    /// `:908` sits after the loop with nothing guarding it, so the tally is printed
     /// whatever happened — including a batch where every single write was rejected.
     #[tokio::test]
     async fn the_tally_line_is_printed_even_when_nothing_succeeded() {
@@ -5723,7 +5723,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// C7 on the batch surface (`:1925`). With no console there is nothing to
+    /// C7 on the batch surface (`settle.rs:1925`). With no console there is nothing to
     /// answer `[A]pprove / [C]ancel:`, so the readable summary stands in. The
     /// failure this pins is the one the branch's own comment names: without it the
     /// run falls through `read_line()` → `None` → `Cancelled.`, which reads like a
@@ -5966,7 +5966,7 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// C7 on the day-by-day surface (`:1959`), the default mode — no flags and no
+    /// C7 on the day-by-day surface (`settle.rs:1959`), the default mode — no flags and no
     /// range, so this is what a piped `tt-devpro settle` does. The per-day prompt
     /// has the same problem as the batch one, and the branch answers it by fetching
     /// every unfilled day up front and rendering the summary.
@@ -6038,7 +6038,7 @@ mod tests {
     // the days, the `loop` inside it and the `match` that wires the six answers to
     // `break` / `continue` / `return` were executed by no test, so any of the six
     // could have been attached to the wrong control-flow verb and stayed green.
-    // These tests are the batch-surface pattern (`:5905`) with a second and a
+    // These tests are the batch-surface pattern (`settle.rs:5905`) with a second and a
     // third day added, because the whole contract of this surface is what happens
     // to the *next* day.
     // -----------------------------------------------------------------------
