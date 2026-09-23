@@ -35,10 +35,11 @@
 //!    the last. On a day whose two largest entries tie, that decides which one
 //!    absorbs the rounding residual. [`first_max_by_hours`].
 //! 3. **`===` is reference identity, and Rust has no equivalent.** `editEntry` and
-//!    `deleteEntry` replace and remove by identity (`SettleCommand.kt:774`, `SettleCommand.kt:820`), and
-//!    `adjustToEightHours` does the same at `SettleCommand.kt:605,620`. Every one of them is ported
-//!    by *index*, because `==` on `SettleAction` would hit every structurally
-//!    identical action — two 0.5h meetings on the same project are exactly that.
+//!    `deleteEntry` replace and remove by identity (`SettleCommand.kt:774`,
+//!    `SettleCommand.kt:820`), and `adjustToEightHours` does the same at
+//!    `SettleCommand.kt:605,620`. Every one of them is ported by *index*, because
+//!    `==` on `SettleAction` would hit every structurally identical action — two
+//!    0.5h meetings on the same project are exactly that.
 //!
 //! The one deliberate divergence from the incumbent is D2, and it lives in
 //! [`Settle::prepare_actions`]: project ids are resolved per day rather than once for the
@@ -1584,8 +1585,8 @@ impl Settle<'_> {
 
     /// [`resolve_range`] against this run's clock, with the note echoed to stderr.
     ///
-    /// The two call sites (`SettleCommand.kt:99`, `SettleCommand.kt:286`) are mutually exclusive per invocation, so
-    /// the note still fires at most once.
+    /// The two call sites (`SettleCommand.kt:99`, `SettleCommand.kt:286`) are
+    /// mutually exclusive per invocation, so the note still fires at most once.
     fn resolve_range(&self, io: &mut dyn Console) -> ResolvedRange {
         let (range, note) = resolve_range(self.args.from, self.args.to, self.today, self.cutoff());
         if let Some(note) = note {
@@ -1669,8 +1670,9 @@ impl Settle<'_> {
             .get_time_entries(range_start, fetch_end)
             .await?;
         if all_entries.is_empty() {
-            // `SettleCommand.kt:234` returns the hours it already has and an empty `notFinal`, so an
-            // empty Chrono says "all settled" rather than "held back".
+            // `SettleCommand.kt:234` returns the hours it already has and an empty
+            // `notFinal`, so an empty Chrono says "all settled" rather than "held
+            // back".
             return Ok(UnfilledDays {
                 unfilled_days: Vec::new(),
                 devpro_hours_by_day,
@@ -1837,9 +1839,9 @@ impl Settle<'_> {
             ids_by_day.insert(*date, resolution.ids_by_name);
         }
 
-        // `SettleCommand.kt:475-481`. Always stderr: keeps `--json` stdout clean and stays visible in
-        // an interactive run. The glyph is a bare U+26A0 with one space, unlike the
-        // under-8h warning's U+26A0 U+FE0F with two.
+        // `SettleCommand.kt:475-481`. Always stderr: keeps `--json` stdout clean
+        // and stays visible in an interactive run. The glyph is a bare U+26A0 with
+        // one space, unlike the under-8h warning's U+26A0 U+FE0F with two.
         for fallback in &fallbacks {
             io.err(&format!(
                 "\u{26A0} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.tt-config.yaml. Check it still points at the right project.",
@@ -3984,8 +3986,10 @@ mod tests {
     }
 
     /// A bare Enter is **not** a re-prompt and not a skip: it parses as
-    /// `DayChoice::Unknown`, the answer that prints `Unknown option. Cancelled.` A port that looped on a typo
-    /// is friendlier and is a different program. The consequence this parse feeds — every remaining day abandoned unasked — is driven by [`a_bare_enter_on_the_first_day_abandons_the_second_day_unasked`].
+    /// `DayChoice::Unknown`, the answer that prints `Unknown option. Cancelled.` A
+    /// port that looped on a typo is friendlier and is a different program. The
+    /// consequence this parse feeds — every remaining day abandoned unasked — is
+    /// driven by [`a_bare_enter_on_the_first_day_abandons_the_second_day_unasked`].
     #[test]
     fn a_bare_enter_and_any_unrecognised_line_at_the_day_prompt_parse_as_unknown() {
         assert_eq!(day_choice(Some("")), DayChoice::Unknown);
@@ -5469,9 +5473,10 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// `SettleCommand.kt:418-421`. An empty Chrono answer ends `prepareActions` before the portal is
-    /// asked anything at all — so a day with no tracked time costs one request, not
-    /// five, and `--json` still emits a well-formed empty array.
+    /// `SettleCommand.kt:418-421`. An empty Chrono answer ends `prepareActions`
+    /// before the portal is asked anything at all — so a day with no tracked time
+    /// costs one request, not five, and `--json` still emits a well-formed empty
+    /// array.
     #[tokio::test]
     async fn an_empty_chrono_answer_stops_before_the_portal_is_asked_anything() {
         let chrono = crate::api::stub::StubServer::start(vec![crate::api::stub::json_200("[]")]);
@@ -5966,10 +5971,11 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// C7 on the day-by-day surface ([`Settle::run_day_by_day_mode`]), the default mode — no flags and no
-    /// range, so this is what a piped `tt-devpro settle` does. The per-day prompt
-    /// has the same problem as the batch one, and the branch answers it by fetching
-    /// every unfilled day up front and rendering the summary.
+    /// C7 on the day-by-day surface ([`Settle::run_day_by_day_mode`]), the default
+    /// mode — no flags and no range, so this is what a piped `tt-devpro settle`
+    /// does. The per-day prompt has the same problem as the batch one, and the
+    /// branch answers it by fetching every unfilled day up front and rendering the
+    /// summary.
     #[tokio::test]
     async fn a_day_by_day_run_with_no_console_prints_the_summary_instead_of_prompting() {
         let chrono = crate::api::stub::StubServer::start(vec![
@@ -6038,7 +6044,8 @@ mod tests {
     // the days, the `loop` inside it and the `match` that wires the six answers to
     // `break` / `continue` / `return` were executed by no test, so any of the six
     // could have been attached to the wrong control-flow verb and stayed green.
-    // These tests are the batch-surface pattern (`approving_the_batch_prompt_posts_the_worklog_it_drew`) with a second and a
+    // These tests are the batch-surface pattern
+    // (`approving_the_batch_prompt_posts_the_worklog_it_drew`) with a second and a
     // third day added, because the whole contract of this surface is what happens
     // to the *next* day.
     // -----------------------------------------------------------------------
