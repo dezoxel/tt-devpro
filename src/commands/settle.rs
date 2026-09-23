@@ -35,8 +35,8 @@
 //!    the last. On a day whose two largest entries tie, that decides which one
 //!    absorbs the rounding residual. [`first_max_by_hours`].
 //! 3. **`===` is reference identity, and Rust has no equivalent.** `editEntry` and
-//!    `deleteEntry` replace and remove by identity (`:774`, `:820`), and
-//!    `adjustToEightHours` does the same at `:605,620`. Every one of them is ported
+//!    `deleteEntry` replace and remove by identity (`SettleCommand.kt:774`, `SettleCommand.kt:820`), and
+//!    `adjustToEightHours` does the same at `SettleCommand.kt:605,620`. Every one of them is ported
 //!    by *index*, because `==` on `SettleAction` would hit every structurally
 //!    identical action — two 0.5h meetings on the same project are exactly that.
 //!
@@ -383,7 +383,7 @@ pub struct ResolvedRange {
 /// contradict itself.
 ///
 /// The note is returned rather than printed so the two call sites
-/// (`SettleCommand.kt:99`, `:286`) can stay the only place a stream is chosen.
+/// (`SettleCommand.kt:99`, `SettleCommand.kt:286`) can stay the only place a stream is chosen.
 pub fn resolve_range(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
@@ -551,7 +551,7 @@ fn adjust_day(
         .collect();
 
     if !non_synthetic.is_empty() {
-        // The `?: return@mapValues dayActions` on `:603` cannot fire — the list is
+        // The `?: return@mapValues dayActions` on `SettleCommand.kt:603` cannot fire — the list is
         // known non-empty here — but the Kotlin writes it, so the `else` arm below
         // exists rather than an `expect`.
         let Some(largest) = first_max_by_hours(actions, &non_synthetic) else {
@@ -1102,7 +1102,7 @@ pub enum EntrySelection {
     Chosen(usize),
 }
 
-/// `SettleCommand.kt:752-760` and the identical `:809-817`.
+/// `SettleCommand.kt:752-760` and the identical `SettleCommand.kt:809-817`.
 ///
 /// `toIntOrNull()?.minus(1)` is Kotlin `Int` arithmetic, which wraps: the input
 /// `-2147483648` becomes `2147483647` rather than overflowing, and is then rejected
@@ -1546,7 +1546,7 @@ fn chrono_days_in_zone<Tz: chrono::TimeZone>(
 ///
 /// `today` is a field rather than a `LocalDate.now()` at each of the four sites
 /// that needed it: the incumbent reads the clock five times in one run
-/// (`:77,131,133,192,313,331`) and a run crossing midnight between two of them
+/// (`SettleCommand.kt:77,134,195,318,335`) and a run crossing midnight between two of them
 /// would contradict itself. Reading it once is the same behaviour every other
 /// second of the day and is testable.
 struct Settle<'a> {
@@ -1584,7 +1584,7 @@ impl Settle<'_> {
 
     /// [`resolve_range`] against this run's clock, with the note echoed to stderr.
     ///
-    /// The two call sites (`:98`, `:287`) are mutually exclusive per invocation, so
+    /// The two call sites (`SettleCommand.kt:99`, `SettleCommand.kt:286`) are mutually exclusive per invocation, so
     /// the note still fires at most once.
     fn resolve_range(&self, io: &mut dyn Console) -> ResolvedRange {
         let (range, note) = resolve_range(self.args.from, self.args.to, self.today, self.cutoff());
@@ -1635,14 +1635,14 @@ impl Settle<'_> {
             .checked_sub_days(Days::new(SCAN_DAYS))
             .ok_or_else(|| anyhow!("date underflow: {SCAN_DAYS} days before {}", self.today))?;
 
-        // `:201`. Both ends are named: "last 45 days" said nothing about the upper
+        // `SettleCommand.kt:201`. Both ends are named: "last 45 days" said nothing about the upper
         // one, which is precisely where this command used to be wrong.
         io.echo(
             &format!("Checking {range_start} to {cutoff} for unfilled days (<8h)..."),
             quiet,
         );
 
-        // C17, `:205`. The user is not needed here; the call is made so that a dead
+        // C17, `SettleCommand.kt:205`. The user is not needed here; the call is made so that a dead
         // session fails before 45 days of months are fetched.
         self.tt_client.get_current_user().await?;
 
@@ -1652,7 +1652,7 @@ impl Settle<'_> {
             let view = self.tt_client.get_normal_view(&month.to_string()).await?;
             for page in &view.page_list {
                 for day in &page.details_by_dates {
-                    // `:223` — a plain `put`, so a date appearing in two months'
+                    // `SettleCommand.kt:224` — a plain `put`, so a date appearing in two months'
                     // responses keeps the later one.
                     devpro_hours_by_day.insert(detail_date(&day.date)?, day.logged_hours);
                 }
@@ -1669,7 +1669,7 @@ impl Settle<'_> {
             .get_time_entries(range_start, fetch_end)
             .await?;
         if all_entries.is_empty() {
-            // `:232` returns the hours it already has and an empty `notFinal`, so an
+            // `SettleCommand.kt:234` returns the hours it already has and an empty `notFinal`, so an
             // empty Chrono says "all settled" rather than "held back".
             return Ok(UnfilledDays {
                 unfilled_days: Vec::new(),
@@ -1681,7 +1681,7 @@ impl Settle<'_> {
         let days = chrono_days(&all_entries)?;
         let window = split_by_finality(&days, self.today, self.args.include_today);
         if !window.not_final.is_empty() {
-            // Always stderr (`:250`), in every mode.
+            // Always stderr (`SettleCommand.kt:250`), in every mode.
             io.err(&format!(
                 "\u{2139} Skipped (hours not final yet): {}",
                 describe_not_final_days(&window.not_final, self.today)
@@ -1800,7 +1800,7 @@ impl Settle<'_> {
         borrowed: &[BorrowedEntry],
         io: &mut dyn Console,
     ) -> Result<IdsByDay> {
-        // `:470-472`'s order within a day: the real aggregates, then the fillers,
+        // `SettleCommand.kt:470-472`'s order within a day: the real aggregates, then the fillers,
         // then the borrowed entries, each distinct.
         let mut names_by_day: Vec<(NaiveDate, Vec<String>)> = Vec::new();
         for norm in normalized {
@@ -1837,7 +1837,7 @@ impl Settle<'_> {
             ids_by_day.insert(*date, resolution.ids_by_name);
         }
 
-        // `:475-481`. Always stderr: keeps `--json` stdout clean and stays visible in
+        // `SettleCommand.kt:475-481`. Always stderr: keeps `--json` stdout clean and stays visible in
         // an interactive run. The glyph is a bare U+26A0 with one space, unlike the
         // under-8h warning's U+26A0 U+FE0F with two.
         for fallback in &fallbacks {
@@ -1967,8 +1967,8 @@ impl Settle<'_> {
         io.out(&format!("{} days to settle:", scan.unfilled_days.len()));
         for day in &scan.unfilled_days {
             let hours = scan.devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
-            // `:352` — `< 0.01`, not `== 0.0`: a day holding six minutes reads as
-            // empty in this listing. (`:346` is the closing brace of the
+            // `SettleCommand.kt:352` — `< 0.01`, not `== 0.0`: a day holding six minutes reads as
+            // empty in this listing. (`SettleCommand.kt:346` is the closing brace of the
             // `System.console() == null` block; the citation used to point there.)
             let hours_info = if hours < 0.01 {
                 String::new()
@@ -2164,7 +2164,7 @@ fn mode(args: &SettleArgs) -> Mode {
 
 /// True when the invocation named at least one end of a range, which is the
 /// condition three separate places in the incumbent branch on (`SettleCommand.kt:97`,
-/// `:283`, `:317`).
+/// `SettleCommand.kt:283`, `SettleCommand.kt:317`).
 ///
 /// It is an `or`: one end is enough, because `resolveRange` defaults the other
 /// (C22). C34's third branch is this predicate; free rather than a method so that
@@ -2178,7 +2178,7 @@ fn explicit_range(args: &SettleArgs) -> bool {
 /// have a single `Err` to look at.
 ///
 /// `session_cookie()` is inside it, which the incumbent's `getSessionCookie()` at
-/// `:88` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
+/// `SettleCommand.kt:88` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
 /// raw stack trace out of Clikt. D3 names that as a fix: the same message on
 /// stderr and a non-zero code, which is what the *expired*-cookie path already did.
 async fn dispatch(
@@ -2202,7 +2202,7 @@ async fn dispatch(
         today,
     };
 
-    // `:91-104`. The precedence itself is C34 and lives in `mode`; the wiring from
+    // `SettleCommand.kt:91-104`. The precedence itself is C34 and lives in `mode`; the wiring from
     // a named mode to the run that serves it is `run_chosen_mode`, and this caller
     // and the test harness share that one copy of it. So the wiring does have a
     // unit-test seam: the harness builds the same `Settle` from stubs and routes
@@ -2222,7 +2222,7 @@ async fn dispatch(
 /// `Result` is what keeps `main` from rendering the same failure a second time in
 /// a shape nothing measured.
 pub async fn run(args: &SettleArgs, io: &mut dyn Console) -> Outcome {
-    // `:81-87` — the config's own catch, whose message has no `Error: ` in it.
+    // `SettleCommand.kt:81-87` — the config's own catch, whose message has no `Error: ` in it.
     let config = match crate::config::load() {
         Ok(config) => config,
         Err(error) => {
@@ -2686,7 +2686,7 @@ mod tests {
     }
 
     /// C1, not C34. `--include-today` moves the cutoff (`SettleCommand.kt:77`)
-    /// and is absent from the routing switch at `:91-104`, so it must not reach
+    /// and is absent from the routing switch at `SettleCommand.kt:91-104`, so it must not reach
     /// the mode choice. A port that wrote `explicit_range(args) ||
     /// args.include_today` — plausible, since both concern which days are in
     /// scope — would turn a bare `settle --include-today` into a batch run over a
@@ -4385,7 +4385,7 @@ mod tests {
         assert_eq!(request.expense_type.as_deref(), Some("None"));
     }
 
-    /// The duration is `normalizedHours` (`:881`), which is the whole point of the
+    /// The duration is `normalizedHours` (`SettleCommand.kt:881`), which is the whole point of the
     /// command: the aggregate's `totalHours` is what Chrono recorded and the
     /// normalized figure is what gets filed. A port that sent the total would post
     /// unnormalized hours and every other assertion here would still pass.
@@ -4506,7 +4506,7 @@ mod tests {
         );
     }
 
-    /// `:860` exempts `SKIP` explicitly. A skipped action is never sent, so its
+    /// `SettleCommand.kt:860` exempts `SKIP` explicitly. A skipped action is never sent, so its
     /// hours are not a claim about anything — and a port that validated the whole
     /// list would refuse to settle a day that holds one skip.
     #[tokio::test]
@@ -4667,7 +4667,7 @@ mod tests {
         assert_eq!(io.out_text(), "\nDone! Created: 0, Updated: 0, Errors: 0");
     }
 
-    /// Each action sits in its own `try` (`:872-906`), so a rejected write is
+    /// Each action sits in its own `try` (`SettleCommand.kt:872-906`), so a rejected write is
     /// counted and the ones after it still go. A port that used `?` inside the loop
     /// would stop at the first rejection and leave the day half-written — the exact
     /// outcome the pre-flight filter exists to prevent, arrived at from the other
@@ -4774,7 +4774,7 @@ mod tests {
         assert_eq!(io.err_text(), "");
     }
 
-    /// `:908` sits after the loop with nothing guarding it, so the tally is printed
+    /// `SettleCommand.kt:908` sits after the loop with nothing guarding it, so the tally is printed
     /// whatever happened — including a batch where every single write was rejected.
     #[tokio::test]
     async fn the_tally_line_is_printed_even_when_nothing_succeeded() {
@@ -4916,7 +4916,7 @@ mod tests {
         assert_eq!(io.out_text(), "", "both clauses write to stderr");
     }
 
-    /// `:107-108`. Everything else takes the plain prefix, and the port prints the
+    /// `SettleCommand.kt:107-108`. Everything else takes the plain prefix, and the port prints the
     /// whole `anyhow` chain rather than the outermost message: for a failed HTTP
     /// call the outermost message is `requesting http://...` and the refusal that
     /// caused it is one level down.
@@ -4935,7 +4935,7 @@ mod tests {
 
     /// The match is a downcast through the chain, not a look at the outermost
     /// error, so an `ApiError` that picked up context on the way out still reads as
-    /// an API failure. The context is then dropped, because `:106` prints
+    /// an API failure. The context is then dropped, because `SettleCommand.kt:106` prints
     /// `e.message` and nothing else.
     #[test]
     fn an_api_error_under_context_keeps_the_api_prefix_and_drops_the_context() {
@@ -5161,7 +5161,7 @@ mod tests {
         );
     }
 
-    /// D2, first facet. `:463-478` asks for the assignments held on `from` and
+    /// D2, first facet. `SettleCommand.kt:463-478` asks for the assignments held on `from` and
     /// resolves every name in the range against that one list. The port asks once
     /// per day that has proposals, each with that day's own `dateFrom`.
     #[tokio::test]
@@ -5469,7 +5469,7 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// `:418-421`. An empty Chrono answer ends `prepareActions` before the portal is
+    /// `SettleCommand.kt:418-421`. An empty Chrono answer ends `prepareActions` before the portal is
     /// asked anything at all — so a day with no tracked time costs one request, not
     /// five, and `--json` still emits a well-formed empty array.
     #[tokio::test]
@@ -5598,7 +5598,7 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// C17, `:205`. `getCurrentUser` is called before the month loop and its answer
+    /// C17, `SettleCommand.kt:205`. `getCurrentUser` is called before the month loop and its answer
     /// is thrown away — the call exists so that a dead session fails in one request
     /// instead of after forty-five days of months have been fetched. A port that
     /// moved it down to where the contact id is actually needed would pass every
@@ -5723,7 +5723,7 @@ mod tests {
         let _ = portal.requests();
     }
 
-    /// C7 on the batch surface (`settle.rs:1925`). With no console there is nothing to
+    /// C7 on the batch surface ([`Settle::run_batch_mode`]). With no console there is nothing to
     /// answer `[A]pprove / [C]ancel:`, so the readable summary stands in. The
     /// failure this pins is the one the branch's own comment names: without it the
     /// run falls through `read_line()` → `None` → `Cancelled.`, which reads like a
@@ -5966,7 +5966,7 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// C7 on the day-by-day surface (`settle.rs:1959`), the default mode — no flags and no
+    /// C7 on the day-by-day surface ([`Settle::run_day_by_day_mode`]), the default mode — no flags and no
     /// range, so this is what a piped `tt-devpro settle` does. The per-day prompt
     /// has the same problem as the batch one, and the branch answers it by fetching
     /// every unfilled day up front and rendering the summary.
@@ -6038,7 +6038,7 @@ mod tests {
     // the days, the `loop` inside it and the `match` that wires the six answers to
     // `break` / `continue` / `return` were executed by no test, so any of the six
     // could have been attached to the wrong control-flow verb and stayed green.
-    // These tests are the batch-surface pattern (`settle.rs:5905`) with a second and a
+    // These tests are the batch-surface pattern (`approving_the_batch_prompt_posts_the_worklog_it_drew`) with a second and a
     // third day added, because the whole contract of this surface is what happens
     // to the *next* day.
     // -----------------------------------------------------------------------
@@ -6149,7 +6149,7 @@ mod tests {
     }
 
     /// Contract 2, `SettleCommand.kt:352` and the same test written again at
-    /// `:361`. The threshold is `< 0.01`, not `== 0.0`: a day holding six minutes
+    /// `SettleCommand.kt:361`. The threshold is `< 0.01`, not `== 0.0`: a day holding six minutes
     /// reads as empty in both the listing and the day header.
     ///
     /// 0.009h is six minutes of logged time, under the threshold, so no ` (…h)`
@@ -6291,7 +6291,7 @@ mod tests {
         let _ = chrono.requests();
     }
 
-    /// Contracts 4 and 10, `SettleCommand.kt:381-385` and `:408`. `a` writes the
+    /// Contracts 4 and 10, `SettleCommand.kt:381-385` and `SettleCommand.kt:408`. `a` writes the
     /// day and `break`s the inner loop; the outer `for` then offers the next day,
     /// and falling off its end prints the closing line.
     ///
@@ -6884,7 +6884,7 @@ mod tests {
     // `entry_listing_line`
     // -----------------------------------------------------------------------
 
-    /// `SettleCommand.kt:745-746`, and the byte-identical `:803-804` inside
+    /// `SettleCommand.kt:745-746`, and the byte-identical `SettleCommand.kt:803-804` inside
     /// `deleteEntry`. The number the operator types is `index + 1`, so the listing
     /// is one-based while the selection it feeds is zero-based; the two live in
     /// different functions and only this one prints.
