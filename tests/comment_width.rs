@@ -5,13 +5,16 @@
 //! while every gate in the suite stays green — `cargo test`, `cargo clippy`, `cargo fmt
 //! --check` and `cargo doc` all read over it without a word.
 //!
-//! That is not hypothetical, and it is not fixed by being careful once. The rounds that
-//! gave the Kotlin citations their file names — turning `:NNN` into `SettleCommand.kt:NNN`
-//! — took the tree from 5 over-wide comment lines to 67 with every gate green throughout.
-//! A wrap pass (`84dcb03`) then brought it to 49 and stopped there, and 49 is what this
-//! gate is expected to report the day it lands. The first count of them was itself wrong:
-//! `awk 'length>100'` on macOS counts bytes and not characters, so the em-dashes these
-//! comments are full of inflated 49 into 58. This gate counts characters, and pins that.
+//! That is not hypothetical, and it is not fixed by being careful once. Measured with the
+//! rule below, the rounds that gave the Kotlin citations their file names — turning `:NNN`
+//! into `SettleCommand.kt:NNN` — took the tree from 5 over-wide comment lines to 67, every
+//! gate green throughout. A wrap pass (`84dcb03`) then brought it to 49 and stopped there,
+//! and 49 is what stood until the rewrap this gate arrived with. Point the rule at any of
+//! those commits and it fails: that is where the evidence it *can* fail lives, together
+//! with the three tests under it, since a green run says something only while the rule
+//! still recognises a wide line. The first count of the 49 was itself wrong: `awk
+//! 'length>100'` on macOS counts bytes and not characters, so the em-dashes these comments
+//! are full of inflated 49 into 58. This gate counts characters, and pins that.
 //!
 //! Scope is every `*.rs` under `src/` and `tests/`, this file included. Code lines are not
 //! checked: rustfmt already owns them, and a long string literal it cannot break is not a
@@ -26,6 +29,12 @@ use std::path::{Path, PathBuf};
 /// is held there by the formatter; comments are held there by hand and by this test,
 /// because the option that would wrap them — `wrap_comments` — is nightly-only and off by
 /// default, so no stable toolchain will do it.
+///
+/// It is also where the tree already sat. Before the citation rounds, at `4ee5ce7`, 137 of
+/// its 6092 comment lines were 87 to 99 characters wide and exactly 5 were over 100. The
+/// 80s and 90s are lived-in, in other words, and the limit sits just past them: lowering it
+/// would not tighten a habit, it would declare 137 lines defective that nobody wrote as
+/// defects.
 const MAX_WIDTH: usize = 100;
 
 fn repo_root() -> PathBuf {

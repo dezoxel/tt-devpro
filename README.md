@@ -110,9 +110,12 @@ The gates the suite is expected to pass clean:
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo doc --no-deps --document-private-items
 ```
 
-`cargo fmt` holds code to 100 columns and leaves comments at whatever width they were typed: the option that would wrap them, `wrap_comments`, is nightly-only and off by default. An over-wide comment is therefore seen by nothing above — not `cargo test`, not clippy, not `cargo fmt --check`, not `cargo doc`. The blind spot is measurable rather than theoretical: the rounds that gave the citations their file names took this tree from 5 over-wide comment lines to 67, with every gate green throughout. `tests/comment_width.rs` closes it. It measures every line under `src/` and `tests/` whose indent is followed by `//`, and fails with all the offenders at once — path, line number, width. Rewrap those by hand; rustfmt will not do it for you. Measure with `chars().count()` rather than `awk 'length>100'`: macOS awk counts bytes, so on comments full of em-dashes it reports 58 violations where there are 49.
+`cargo doc` is in that list because it is the only one of the four that runs rustdoc at all. The sources carry rustdoc links in place of line numbers, and the crate root's `#![deny(warnings)]` does reach them — it implies `deny(rustdoc::broken_intra_doc_links)`, so a link naming an element that has since been renamed is a hard error rather than a warning. But that error only ever exists while something is documenting the crate, and neither `cargo test` nor `cargo clippy` does. `--document-private-items` is what points rustdoc at the private half of the tree, which is where most of those links live.
+
+`cargo fmt` holds code to 100 columns and leaves comments at whatever width they were typed: the option that would wrap them, `wrap_comments`, is nightly-only and off by default. An over-wide comment is therefore seen by nothing in that list — not `cargo test`, not clippy, not `cargo fmt --check`, not `cargo doc`. The blind spot is measurable rather than theoretical: the rounds that gave the citations their file names took this tree from 5 over-wide comment lines to 67, with every gate green throughout, and a later wrap pass got it back down to 49 and stopped there. `tests/comment_width.rs` closes it. It measures every line under `src/` and `tests/` whose indent is followed by `//`, and fails with all the offenders at once — path, line number, width. Rewrap those by hand; rustfmt will not do it for you. Measure with `chars().count()` rather than `awk 'length>100'`: macOS awk counts bytes, and counting those 49 lines with it reported 58, nine of them blamed for the width of their own em-dashes.
 
 ## Resolving the `*.kt` citations in the sources
 
