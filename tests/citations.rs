@@ -65,8 +65,8 @@ fn repo_root() -> PathBuf {
 
 /// Runs `git` in the repository root and returns its stdout.
 ///
-/// Every failure here is fatal on purpose. `install.sh` builds this project in place
-/// out of its own checkout, so a missing `git` or an unresolvable pin is a broken
+/// Every failure here is fatal on purpose. `cargo install --path .` builds this project
+/// in place out of its own checkout, so a missing `git` or an unresolvable pin is a broken
 /// repository rather than somebody else's environment — and a gate that skips itself
 /// when it cannot check is the swept rug it was written to remove.
 fn git(args: &[&str]) -> String {

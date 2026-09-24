@@ -7,10 +7,10 @@ A single global CLI that syncs time entries from **Chrono** (local time tracker)
 ## Install
 
 ```bash
-./install.sh
+cargo install --path .
 ```
 
-This runs `cargo build --release` and copies the binary to `~/.local/bin/tt-devpro`. The script warns if `~/.local/bin` is not on your `PATH`.
+Cargo builds the release binary and places it at `~/.cargo/bin/tt-devpro`, which a stock Rust install already puts on your `PATH`. `make install` runs exactly this command. There is no installer script: `ergon` reaches `PATH` the same way, and a wrapper that only shells out to `cargo install` is one more file to keep true.
 
 The only prerequisite is a stock Rust toolchain. The crate is edition **2024** and declares `rust-version = "1.87"`, so any Rust ≥ 1.87 builds it; nothing else needs to be installed.
 
@@ -92,11 +92,11 @@ Sources live in `src/`, tests in `src/` (unit) and `tests/` (integration). Typic
 ```bash
 # 1. make your change under src/...
 make test          # 2. run the suite
-make install       # 3. rebuild the release binary AND reinstall it to ~/.local/bin
+make install       # 3. rebuild the release binary AND reinstall it to ~/.cargo/bin
 tt-devpro settle --dry-run   # 4. exercise the installed binary
 ```
 
-`make install` (or `./install.sh`) always rebuilds *and* reinstalls, so the global `tt-devpro` on your `PATH` reflects your latest changes — there is no separate "deploy" step. Other targets:
+`make install` always rebuilds *and* reinstalls, so the global `tt-devpro` on your `PATH` reflects your latest changes — there is no separate "deploy" step. Other targets:
 
 ```bash
 make build     # Build the release binary only (target/release/tt-devpro)

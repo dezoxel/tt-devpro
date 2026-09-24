@@ -310,8 +310,8 @@ fn java_math_round(a: f64) -> i64 {
 /// orders `-0.0` below `0.0`. `f64::max` does neither: it returns the *other* operand
 /// on NaN, and on two zeroes it is documented to return either one.
 ///
-/// Measured on GraalVM JDK 21.0.11 — the toolchain `install.sh` builds the incumbent
-/// with — rather than recalled (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`).
+/// Measured on GraalVM JDK 21.0.11 — the toolchain the Kotlin build used — rather than
+/// recalled (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`).
 ///
 /// Neither clause is reachable from this module's two call sites: both pass
 /// `HOUR_INCREMENT` as `a` and a `round_to_quarter` result as `b`, and
