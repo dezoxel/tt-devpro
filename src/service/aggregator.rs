@@ -341,7 +341,7 @@ fn find_override<'a>(description: &str, overrides: &'a [OverrideRule]) -> Option
 ///
 /// Not reachable on this tool's data: over the live 2 710-entry window
 /// (2026-07-01..2026-09-22) the descriptions, projects and aspects contain 43
-/// distinct non-ASCII characters and **none** of the 82; `~/.tt-config.yaml`
+/// distinct non-ASCII characters and **none** of the 82; `~/.config/tt-devpro/config.yaml`
 /// contains one non-ASCII character (`→`) and it is not among them either.
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     // `indexOf` of an empty needle is 0, so an override rule with an empty
@@ -408,7 +408,7 @@ fn unmapped_project_error(chrono_project: &str, config: &Config) -> String {
     format!(
         "Chrono project '{chrono_project}' has no mapping in config.\n\
          \n\
-         Add to ~/.tt-config.yaml:\n\
+         Add to ~/.config/tt-devpro/config.yaml:\n\
          \n\
          mappings:\n\
          \x20 - chrono_project: \"{chrono_project}\"\n\
@@ -435,7 +435,7 @@ fn devpro_not_found_error(name: &str, available: &[Project]) -> String {
          {names}\n\
          \n\
          If the project was renamed or unassigned, either point the mapping at its\n\
-         current name above, or record its id as a fallback in ~/.tt-config.yaml:\n\
+         current name above, or record its id as a fallback in ~/.config/tt-devpro/config.yaml:\n\
          \n\
          project_ids:\n\
          \x20 \"{name}\": \"<uniqueId>\""
@@ -885,7 +885,8 @@ mod tests {
 
     /// `Aggregator.kt:152-166` verbatim, after `trimMargin()`. The message is the
     /// operator's only instruction when the portal stops listing a project, so
-    /// its text is the contract rather than decoration.
+    /// its text is the contract rather than decoration. One deliberate difference:
+    /// the config path it names is the moved one, see `config::config_path`.
     #[test]
     fn the_unresolvable_name_error_reads_exactly_as_the_incumbent_wrote_it() {
         let error = resolve_project_ids(
@@ -904,7 +905,7 @@ mod tests {
              \x20 - Velocitor: NLP\n\
              \n\
              If the project was renamed or unassigned, either point the mapping at its\n\
-             current name above, or record its id as a fallback in ~/.tt-config.yaml:\n\
+             current name above, or record its id as a fallback in ~/.config/tt-devpro/config.yaml:\n\
              \n\
              project_ids:\n\
              \x20 \"Ghost Project\": \"<uniqueId>\""
@@ -1132,7 +1133,7 @@ mod tests {
             error.to_string(),
             "Chrono project 'Velocitor - DevPro - Work' has no mapping in config.\n\
              \n\
-             Add to ~/.tt-config.yaml:\n\
+             Add to ~/.config/tt-devpro/config.yaml:\n\
              \n\
              mappings:\n\
              \x20 - chrono_project: \"Velocitor - DevPro - Work\"\n\

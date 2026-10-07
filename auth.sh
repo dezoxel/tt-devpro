@@ -8,7 +8,7 @@
 # a desktop session with a display; the binary never opens one.
 #
 # On success the cookie the portal accepted is written into the 1Password item
-# that `session_cookie` in ~/.tt-config.yaml refers to, which is exactly where
+# that `session_cookie` in ~/.config/tt-devpro/config.yaml refers to, which is exactly where
 # the binary reads it from (src/cookie.rs).
 
 set -e

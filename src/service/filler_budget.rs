@@ -23,7 +23,7 @@
 //! checks every day's filler against hours that were never that day's to spend.
 //! This port budgets per period and asks for the period of the day being filled.
 //! It is the one place in the module with no parity risk at all: G4 established
-//! that `max_hours_per_period` appears nowhere in the live `~/.tt-config.yaml`, so
+//! that `max_hours_per_period` appears nowhere in the live `~/.config/tt-devpro/config.yaml`, so
 //! `config.fillers.any { it.maxHoursPerPeriod != null }` is false on every real run
 //! and the whole branch is dead code today. Everything else here is verbatim.
 

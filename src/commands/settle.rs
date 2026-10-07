@@ -1794,7 +1794,7 @@ impl Settle<'_> {
     /// differs — 1 here against the incumbent's 0 — and that is the separate decision
     /// that a failed command exits non-zero doing its job, not this function working.
     ///
-    /// The residual cause is not a resolution date. `mappings` in `~/.tt-config.yaml`
+    /// The residual cause is not a resolution date. `mappings` in `~/.config/tt-devpro/config.yaml`
     /// sends `Inveniam Measurabl - Presales - DevPro - Work` to the static name
     /// `Inveniam SOW #5`, while the portal's assignments moved underneath it:
     /// `Inveniam SOW #3` on 08-01..08-07, neither name on 08-08 and 08-09, `#5` only
@@ -1872,7 +1872,7 @@ impl Settle<'_> {
         // one space, unlike the under-8h warning's U+26A0 U+FE0F with two.
         for fallback in &fallbacks {
             io.err(&format!(
-                "\u{26A0} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.tt-config.yaml. Check it still points at the right project.",
+                "\u{26A0} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.config/tt-devpro/config.yaml. Check it still points at the right project.",
                 fallback.name, fallback.id
             ));
         }

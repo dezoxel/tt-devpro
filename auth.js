@@ -12,7 +12,7 @@
 // avoid; the login is needed about once in two weeks, and that is the price.
 //
 // The cookie is stored in the 1Password item that `session_cookie` in
-// ~/.tt-config.yaml refers to, and the tt-devpro binary reads it from there.
+// ~/.config/tt-devpro/config.yaml refers to, and the tt-devpro binary reads it from there.
 // It never touches the disk and never appears in a command line: `op` receives
 // it as item JSON on stdin.
 //
@@ -83,7 +83,7 @@ function cachedFirefoxPath() {
     return newest.binary;
 }
 
-const CONFIG_FILE = path.join(process.env.HOME, '.tt-config.yaml');
+const CONFIG_FILE = path.join(process.env.HOME, '.config', 'tt-devpro', 'config.yaml');
 const PORTAL_URL = 'https://timetrackingportal.dev.pro/';
 const VERIFY_URL = 'https://timetrackingportal.dev.pro/api/contact/currentUser';
 const COOKIE_DOMAIN = 'dev.pro';
@@ -92,7 +92,7 @@ const TIMEOUT_MS = Number(process.env.TT_AUTH_TIMEOUT_MS) || 300000;
 // The category `make auth` creates the item in when it does not exist yet.
 const ITEM_CATEGORY = 'API Credential';
 
-// The `session_cookie` reference from ~/.tt-config.yaml, split into the vault,
+// The `session_cookie` reference from ~/.config/tt-devpro/config.yaml, split into the vault,
 // the item and the field. A regex rather than a YAML parser: this is the one key
 // the script needs, and the binary validates the whole file on every run. The
 // reference must be `op://vault/item/field`; a section in between is not

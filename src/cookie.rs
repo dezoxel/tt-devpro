@@ -2,7 +2,7 @@
 //!
 //! The incumbent (`Main.kt:21-40`) read `~/.tt-cookie` and fell back to `TT_COOKIE`.
 //! The cookie no longer lives on disk: `make auth` writes it into 1Password, and
-//! `session_cookie` in `~/.tt-config.yaml` holds the secret reference. Every run
+//! `session_cookie` in `~/.config/tt-devpro/config.yaml` holds the secret reference. Every run
 //! reads it through `op read`, which asks for approval each time. `TT_COOKIE` still
 //! stands in when it is set, and now comes first, since there is no file to prefer.
 //!
@@ -26,7 +26,7 @@ macro_rules! auth_command {
 
 /// The message for a run that has neither `TT_COOKIE` nor a reference to read.
 pub const MISSING_COOKIE: &str = concat!(
-    "No Dev.Pro session cookie found. Set session_cookie in ~/.tt-config.yaml to its ",
+    "No Dev.Pro session cookie found. Set session_cookie in ~/.config/tt-devpro/config.yaml to its ",
     "1Password reference and run '",
     auth_command!(),
     "' to issue one."

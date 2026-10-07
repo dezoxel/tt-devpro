@@ -67,7 +67,7 @@ use tempfile::TempDir;
 /// `user.home` ignores it and goes to the passwd entry. The port keeps
 /// `dirs::home_dir()` precisely because that makes it testable, and this is the
 /// test that spends it: with `HOME` pointing at an empty directory,
-/// `~/.tt-config.yaml` is absent and with it the cookie's 1Password reference, so a
+/// `~/.config/tt-devpro/config.yaml` is absent and with it the cookie's 1Password reference, so a
 /// command body that somehow ran would die in `config::load` or
 /// `cookie::session_cookie` — both of which bail before any client is constructed.
 fn guard_home() -> &'static Path {

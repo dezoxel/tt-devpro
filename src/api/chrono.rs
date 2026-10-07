@@ -146,7 +146,7 @@ mod tests {
     }
 
     /// The base URL is concatenated verbatim (`ChronoClient.kt:27`), so a configured value carrying
-    /// a path prefix keeps it. `~/.tt-config.yaml` holds a bare origin today, which
+    /// a path prefix keeps it. `~/.config/tt-devpro/config.yaml` holds a bare origin today, which
     /// is exactly why nothing else would notice a port that parsed and rebuilt it.
     #[tokio::test]
     async fn a_base_url_with_a_path_prefix_keeps_the_prefix() {

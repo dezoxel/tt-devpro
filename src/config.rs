@@ -1,4 +1,4 @@
-//! `~/.tt-config.yaml` — the structs and the loader.
+//! `~/.config/tt-devpro/config.yaml` — the structs and the loader.
 //!
 //! Ports `config/Config.kt` and `config/ConfigLoader.kt`.
 //!
@@ -82,7 +82,7 @@ fn default_max_synthetic_hours() -> f64 {
 /// The body of `ConfigLoader.kt:10-21`, after `trimIndent()`.
 const MISSING_CONFIG_HELP: &str = r#"
 
-Create ~/.tt-config.yaml with:
+Create ~/.config/tt-devpro/config.yaml with:
 
 chrono_api: "http://localhost:9247"
 vault_path: "/absolute/path/to/your/vault"
@@ -93,14 +93,21 @@ mappings:
     devpro_project: "DevPro Project Name"
     billability: "Billable""#;
 
-/// `ConfigLoader.kt:6`. `dirs::home_dir()` rather than the JVM's
-/// `System.getProperty("user.home")`: the two agree on every ordinary run and
-/// differ only under an overridden `$HOME`, where the Rust one is the testable
-/// behaviour and the JVM one is the reason an attempt to point the incumbent at a
-/// temporary config directory had no effect at all (C30).
+/// `ConfigLoader.kt:6`, moved. The incumbent read `~/.tt-config.yaml`; the file now
+/// sits beside the other tools' configs, at `~/.config/tt-devpro/config.yaml`.
+/// Every message that names the file names the new place, so the one parity
+/// baseline that prints the path (`settle-range-aug-json.err`) differs in that line.
+///
+/// Built from `$HOME` alone, not from `$XDG_CONFIG_HOME`: the path is then the same
+/// on every OS, and the tests keep one variable to point at an empty directory.
+/// `dirs::home_dir()` rather than the JVM's `System.getProperty("user.home")`: the
+/// two agree on every ordinary run and differ only under an overridden `$HOME`,
+/// where the Rust one is the testable behaviour and the JVM one is the reason an
+/// attempt to point the incumbent at a temporary config directory had no effect at
+/// all (C30).
 pub fn config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine the home directory"))?;
-    Ok(home.join(".tt-config.yaml"))
+    Ok(home.join(".config").join("tt-devpro").join("config.yaml"))
 }
 
 pub fn load() -> Result<Config> {
@@ -126,7 +133,7 @@ pub fn parse(content: &str) -> Result<Config> {
         serde_yaml::from_str(content).map_err(|e| anyhow!("Failed to parse config: {e}"))?;
     if !config.vault_path.is_absolute() {
         bail!(
-            "vault_path in ~/.tt-config.yaml must be an absolute path (`~` is not \
+            "vault_path in ~/.config/tt-devpro/config.yaml must be an absolute path (`~` is not \
              expanded): {}",
             config.vault_path.display()
         );
@@ -134,7 +141,7 @@ pub fn parse(content: &str) -> Result<Config> {
     if let Some(reference) = &config.session_cookie {
         if !reference.starts_with("op://") {
             bail!(
-                "session_cookie in ~/.tt-config.yaml must be a 1Password reference \
+                "session_cookie in ~/.config/tt-devpro/config.yaml must be a 1Password reference \
                  (op://vault/item/field), not the cookie itself"
             );
         }
@@ -311,7 +318,7 @@ max_synthetic_hours: 2.5
     #[test]
     fn a_missing_file_names_the_path_and_shows_the_template() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(".tt-config.yaml");
+        let path = dir.path().join("config.yaml");
         let err = load_from(&path).expect_err("a missing config must be an error");
         let message = err.to_string();
         assert!(message.starts_with(&format!("Config file not found: {}", path.display())));

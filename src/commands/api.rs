@@ -2517,7 +2517,7 @@ mod tests {
     /// An environment with no reachable session cookie, restored on drop.
     ///
     /// `HOME` points at an empty temporary directory, so there is no
-    /// `~/.tt-config.yaml` and no 1Password reference to read, and `TT_COOKIE` is
+    /// `~/.config/tt-devpro/config.yaml` and no 1Password reference to read, and `TT_COOKIE` is
     /// removed. C30 records that `dirs::home_dir()` reads
     /// `$HOME` on Unix where the JVM's `user.home` does not — which is the divergence
     /// that makes this test possible at all, and the reason it is worth keeping.
