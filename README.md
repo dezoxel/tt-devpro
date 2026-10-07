@@ -66,7 +66,7 @@ Maps Chrono projects to DevPro projects and defines fillers/overrides:
 
 ```yaml
 chrono_api: "http://localhost:9247"
-knowledge_base: "/home/you/vault"                          # required, absolute
+vault_path: "/home/you/vault"                              # required, absolute
 session_cookie: "op://Dev.Pro/TT DevPro Session/credential" # where make auth stores the cookie
 
 mappings:
@@ -83,7 +83,7 @@ Chrono project names use the flat format (`Project - Parent - Work`) or the hier
 
 **Two different things happen to a Chrono project the config does not cover, and only one of them is silent.** Only projects whose name ends in `DevPro - Work` or `DevPro/Work` are considered at all; everything else is dropped without a word. That is the silent one, and it is why a day short on hours usually means the Chrono project is named outside that suffix rather than missing from `mappings`. A project that *does* end in the suffix but has no mapping is the opposite: the run stops with an error naming the project, printing the YAML block to paste into `~/.tt-config.yaml`, and listing what is configured today. Silence points at the Chrono name; a crash points at the config.
 
-**Meeting detection reads the vault at `knowledge_base` off disk.** The key is required and has no default, because the vault sits at a different path on each machine; it must be absolute (`~` is not expanded). On startup `settle` walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk fails loudly: a root that is missing or not a directory, a folder that cannot be read, or a vault with no `Calendar` folder at all stops the run with the path at fault. The Kotlin original turned all of those into *no meetings* and scaled every meeting as work without a word.
+**Meeting detection reads the vault at `vault_path` off disk.** The key is required and has no default, because the vault sits at a different path on each machine; it must be absolute (`~` is not expanded). On startup `settle` walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk fails loudly: a root that is missing or not a directory, a folder that cannot be read, or a vault with no `Calendar` folder at all stops the run with the path at fault. The Kotlin original turned all of those into *no meetings* and scaled every meeting as work without a word.
 
 `project_ids` is a **fallback, not an override.** Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` warns on stderr naming the project and the id it used, since a hardcoded id can quietly go stale. A stale configured id silently beating a correct live one would post worklogs to the wrong project unnoticed, which is worse than the crash the fallback prevents. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
 

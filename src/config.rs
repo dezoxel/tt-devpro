@@ -33,8 +33,9 @@ pub struct Config {
     /// The Obsidian vault whose `Calendar` folders mark meetings. Required, with no
     /// default: the vault sits at a different path on each machine, and the
     /// incumbent's hard-coded `~/knowledge-base` silently found no meetings wherever
-    /// it was elsewhere. Absolute; `~` is not expanded.
-    pub knowledge_base: PathBuf,
+    /// it was elsewhere. Absolute; `~` is not expanded. Named after ergon's
+    /// `vault_path`, which holds the same path.
+    pub vault_path: PathBuf,
     /// 1Password secret reference to the portal session cookie, e.g.
     /// `op://Dev.Pro/TT DevPro Session/credential`. A reference, not the secret:
     /// `cookie::session_cookie` reads the value through `op read` on every run,
@@ -84,7 +85,7 @@ const MISSING_CONFIG_HELP: &str = r#"
 Create ~/.tt-config.yaml with:
 
 chrono_api: "http://localhost:9247"
-knowledge_base: "/absolute/path/to/your/vault"
+vault_path: "/absolute/path/to/your/vault"
 session_cookie: "op://Vault/Item/field"
 
 mappings:
@@ -123,11 +124,11 @@ pub fn load_from(path: &Path) -> Result<Config> {
 pub fn parse(content: &str) -> Result<Config> {
     let config: Config =
         serde_yaml::from_str(content).map_err(|e| anyhow!("Failed to parse config: {e}"))?;
-    if !config.knowledge_base.is_absolute() {
+    if !config.vault_path.is_absolute() {
         bail!(
-            "knowledge_base in ~/.tt-config.yaml must be an absolute path (`~` is not \
+            "vault_path in ~/.tt-config.yaml must be an absolute path (`~` is not \
              expanded): {}",
-            config.knowledge_base.display()
+            config.vault_path.display()
         );
     }
     if let Some(reference) = &config.session_cookie {
@@ -147,7 +148,7 @@ mod tests {
 
     const MINIMAL: &str = r#"
 chrono_api: "http://localhost:9247"
-knowledge_base: "/vault"
+vault_path: "/vault"
 mappings:
   - chrono_project: "Practices - DevPro - Work"
     devpro_project: "Delivery Practices"
@@ -185,7 +186,7 @@ mappings:
     fn rejects_an_unknown_key_inside_a_mapping() {
         let yaml = r#"
 chrono_api: "http://localhost:9247"
-knowledge_base: "/vault"
+vault_path: "/vault"
 mappings:
   - chrono_project: "Practices - DevPro - Work"
     devpro_projekt: "Delivery Practices"
@@ -198,7 +199,7 @@ mappings:
     fn rejects_an_unknown_key_inside_a_filler_or_an_override() {
         let filler = r#"
 chrono_api: "x"
-knowledge_base: "/vault"
+vault_path: "/vault"
 mappings: []
 fillers:
   - devpro_project: "P"
@@ -212,7 +213,7 @@ fillers:
 
         let override_rule = r#"
 chrono_api: "x"
-knowledge_base: "/vault"
+vault_path: "/vault"
 mappings: []
 overrides:
   - pattern: "x"
@@ -227,7 +228,7 @@ overrides:
     fn reads_every_optional_section_when_present() {
         let yaml = r#"
 chrono_api: "http://localhost:9247"
-knowledge_base: "/vault"
+vault_path: "/vault"
 mappings:
   - chrono_project: "A"
     devpro_project: "B"
@@ -264,16 +265,16 @@ max_synthetic_hours: 2.5
     /// No default: a config without the vault path must not parse, or `settle`
     /// would go back to guessing where the vault is.
     #[test]
-    fn knowledge_base_is_required() {
-        let yaml = MINIMAL.replace("knowledge_base: \"/vault\"\n", "");
+    fn vault_path_is_required() {
+        let yaml = MINIMAL.replace("vault_path: \"/vault\"\n", "");
         assert!(
             parse(&yaml).is_err(),
-            "a config without knowledge_base must not parse"
+            "a config without vault_path must not parse"
         );
     }
 
     #[test]
-    fn knowledge_base_must_be_absolute() {
+    fn vault_path_must_be_absolute() {
         for relative in ["digital-brain", "~/digital-brain"] {
             let yaml = MINIMAL.replace("/vault", relative);
             let message = parse(&yaml)

@@ -2329,7 +2329,7 @@ fn explicit_range(args: &SettleArgs) -> bool {
 /// stderr and a non-zero code, which is what the *expired*-cookie path already did.
 ///
 /// The knowledge base is walked after the cookie is read, so an expired session
-/// still reports itself first. A missing or wrong `knowledge_base` fails here too,
+/// still reports itself first. A missing or wrong `vault_path` fails here too,
 /// rather than posting every meeting as work — see [`TimeNormalizer::for_settle`].
 async fn dispatch(
     args: &SettleArgs,
@@ -2341,7 +2341,7 @@ async fn dispatch(
     let tt_client = TtApiClient::new(crate::cookie::session_cookie()?)?;
     // Walks the knowledge base for `Calendar` directories, so it is built once per
     // run and not once per day of a 45-day scan.
-    let normalizer = TimeNormalizer::for_settle(&config.knowledge_base)?;
+    let normalizer = TimeNormalizer::for_settle(&config.vault_path)?;
 
     let settle = Settle {
         args,
@@ -5261,7 +5261,7 @@ mod tests {
             overrides: Vec::new(),
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
-            knowledge_base: "/vault".into(),
+            vault_path: "/vault".into(),
             session_cookie: None,
         }
     }

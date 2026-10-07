@@ -56,7 +56,7 @@ const HOSTILE_CHARS: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
 /// Ports the `TimeNormalizer` object. Kotlin holds `calendarDirs` in a `by lazy`
 /// computed once per process from the constant `~/knowledge-base`. Here the root is
-/// a parameter: `settle` takes it from `knowledge_base` in `~/.tt-config.yaml`, because
+/// a parameter: `settle` takes it from `vault_path` in `~/.tt-config.yaml`, because
 /// the vault sits at a different path on each machine, and the tests hand in a
 /// temporary directory, which is what makes C26 testable.
 pub struct TimeNormalizer {
@@ -81,13 +81,13 @@ impl TimeNormalizer {
     pub fn for_settle(root: &Path) -> Result<Self> {
         let resolved = std::fs::canonicalize(root).with_context(|| {
             format!(
-                "{KNOWLEDGE_BASE_KEY} points at {}, which cannot be resolved",
+                "{VAULT_PATH_KEY} points at {}, which cannot be resolved",
                 root.display()
             )
         })?;
         if !resolved.is_dir() {
             bail!(
-                "{KNOWLEDGE_BASE_KEY} points at {}, which is not a directory",
+                "{VAULT_PATH_KEY} points at {}, which is not a directory",
                 resolved.display()
             );
         }
@@ -95,7 +95,7 @@ impl TimeNormalizer {
             .with_context(|| format!("walking the knowledge base at {}", resolved.display()))?;
         if calendar_dirs.is_empty() {
             bail!(
-                "{KNOWLEDGE_BASE_KEY} points at {}, which has no Calendar folder, so no \
+                "{VAULT_PATH_KEY} points at {}, which has no Calendar folder, so no \
                  meeting could be detected. Is it the vault?",
                 resolved.display()
             );
@@ -425,7 +425,7 @@ fn by_date_then_project(a: &NormalizedAggregate, b: &NormalizedAggregate) -> Ord
 
 /// Names the setting in every error [`TimeNormalizer::for_settle`] raises, so the
 /// operator knows what to fix.
-const KNOWLEDGE_BASE_KEY: &str = "knowledge_base in ~/.tt-config.yaml";
+const VAULT_PATH_KEY: &str = "vault_path in ~/.tt-config.yaml";
 
 /// `TimeNormalizer.kt:21-29`. A missing or unreadable root, or an unreadable
 /// subdirectory partway through, yields an empty list, never an error. Only the
@@ -1095,7 +1095,7 @@ mod tests {
                 .expect("must fail")
         );
         assert!(
-            message.contains("knowledge_base in ~/.tt-config.yaml"),
+            message.contains("vault_path in ~/.tt-config.yaml"),
             "{message}"
         );
         assert!(message.contains("no-vault-here"), "{message}");
