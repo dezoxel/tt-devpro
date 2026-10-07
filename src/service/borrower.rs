@@ -39,7 +39,7 @@
 //! - the live `ChronoClient` becomes a [`HistorySource`] trait, so the "a failed fetch
 //!   means no borrowing" rule is testable without a mock HTTP layer;
 //! - `TimeNormalizer` arrives as a parameter rather than being constructed here,
-//!   because it reads `~/knowledge-base` off disk and meeting detection on the
+//!   because it walks the vault off disk and meeting detection on the
 //!   *history* window would otherwise depend on the machine running the tests.
 
 use std::collections::HashSet;
@@ -419,6 +419,8 @@ mod tests {
             overrides: Vec::new(),
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
+            knowledge_base: "/vault".into(),
+            session_cookie: None,
         }
     }
 

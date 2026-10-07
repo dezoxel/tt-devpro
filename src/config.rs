@@ -30,6 +30,18 @@ pub struct Config {
     /// every real run uses.
     #[serde(default = "default_max_synthetic_hours")]
     pub max_synthetic_hours: f64,
+    /// The Obsidian vault whose `Calendar` folders mark meetings. Required, with no
+    /// default: the vault sits at a different path on each machine, and the
+    /// incumbent's hard-coded `~/knowledge-base` silently found no meetings wherever
+    /// it was elsewhere. Absolute; `~` is not expanded.
+    pub knowledge_base: PathBuf,
+    /// 1Password secret reference to the portal session cookie, e.g.
+    /// `op://Dev.Pro/TT DevPro Session/credential`. A reference, not the secret:
+    /// `cookie::session_cookie` reads the value through `op read` on every run,
+    /// and `make auth` writes it there. Optional only because `TT_COOKIE` can
+    /// stand in for it.
+    #[serde(default)]
+    pub session_cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -72,6 +84,8 @@ const MISSING_CONFIG_HELP: &str = r#"
 Create ~/.tt-config.yaml with:
 
 chrono_api: "http://localhost:9247"
+knowledge_base: "/absolute/path/to/your/vault"
+session_cookie: "op://Vault/Item/field"
 
 mappings:
   - chrono_project: "Your Chrono Project"
@@ -107,7 +121,24 @@ pub fn load_from(path: &Path) -> Result<Config> {
 }
 
 pub fn parse(content: &str) -> Result<Config> {
-    serde_yaml::from_str(content).map_err(|e| anyhow!("Failed to parse config: {e}"))
+    let config: Config =
+        serde_yaml::from_str(content).map_err(|e| anyhow!("Failed to parse config: {e}"))?;
+    if !config.knowledge_base.is_absolute() {
+        bail!(
+            "knowledge_base in ~/.tt-config.yaml must be an absolute path (`~` is not \
+             expanded): {}",
+            config.knowledge_base.display()
+        );
+    }
+    if let Some(reference) = &config.session_cookie {
+        if !reference.starts_with("op://") {
+            bail!(
+                "session_cookie in ~/.tt-config.yaml must be a 1Password reference \
+                 (op://vault/item/field), not the cookie itself"
+            );
+        }
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -116,6 +147,7 @@ mod tests {
 
     const MINIMAL: &str = r#"
 chrono_api: "http://localhost:9247"
+knowledge_base: "/vault"
 mappings:
   - chrono_project: "Practices - DevPro - Work"
     devpro_project: "Delivery Practices"
@@ -153,6 +185,7 @@ mappings:
     fn rejects_an_unknown_key_inside_a_mapping() {
         let yaml = r#"
 chrono_api: "http://localhost:9247"
+knowledge_base: "/vault"
 mappings:
   - chrono_project: "Practices - DevPro - Work"
     devpro_projekt: "Delivery Practices"
@@ -165,6 +198,7 @@ mappings:
     fn rejects_an_unknown_key_inside_a_filler_or_an_override() {
         let filler = r#"
 chrono_api: "x"
+knowledge_base: "/vault"
 mappings: []
 fillers:
   - devpro_project: "P"
@@ -178,6 +212,7 @@ fillers:
 
         let override_rule = r#"
 chrono_api: "x"
+knowledge_base: "/vault"
 mappings: []
 overrides:
   - pattern: "x"
@@ -192,6 +227,7 @@ overrides:
     fn reads_every_optional_section_when_present() {
         let yaml = r#"
 chrono_api: "http://localhost:9247"
+knowledge_base: "/vault"
 mappings:
   - chrono_project: "A"
     devpro_project: "B"
@@ -223,6 +259,52 @@ max_synthetic_hours: 2.5
             Some("cf84fdca-4809-4678-98b1-2e7cc56537c0")
         );
         assert_eq!(config.max_synthetic_hours, 2.5);
+    }
+
+    /// No default: a config without the vault path must not parse, or `settle`
+    /// would go back to guessing where the vault is.
+    #[test]
+    fn knowledge_base_is_required() {
+        let yaml = MINIMAL.replace("knowledge_base: \"/vault\"\n", "");
+        assert!(
+            parse(&yaml).is_err(),
+            "a config without knowledge_base must not parse"
+        );
+    }
+
+    #[test]
+    fn knowledge_base_must_be_absolute() {
+        for relative in ["digital-brain", "~/digital-brain"] {
+            let yaml = MINIMAL.replace("/vault", relative);
+            let message = parse(&yaml)
+                .expect_err("a relative path must not parse")
+                .to_string();
+            assert!(message.contains("must be an absolute path"), "{message}");
+        }
+    }
+
+    #[test]
+    fn session_cookie_is_optional_and_read_as_a_reference() {
+        assert_eq!(parse(MINIMAL).expect("parses").session_cookie, None);
+        let yaml =
+            format!("{MINIMAL}session_cookie: \"op://Dev.Pro/TT DevPro Session/credential\"\n");
+        assert_eq!(
+            parse(&yaml).expect("parses").session_cookie.as_deref(),
+            Some("op://Dev.Pro/TT DevPro Session/credential")
+        );
+    }
+
+    /// The cookie itself must never sit in the config file.
+    #[test]
+    fn session_cookie_rejects_a_raw_cookie() {
+        let yaml = format!("{MINIMAL}session_cookie: \"SESSION=abc123\"\n");
+        let message = parse(&yaml)
+            .expect_err("a raw cookie must not parse")
+            .to_string();
+        assert!(
+            message.contains("must be a 1Password reference"),
+            "{message}"
+        );
     }
 
     #[test]

@@ -513,6 +513,8 @@ mod tests {
             overrides,
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
+            knowledge_base: "/vault".into(),
+            session_cookie: None,
         }
     }
 

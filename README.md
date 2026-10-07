@@ -50,15 +50,15 @@ Every command prints its own help with `--help` and exits 0; a usage failure pri
 
 ## Authentication
 
-The portal authenticates API calls with a server-side session cookie scoped to `.dev.pro`, saved to `~/.tt-cookie`.
+The portal authenticates API calls with a server-side session cookie scoped to `.dev.pro`. The cookie lives in 1Password, in the item that `session_cookie` in `~/.tt-config.yaml` refers to (`op://vault/item/field`), and never on disk. Every `tt-devpro` run that talks to the portal reads it with `op read`, so 1Password asks for approval each time. `$TT_COOKIE`, when set and non-empty, is used instead and 1Password is not asked.
 
 ```bash
 make auth      # or: ./auth.sh
 ```
 
-This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window) against a persistent profile, so the Google login and its MFA are asked for once and then reused.
+This opens a GUI browser (Playwright, host-side — the Google OAuth flow needs a real browser window) with an empty profile, so every run is a full Google login with MFA. Nothing of the browser session is kept between runs: a saved profile would hold a live Google session on disk in plaintext. The first run installs the Playwright version `package.json` pins and its Firefox build into `~/.cache/ms-playwright`; no system Firefox is needed.
 
-A cookie is written only after the portal answered `200` to that exact cookie on `/api/contact/currentUser`, and the verified account is printed — presence in the browser profile proves nothing, since a dead cookie lingers there forever. The check bypasses the browser jar and does not follow redirects, so a login page can never pose as a success. If the saved session is rejected, `auth` drops the `.dev.pro` cookies (the Google session survives), logs in again and verifies the new one. When no session can be obtained it fails with a non-zero exit and leaves `~/.tt-cookie` untouched, rather than re-blessing a dead cookie.
+A cookie is stored only after the portal answered `200` to that exact cookie on `/api/contact/currentUser`, and the verified account is printed. The check bypasses the browser jar and does not follow redirects, so a login page can never pose as a success. The cookie goes to `op` as item JSON on stdin, never in a command line: `op item edit` when the item exists, `op item create` from the `API Credential` template when it does not. The write counts only when `op read` of the reference then returns the same cookie. 1Password is asked about the item before the browser opens, so a locked vault or a wrong reference fails before the login rather than after it.
 
 ## Configuration (`~/.tt-config.yaml`)
 
@@ -66,6 +66,8 @@ Maps Chrono projects to DevPro projects and defines fillers/overrides:
 
 ```yaml
 chrono_api: "http://localhost:9247"
+knowledge_base: "/home/you/vault"                          # required, absolute
+session_cookie: "op://Dev.Pro/TT DevPro Session/credential" # where make auth stores the cookie
 
 mappings:
   - chrono_project: "Velocitor - DevPro - Work"
@@ -81,7 +83,7 @@ Chrono project names use the flat format (`Project - Parent - Work`) or the hier
 
 **Two different things happen to a Chrono project the config does not cover, and only one of them is silent.** Only projects whose name ends in `DevPro - Work` or `DevPro/Work` are considered at all; everything else is dropped without a word. That is the silent one, and it is why a day short on hours usually means the Chrono project is named outside that suffix rather than missing from `mappings`. A project that *does* end in the suffix but has no mapping is the opposite: the run stops with an error naming the project, printing the YAML block to paste into `~/.tt-config.yaml`, and listing what is configured today. Silence points at the Chrono name; a crash points at the config.
 
-**Meeting detection reads `~/knowledge-base` off disk**, outside the YAML config. On startup the normalizer walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk swallows every failure: a missing or unreadable knowledge base yields *no meetings* rather than an error, so every entry is then treated as scalable work. That is silent, so if a day's meetings are suddenly being scaled, check that `~/knowledge-base` is where the tool expects it.
+**Meeting detection reads the vault at `knowledge_base` off disk.** The key is required and has no default, because the vault sits at a different path on each machine; it must be absolute (`~` is not expanded). On startup `settle` walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk fails loudly: a root that is missing or not a directory, a folder that cannot be read, or a vault with no `Calendar` folder at all stops the run with the path at fault. The Kotlin original turned all of those into *no meetings* and scaled every meeting as work without a word.
 
 `project_ids` is a **fallback, not an override.** Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` warns on stderr naming the project and the id it used, since a hardcoded id can quietly go stale. A stale configured id silently beating a correct live one would post worklogs to the wrong project unnoticed, which is worse than the crash the fallback prevents. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
 

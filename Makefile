@@ -10,7 +10,7 @@ help:
 	@echo "  make install   Build and install tt-devpro to ~/.cargo/bin"
 	@echo "  make build     Build the release binary (target/release/tt-devpro)"
 	@echo "  make test      Run the test suite"
-	@echo "  make auth      Refresh the Dev.Pro session cookie via browser (runs on host)"
+	@echo "  make auth      Log in through a browser and store the session cookie in 1Password"
 	@echo "  make clean     Remove build artifacts"
 	@echo ""
 	@echo "After install:  tt-devpro settle --dry-run"

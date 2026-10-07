@@ -2289,7 +2289,7 @@ enum Mode {
 /// over the scan, and the scan is the default.
 ///
 /// Pure on purpose. `dispatch` builds both clients from [`crate::api::portal::BASE_URL`]
-/// and `~/.tt-cookie` inline, so the chain that used to live there could not be
+/// and the session cookie inline, so the chain that used to live there could not be
 /// driven from a test, and the test harness carried a second verbatim copy of it
 /// that no test compared against the first. The arms now exist once, in
 /// [`Settle::run_chosen_mode`], which both callers go through; this function is the
@@ -2324,9 +2324,13 @@ fn explicit_range(args: &SettleArgs) -> bool {
 /// have a single `Err` to look at.
 ///
 /// `session_cookie()` is inside it, which the incumbent's `getSessionCookie()` at
-/// `SettleCommand.kt:88` is not — it sits outside the `try`, so a missing `~/.tt-cookie` throws a
+/// `SettleCommand.kt:88` is not — it sits outside the `try`, so a missing cookie throws a
 /// raw stack trace out of Clikt. D3 names that as a fix: the same message on
 /// stderr and a non-zero code, which is what the *expired*-cookie path already did.
+///
+/// The knowledge base is walked after the cookie is read, so an expired session
+/// still reports itself first. A missing or wrong `knowledge_base` fails here too,
+/// rather than posting every meeting as work — see [`TimeNormalizer::for_settle`].
 async fn dispatch(
     args: &SettleArgs,
     config: &Config,
@@ -2337,7 +2341,7 @@ async fn dispatch(
     let tt_client = TtApiClient::new(crate::cookie::session_cookie()?)?;
     // Walks the knowledge base for `Calendar` directories, so it is built once per
     // run and not once per day of a 45-day scan.
-    let normalizer = TimeNormalizer::new();
+    let normalizer = TimeNormalizer::for_settle(&config.knowledge_base)?;
 
     let settle = Settle {
         args,
@@ -2354,7 +2358,7 @@ async fn dispatch(
     // unit-test seam: the harness builds the same `Settle` from stubs and routes
     // through the same method, and an exchanged pair of arms fails there. What is
     // still unique to this function is the composition above it — the two clients
-    // built from `BASE_URL` and `~/.tt-cookie` inline, which no unit test can
+    // built from `BASE_URL` and the session cookie inline, which no unit test can
     // construct — and that live composition is what the differential parity
     // harness covers, where the `settle-dryrun-and-json` case passes both flags and
     // expects JSON.
@@ -5257,13 +5261,15 @@ mod tests {
             overrides: Vec::new(),
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
+            knowledge_base: "/vault".into(),
+            session_cookie: None,
         }
     }
 
     /// The head of [`dispatch`] with the two clients pointed at stubs instead of at
-    /// the portal and at `~/.tt-cookie`, followed by the very
+    /// the portal and at 1Password, followed by the very
     /// [`Settle::run_chosen_mode`] call `dispatch` ends on. `dispatch` builds its
-    /// clients from [`crate::api::portal::BASE_URL`] and the cookie file, so that
+    /// clients from [`crate::api::portal::BASE_URL`] and the session cookie, so that
     /// construction cannot be driven from a test without a production seam this
     /// port does not have. The routing after it can be, and is: it is one method
     /// and this harness calls it, so what these tests pin about an arm they pin

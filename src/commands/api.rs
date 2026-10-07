@@ -1925,7 +1925,11 @@ mod tests {
         assert_eq!(outcome, Outcome::Failed);
         assert_eq!(
             io.err_text(),
-            "\u{2717} Error: Authentication failed. Session cookie expired \u{2014} run 'make auth'."
+            concat!(
+                "\u{2717} Error: Authentication failed. Session cookie expired \u{2014} run '",
+                crate::auth_command!(),
+                "'."
+            )
         );
         let _ = portal.requests();
     }
@@ -2489,7 +2493,7 @@ mod tests {
     //
     // Everything above drives a `*_with` against a stub, which leaves the public
     // `run_*` wrappers — `connect()`, and the `Err` arm that carries D3 for a
-    // missing `~/.tt-cookie` — uncovered. That failure is network-free and is
+    // missing session cookie — uncovered. That failure is network-free and is
     // covered here.
     //
     // **The success half is deliberately not attempted.** A `run_*` builds its
@@ -2504,16 +2508,17 @@ mod tests {
     /// whole mechanism. Rust runs tests on parallel threads and the environment is
     /// per-process, so an unguarded `set_var("HOME", …)` is visible to every other
     /// test for as long as it stands. Audited today: `HOME` is read only by
-    /// `cookie::cookie_path`, `config::config_path` and `normalizer`'s default root,
-    /// and no test in this crate reaches any of the three — every one of them takes
-    /// its path or its client as a parameter. So the window this opens is empty
+    /// `config::config_path`, which `cookie::session_cookie` also goes through for its
+    /// 1Password reference, and no other test in this crate reaches it — every one of
+    /// them takes its path or its client as a parameter. So the window this opens is empty
     /// *today*, and the lock is what keeps that true when it stops being.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// An environment with no reachable session cookie, restored on drop.
     ///
-    /// `HOME` points at an empty temporary directory, so `~/.tt-cookie` does not
-    /// exist, and `TT_COOKIE` is removed. C30 records that `dirs::home_dir()` reads
+    /// `HOME` points at an empty temporary directory, so there is no
+    /// `~/.tt-config.yaml` and no 1Password reference to read, and `TT_COOKIE` is
+    /// removed. C30 records that `dirs::home_dir()` reads
     /// `$HOME` on Unix where the JVM's `user.home` does not — which is the divergence
     /// that makes this test possible at all, and the reason it is worth keeping.
     ///
@@ -2574,7 +2579,9 @@ mod tests {
     }
 
     /// `cookie::resolve`'s message, under this file's prefix.
-    const MISSING_COOKIE: &str = "\u{2717} Error: No Dev.Pro session cookie found. Run 'make auth' on your host machine to create one.";
+    fn missing_cookie() -> String {
+        format!("\u{2717} Error: {}", crate::cookie::MISSING_COOKIE)
+    }
 
     fn assert_cookie_failure(outcome: Outcome, io: &FakeConsole, which: &str) {
         assert_eq!(
@@ -2582,7 +2589,7 @@ mod tests {
             Outcome::Failed,
             "`api {which}` must fail without a cookie, and under D3 that is a non-zero exit"
         );
-        assert_eq!(io.err_text(), MISSING_COOKIE, "`api {which}`");
+        assert_eq!(io.err_text(), missing_cookie(), "`api {which}`");
         assert!(
             io.out.is_empty(),
             "`api {which}` printed {:?} before failing — so it entered its body, which \
@@ -2669,7 +2676,7 @@ mod tests {
         let outcome = run_create_worklog(&args, &mut io).await;
 
         assert_eq!(outcome, Outcome::Failed);
-        assert_eq!(io.err_text(), MISSING_COOKIE);
+        assert_eq!(io.err_text(), missing_cookie());
         assert!(
             !io.err_text().contains("For input string"),
             "the cookie is checked first: {}",

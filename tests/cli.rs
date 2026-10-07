@@ -66,10 +66,10 @@ use tempfile::TempDir;
 /// C30: `dirs::home_dir()` reads `$HOME` first on Unix, where the JVM's
 /// `user.home` ignores it and goes to the passwd entry. The port keeps
 /// `dirs::home_dir()` precisely because that makes it testable, and this is the
-/// test that spends it: with `HOME` pointing at an empty directory, `~/.tt-cookie`
-/// and `~/.tt-config.yaml` are both absent, so a command body that somehow ran
-/// would die in `config::load` or `cookie::session_cookie` — both of which bail
-/// before any client is constructed.
+/// test that spends it: with `HOME` pointing at an empty directory,
+/// `~/.tt-config.yaml` is absent and with it the cookie's 1Password reference, so a
+/// command body that somehow ran would die in `config::load` or
+/// `cookie::session_cookie` — both of which bail before any client is constructed.
 fn guard_home() -> &'static Path {
     static GUARD: OnceLock<TempDir> = OnceLock::new();
     GUARD
@@ -79,9 +79,9 @@ fn guard_home() -> &'static Path {
 
 /// The binary under test, with the guard applied.
 ///
-/// `TT_COOKIE` is removed rather than set: C20 resolves the cookie from
-/// `~/.tt-cookie` first and the environment second, so leaving an inherited
-/// `TT_COOKIE` in place would hand a command body a usable live session.
+/// `TT_COOKIE` is removed rather than set: C20 takes it before anything else, so
+/// leaving an inherited `TT_COOKIE` in place would hand a command body a usable live
+/// session.
 fn bin() -> Command {
     let mut command = Command::cargo_bin("tt-devpro").expect("the tt-devpro binary should build");
     command.env("HOME", guard_home()).env_remove("TT_COOKIE");

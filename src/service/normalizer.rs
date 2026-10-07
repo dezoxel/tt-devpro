@@ -28,6 +28,7 @@
 //! `try` wraps the terminal `.toList()`, so the `UncheckedIOException` takes the
 //! whole stream with it (measured).
 
+use anyhow::{Context, Result, bail};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
@@ -54,19 +55,59 @@ const MONTHS: [&[u8]; 12] = [
 const HOSTILE_CHARS: [char; 9] = ['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
 
 /// Ports the `TimeNormalizer` object. Kotlin holds `calendarDirs` in a `by lazy`
-/// computed once per process from a constant path; the plan makes the knowledge-base
-/// root a parameter with the same default so C26 becomes testable, which is the only
-/// reason this is a struct rather than free functions.
+/// computed once per process from the constant `~/knowledge-base`. Here the root is
+/// a parameter: `settle` takes it from `knowledge_base` in `~/.tt-config.yaml`, because
+/// the vault sits at a different path on each machine, and the tests hand in a
+/// temporary directory, which is what makes C26 testable.
 pub struct TimeNormalizer {
     calendar_dirs: Vec<PathBuf>,
 }
 
 impl TimeNormalizer {
-    /// `TimeNormalizer.kt:19` — `${System.getProperty("user.home")}/knowledge-base`.
-    pub fn new() -> Self {
-        Self::with_knowledge_base(default_knowledge_base())
+    /// The normalizer `settle` runs with: the root from the config, and a walk that
+    /// fails loudly instead of yielding "no meetings".
+    ///
+    /// **A deliberate divergence from C26**, made for the same reason as D3. The
+    /// incumbent turns a missing or unreadable knowledge base into an empty list, so
+    /// every meeting is scaled as work and posted with the wrong hours, and nothing
+    /// says so. Here the root must exist and be a directory, an I/O error partway
+    /// through the walk stops the run with the path that failed, and a walk that finds
+    /// no `Calendar` directory at all is an error too — that catches a root that
+    /// exists but is the wrong directory. The unit tests below cover it; the parity
+    /// harness cannot, because the incumbent never fails here.
+    ///
+    /// The root is canonicalized first, so a symlink to the vault is followed: the
+    /// walk itself never descends through a symlink.
+    pub fn for_settle(root: &Path) -> Result<Self> {
+        let resolved = std::fs::canonicalize(root).with_context(|| {
+            format!(
+                "{KNOWLEDGE_BASE_KEY} points at {}, which cannot be resolved",
+                root.display()
+            )
+        })?;
+        if !resolved.is_dir() {
+            bail!(
+                "{KNOWLEDGE_BASE_KEY} points at {}, which is not a directory",
+                resolved.display()
+            );
+        }
+        let calendar_dirs = walk_for_calendar_dirs(&resolved)
+            .with_context(|| format!("walking the knowledge base at {}", resolved.display()))?;
+        if calendar_dirs.is_empty() {
+            bail!(
+                "{KNOWLEDGE_BASE_KEY} points at {}, which has no Calendar folder, so no \
+                 meeting could be detected. Is it the vault?",
+                resolved.display()
+            );
+        }
+        Ok(Self { calendar_dirs })
     }
 
+    /// The incumbent's lenient walk (C26): a root that is missing or cannot be read
+    /// yields no meetings. Test-only — the C26 cases pin it, and the settle tests
+    /// build fixtures with it; `settle` itself goes through
+    /// [`TimeNormalizer::for_settle`].
+    #[cfg(test)]
     pub fn with_knowledge_base(root: impl AsRef<Path>) -> Self {
         Self {
             calendar_dirs: find_calendar_dirs(root.as_ref()),
@@ -241,12 +282,6 @@ impl TimeNormalizer {
     }
 }
 
-impl Default for TimeNormalizer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// `TimeNormalizer.kt:147-150` — the rounding half of C27, shared by the three
 /// identical copies the plan collapses into one.
 ///
@@ -388,23 +423,22 @@ fn by_date_then_project(a: &NormalizedAggregate, b: &NormalizedAggregate) -> Ord
     })
 }
 
-fn default_knowledge_base() -> PathBuf {
-    // `System.getProperty("user.home")` is always set on the JVM. If the home
-    // directory cannot be resolved here, the walk below fails and the swallow at
-    // `TimeNormalizer.kt:26` turns that into "no meetings", exactly as a missing
-    // knowledge base already does.
-    dirs::home_dir().unwrap_or_default().join("knowledge-base")
-}
+/// Names the setting in every error [`TimeNormalizer::for_settle`] raises, so the
+/// operator knows what to fix.
+const KNOWLEDGE_BASE_KEY: &str = "knowledge_base in ~/.tt-config.yaml";
 
-/// `TimeNormalizer.kt:21-29`. Any failure — a missing root, an unreadable
-/// subdirectory partway through — yields an empty list, never an error.
+/// `TimeNormalizer.kt:21-29`. A missing or unreadable root, or an unreadable
+/// subdirectory partway through, yields an empty list, never an error. Only the
+/// tests build a normalizer this way; `settle` goes through
+/// [`TimeNormalizer::for_settle`].
+#[cfg(test)]
 fn find_calendar_dirs(root: &Path) -> Vec<PathBuf> {
     walk_for_calendar_dirs(root).unwrap_or_default()
 }
 
-fn walk_for_calendar_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+fn walk_for_calendar_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     // `Files.walk` reads the start's attributes first and throws if it cannot.
-    let start = std::fs::symlink_metadata(root)?;
+    let start = std::fs::symlink_metadata(root).with_context(|| root.display().to_string())?;
     let mut out = Vec::new();
     collect_calendar_dirs(root, start.is_dir(), 0, &mut out)?;
     Ok(out)
@@ -413,21 +447,37 @@ fn walk_for_calendar_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 /// `Files.walk` without `FOLLOW_LINKS` does not descend through a symlink, while the
 /// `Files.isDirectory` in the filter *does* follow it — so a symlink named `Calendar`
 /// that points at a directory matches but is not walked into. Both halves measured.
+///
+/// An entry that vanishes between the listing and the read (`NotFound`) is skipped,
+/// and the walk goes on. The vault is written by background syncs, so that race is
+/// ordinary. This is the second deliberate divergence next to C26: the incumbent
+/// gives up on the whole walk there. Any other error carries the path that failed.
 fn collect_calendar_dirs(
     path: &Path,
     descendable: bool,
     depth: usize,
     out: &mut Vec<PathBuf>,
-) -> std::io::Result<()> {
+) -> Result<()> {
     if path.file_name().is_some_and(|name| name == "Calendar") && path.is_dir() {
         out.push(path.to_path_buf());
     }
     if !descendable || depth == MAX_WALK_DEPTH {
         return Ok(());
     }
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let child_is_real_dir = entry.file_type()?.is_dir();
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| path.display().to_string()),
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| path.display().to_string())?;
+        let child_is_real_dir = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| entry.path().display().to_string());
+            }
+        };
         collect_calendar_dirs(&entry.path(), child_is_real_dir, depth + 1, out)?;
     }
     Ok(())
@@ -1023,13 +1073,114 @@ mod tests {
         );
     }
 
-    /// `TimeNormalizer.kt:26`. A knowledge base that cannot be walked is not an error;
-    /// it makes every entry scalable work.
+    /// `TimeNormalizer.kt:26`. A knowledge base that cannot be walked is not an error
+    /// here; it makes every entry scalable work. `settle` does not go through this
+    /// path: [`TimeNormalizer::for_settle`] fails instead, as the tests below show.
     #[test]
     fn a_knowledge_base_that_cannot_be_walked_yields_no_meetings() {
         let normalizer = offline();
         assert!(normalizer.calendar_dirs().is_empty());
         assert!(!normalizer.is_meeting_entry(&calendar_entry("AI Heads Sync")));
+    }
+
+    /// `for_settle` on a root that does not exist names the root and the key.
+    #[test]
+    fn for_settle_fails_on_a_missing_root() {
+        let dir = TempDir::new().expect("temp dir");
+        let missing = dir.path().join("no-vault-here");
+        let message = format!(
+            "{:#}",
+            TimeNormalizer::for_settle(&missing)
+                .err()
+                .expect("must fail")
+        );
+        assert!(
+            message.contains("knowledge_base in ~/.tt-config.yaml"),
+            "{message}"
+        );
+        assert!(message.contains("no-vault-here"), "{message}");
+    }
+
+    #[test]
+    fn for_settle_fails_on_a_file_instead_of_a_directory() {
+        let kb = knowledge_base(&["vault.md"]);
+        let message = format!(
+            "{:#}",
+            TimeNormalizer::for_settle(&kb.path().join("vault.md"))
+                .err()
+                .expect("must fail")
+        );
+        assert!(message.contains("is not a directory"), "{message}");
+    }
+
+    /// The case the incumbent cannot see: the root exists, but it is not the vault.
+    #[test]
+    fn for_settle_fails_on_a_directory_without_any_calendar() {
+        let kb = knowledge_base(&["Work/Notes/plain.md"]);
+        let message = format!(
+            "{:#}",
+            TimeNormalizer::for_settle(kb.path())
+                .err()
+                .expect("must fail")
+        );
+        assert!(message.contains("has no Calendar folder"), "{message}");
+    }
+
+    #[test]
+    fn for_settle_finds_meetings_in_a_real_vault() {
+        let kb = knowledge_base(&["Work/Calendar/AI Heads Sync 2026-09-18.md"]);
+        let normalizer = TimeNormalizer::for_settle(kb.path()).expect("a vault with a Calendar");
+        assert!(normalizer.is_meeting_entry(&calendar_entry("AI Heads Sync")));
+    }
+
+    /// The vault may be reached through a symlink. The walk never descends through
+    /// one, so `for_settle` resolves the root before walking.
+    #[cfg(unix)]
+    #[test]
+    fn for_settle_follows_a_symlinked_root() {
+        let kb = knowledge_base(&["vault/Work/Calendar/AI Heads Sync 2026-09-18.md"]);
+        let link = kb.path().join("link-to-vault");
+        std::os::unix::fs::symlink(kb.path().join("vault"), &link).expect("symlink");
+        let normalizer = TimeNormalizer::for_settle(&link).expect("the symlink is followed");
+        assert!(normalizer.is_meeting_entry(&calendar_entry("AI Heads Sync")));
+    }
+
+    /// Restores a directory's permissions on drop, before its `TempDir` is removed.
+    #[cfg(unix)]
+    struct RestoreMode(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// An unreadable folder partway through the walk stops `settle` with that
+    /// folder's path, rather than turning into "no Calendar folder" and pointing the
+    /// operator at the config.
+    #[cfg(unix)]
+    #[test]
+    fn for_settle_reports_an_unreadable_folder_by_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let kb = knowledge_base(&["Work/Calendar/AI Heads Sync 2026-09-18.md", "Locked/x.md"]);
+        let locked = kb.path().join("Locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        let _restore = RestoreMode(locked.clone());
+        assert!(
+            fs::read_dir(&locked).is_err(),
+            "a folder with mode 000 was readable: this test needs to run as a non-root user"
+        );
+
+        let message = format!(
+            "{:#}",
+            TimeNormalizer::for_settle(kb.path())
+                .err()
+                .expect("must fail")
+        );
+        assert!(message.contains("Locked"), "{message}");
+        assert!(!message.contains("has no Calendar folder"), "{message}");
     }
 
     /// The date in the candidate filenames is `LocalDate.toString()`, i.e. ISO

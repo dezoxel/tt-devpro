@@ -1,161 +1,176 @@
-//! Portal session cookie resolution — C20.
+//! Portal session cookie resolution — C20, reworked.
 //!
-//! Ports `Main.kt:21-40`. Refreshing the cookie needs a host-side browser login
-//! (`make auth`) that drives a GUI browser through Playwright, so this module only
-//! ever reads what is already saved.
+//! The incumbent (`Main.kt:21-40`) read `~/.tt-cookie` and fell back to `TT_COOKIE`.
+//! The cookie no longer lives on disk: `make auth` writes it into 1Password, and
+//! `session_cookie` in `~/.tt-config.yaml` holds the secret reference. Every run
+//! reads it through `op read`, which asks for approval each time. `TT_COOKIE` still
+//! stands in when it is set, and now comes first, since there is no file to prefer.
 //!
-//! Live parity cannot reach any of this. The run has a valid cookie on disk, and
-//! every other branch needs it removed — so the unit tests below are the only
-//! oracle C20 has. That is why the resolution is a pure function of its two inputs
-//! and the I/O sits in a thin wrapper above it.
+//! The resolution is a pure function of its inputs ([`resolve`]); the I/O — the
+//! environment, the config, the `op` process — sits in the thin wrapper above it.
 
-use anyhow::{Result, anyhow, bail};
-use std::path::PathBuf;
+use anyhow::{Context, Result, bail};
+use std::process::Command;
 
 pub const COOKIE_ENV: &str = "TT_COOKIE";
 
-/// `Main.kt:22`. `dirs::home_dir()` rather than the JVM's `user.home` — see C30
-/// for why the two differ only under an overridden `$HOME`.
-pub fn cookie_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("Could not determine the home directory"))?;
-    Ok(home.join(".tt-cookie"))
+/// The command that issues a fresh cookie, with the repository this binary was built
+/// from. Taken from the build rather than written down, so it stays right wherever
+/// the repository lives.
+#[macro_export]
+macro_rules! auth_command {
+    () => {
+        concat!("make -C ", env!("CARGO_MANIFEST_DIR"), " auth")
+    };
 }
+
+/// The message for a run that has neither `TT_COOKIE` nor a reference to read.
+pub const MISSING_COOKIE: &str = concat!(
+    "No Dev.Pro session cookie found. Set session_cookie in ~/.tt-config.yaml to its ",
+    "1Password reference and run '",
+    auth_command!(),
+    "' to issue one."
+);
 
 pub fn session_cookie() -> Result<String> {
-    let path = cookie_path()?;
-    let file_contents = if path.exists() {
-        std::fs::read_to_string(&path).ok()
-    } else {
-        None
+    let env_value = std::env::var(COOKIE_ENV).ok();
+    // The config is read for the reference alone, and only when the environment does
+    // not already answer. A missing config file means no reference, so the message is
+    // about the cookie, not about the config.
+    let reference = match env_value.as_deref() {
+        Some(value) if !value.is_empty() => None,
+        _ => configured_reference()?,
     };
-    resolve(
-        file_contents.as_deref(),
-        std::env::var(COOKIE_ENV).ok().as_deref(),
-    )
+    resolve(env_value.as_deref(), reference.as_deref(), op_read)
 }
 
-/// The whole of `Main.kt:24-39` once the two lookups are parameters.
-///
-/// The asymmetry in the middle is the part a port loses: `Main.kt:27` calls
-/// `.trim()` on the file contents and `Main.kt:34` does not call it on the environment
-/// value, so `TT_COOKIE=" abc "` is used with its spaces intact. It is reproduced
-/// rather than tidied up, because a cookie header is sent verbatim and "obviously
-/// harmless whitespace" is exactly the kind of difference that turns into a 401
-/// nobody can explain.
-pub fn resolve(file_contents: Option<&str>, env_value: Option<&str>) -> Result<String> {
-    if let Some(contents) = file_contents {
-        let trimmed = contents.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+fn configured_reference() -> Result<Option<String>> {
+    let path = crate::config::config_path()?;
+    if !path.exists() {
+        return Ok(None);
     }
+    Ok(crate::config::load_from(&path)?.session_cookie)
+}
 
+/// `op read --no-newline <reference>`. The value goes back to the caller and is never
+/// printed; `op`'s own stderr is kept for the error, since it says why the read failed
+/// (the approval was dismissed, the item is gone).
+fn op_read(reference: &str) -> Result<String> {
+    let output = Command::new("op")
+        .args(["read", "--no-newline", reference])
+        .output()
+        .context("running `op` (the 1Password CLI) to read the session cookie")?;
+    if !output.status.success() {
+        bail!(
+            "1Password could not read {reference}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    String::from_utf8(output.stdout).context("the session cookie in 1Password is not UTF-8")
+}
+
+/// The whole resolution once the three lookups are parameters.
+///
+/// `TT_COOKIE` is used as it came, spaces included: a cookie header is sent verbatim,
+/// and "obviously harmless whitespace" is the kind of difference that turns into a
+/// 401 nobody can explain. The value from 1Password is trimmed, because the item is
+/// edited by hand as well as by `make auth`.
+pub fn resolve(
+    env_value: Option<&str>,
+    reference: Option<&str>,
+    read: impl FnOnce(&str) -> Result<String>,
+) -> Result<String> {
     if let Some(value) = env_value {
         if !value.is_empty() {
             return Ok(value.to_string());
         }
     }
 
-    bail!("No Dev.Pro session cookie found. Run 'make auth' on your host machine to create one.")
+    let Some(reference) = reference else {
+        bail!(MISSING_COOKIE)
+    };
+    let value = read(reference)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!(
+            "{reference} is empty. Run '{}' to issue a session cookie.",
+            auth_command!()
+        );
+    }
+    Ok(trimmed.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// C20, case 1. `Main.kt:25-30`: the file wins whenever it has content.
-    #[test]
-    fn the_file_wins_over_the_environment() {
-        let cookie = resolve(Some("from-file"), Some("from-env")).expect("resolves");
-        assert_eq!(cookie, "from-file");
+    const REFERENCE: &str = "op://Dev.Pro/TT DevPro Session/credential";
+
+    fn never_read(_: &str) -> Result<String> {
+        panic!("the reference must not be read")
     }
 
-    /// C20, case 2. `Main.kt:26-27`: the file is read, trimmed, and only then
-    /// tested for emptiness — so a file holding nothing but whitespace falls
-    /// through rather than returning an empty cookie.
     #[test]
-    fn a_whitespace_only_file_falls_through_to_the_environment() {
-        let cookie = resolve(Some("  \n\t "), Some("from-env")).expect("resolves");
+    fn the_environment_wins_and_1password_is_not_asked() {
+        let cookie = resolve(Some("from-env"), Some(REFERENCE), never_read).expect("resolves");
         assert_eq!(cookie, "from-env");
     }
 
-    #[test]
-    fn an_empty_file_falls_through_to_the_environment() {
-        let cookie = resolve(Some(""), Some("from-env")).expect("resolves");
-        assert_eq!(cookie, "from-env");
-    }
-
-    /// A missing file is a different input from an empty one, and both reach the
-    /// environment.
-    #[test]
-    fn a_missing_file_falls_through_to_the_environment() {
-        let cookie = resolve(None, Some("from-env")).expect("resolves");
-        assert_eq!(cookie, "from-env");
-    }
-
-    /// C20, case 3. `Main.kt:27`: the file value is trimmed before it is returned,
-    /// so the surrounding newline `make auth` leaves behind never reaches a header.
-    #[test]
-    fn the_file_value_is_trimmed() {
-        let cookie = resolve(Some("\n  SESSION=abc123  \n"), None).expect("resolves");
-        assert_eq!(cookie, "SESSION=abc123");
-    }
-
-    /// C20, case 4 — the one a port loses. `Main.kt:35` tests the environment
-    /// value for emptiness **without** trimming it, and `Main.kt:36` returns it as it
-    /// came. The asymmetry against the file branch is real behaviour, not a
-    /// transcription slip.
+    /// The environment value is not trimmed: whitespace makes it non-empty, and it is
+    /// sent as it came.
     #[test]
     fn the_environment_value_is_not_trimmed() {
-        let cookie = resolve(None, Some(" SESSION=abc123 ")).expect("resolves");
+        let cookie = resolve(Some(" SESSION=abc123 "), None, never_read).expect("resolves");
         assert_eq!(cookie, " SESSION=abc123 ");
     }
 
-    /// And the corollary: whitespace makes the environment value non-empty, so it
-    /// is returned rather than falling through to the error.
     #[test]
-    fn a_whitespace_only_environment_value_is_still_a_cookie() {
-        let cookie = resolve(None, Some(" ")).expect("resolves");
-        assert_eq!(cookie, " ");
+    fn an_empty_environment_value_falls_through_to_1password() {
+        let cookie = resolve(Some(""), Some(REFERENCE), |reference| {
+            assert_eq!(reference, REFERENCE);
+            Ok("SESSION=abc123\n".to_string())
+        })
+        .expect("resolves");
+        assert_eq!(cookie, "SESSION=abc123");
     }
 
-    /// `Main.kt:34` tests `isNotEmpty()`, so an empty string is skipped even
-    /// though the variable is set.
     #[test]
-    fn an_empty_environment_value_is_skipped() {
-        let err = resolve(None, Some("")).expect_err("must not resolve");
-        assert!(err.to_string().contains("make auth"));
+    fn neither_source_names_the_setting_and_the_auth_command() {
+        let message = resolve(None, None, never_read)
+            .expect_err("must fail")
+            .to_string();
+        assert_eq!(message, MISSING_COOKIE);
+        assert!(message.contains("session_cookie"), "{message}");
+        assert!(message.contains(env!("CARGO_MANIFEST_DIR")), "{message}");
     }
 
-    /// C20, case 5. `Main.kt:39` — the message names the command that fixes it,
-    /// and that wording is what the operator acts on.
     #[test]
-    fn neither_source_gives_the_make_auth_instruction() {
-        let err = resolve(None, None).expect_err("must not resolve");
-        assert_eq!(
-            err.to_string(),
-            "No Dev.Pro session cookie found. Run 'make auth' on your host machine to create one."
-        );
+    fn a_failed_read_is_reported_as_it_came() {
+        let message = resolve(None, Some(REFERENCE), |_| {
+            bail!("authorization prompt dismissed")
+        })
+        .expect_err("must fail")
+        .to_string();
+        assert_eq!(message, "authorization prompt dismissed");
     }
 
-    /// Both sources empty is the same failure as neither being present.
     #[test]
-    fn an_empty_file_and_an_empty_environment_value_fail_together() {
-        assert!(resolve(Some("   "), Some("")).is_err());
+    fn an_empty_item_asks_for_auth() {
+        let message = resolve(None, Some(REFERENCE), |_| Ok("  \n".to_string()))
+            .expect_err("must fail")
+            .to_string();
+        assert!(message.contains(auth_command!()), "{message}");
     }
 
     /// A cookie is `name=value` and may carry `=` in the value; nothing here may
     /// split or re-encode it.
     #[test]
-    fn the_value_is_returned_verbatim_apart_from_the_file_trim() {
+    fn the_value_is_returned_verbatim_apart_from_the_trim() {
         let raw = "SESSION=eyJhbGciOi==; Path=/; Domain=.dev.pro";
-        assert_eq!(resolve(Some(raw), None).unwrap(), raw);
-        assert_eq!(resolve(None, Some(raw)).unwrap(), raw);
-    }
-
-    /// Interior whitespace is not touched — only the ends, and only for the file.
-    #[test]
-    fn interior_whitespace_survives_the_trim() {
-        assert_eq!(resolve(Some("  a=1; b=2  "), None).unwrap(), "a=1; b=2");
+        assert_eq!(resolve(Some(raw), None, never_read).unwrap(), raw);
+        assert_eq!(
+            resolve(None, Some(REFERENCE), |_| Ok(raw.to_string())).unwrap(),
+            raw
+        );
     }
 }

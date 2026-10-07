@@ -65,11 +65,18 @@ pub(crate) enum Failure {
 /// `TtApiClient.kt:76-77`, verbatim — including the leading blank line that
 /// `println("\n…")` produces, and the U+274C cross mark copied from the source
 /// rather than retyped.
-const AUTH_FAILURE_NOTICE: &str = "\n❌ Dev.Pro Time Tracking Portal session expired or invalid.\n   Run 'make auth' on your host machine to refresh the session.\n";
+const AUTH_FAILURE_NOTICE: &str = concat!(
+    "\n❌ Dev.Pro Time Tracking Portal session expired or invalid.\n   Run '",
+    crate::auth_command!(),
+    "' to refresh the session.\n"
+);
 
 /// `TtApiClient.kt:78`. The dash is U+2014.
-const AUTH_FAILURE_MESSAGE: &str =
-    "Authentication failed. Session cookie expired — run 'make auth'.";
+const AUTH_FAILURE_MESSAGE: &str = concat!(
+    "Authentication failed. Session cookie expired — run '",
+    crate::auth_command!(),
+    "'."
+);
 
 /// `HttpResponse.checkAndParse`'s status gate (`TtApiClient.kt:48-56`).
 ///
@@ -490,12 +497,20 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(sink).expect("utf-8"),
-            "\n\u{274c} Dev.Pro Time Tracking Portal session expired or invalid.\n   Run 'make auth' on your host machine to refresh the session.\n"
+            concat!(
+                "\n\u{274c} Dev.Pro Time Tracking Portal session expired or invalid.\n   Run '",
+                crate::auth_command!(),
+                "' to refresh the session.\n"
+            )
         );
         assert_eq!(error.status_code, 401);
         assert_eq!(
             error.message,
-            "Authentication failed. Session cookie expired \u{2014} run 'make auth'."
+            concat!(
+                "Authentication failed. Session cookie expired \u{2014} run '",
+                crate::auth_command!(),
+                "'."
+            )
         );
     }
 
@@ -816,7 +831,11 @@ mod tests {
         assert_eq!(api.status_code, 401);
         assert_eq!(
             api.message,
-            "Authentication failed. Session cookie expired \u{2014} run 'make auth'."
+            concat!(
+                "Authentication failed. Session cookie expired \u{2014} run '",
+                crate::auth_command!(),
+                "'."
+            )
         );
         server.requests();
     }
