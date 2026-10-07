@@ -120,8 +120,15 @@ function sessionCookieReference() {
 // Runs `op` with the given stdin and returns its stdout. Each call asks for
 // approval in 1Password. stdout is returned, never printed: for `read` and
 // `item get` it holds the cookie.
+//
+// With stdin, `op` runs behind `cat |` in sh. Node hands a child its stdin as a
+// socket, and `op` reads a JSON item from stdin only when stdin is a pipe: given
+// the socket, `item create` failed asking for `--category`. The cookie still
+// travels on stdin only, never in argv or on disk.
 function op(args, input) {
-    const result = spawnSync('op', args, { input, encoding: 'utf8' });
+    const result = input === undefined
+        ? spawnSync('op', args, { encoding: 'utf8' })
+        : spawnSync('sh', ['-c', 'cat | op "$@"', 'sh', ...args], { input, encoding: 'utf8' });
     if (result.error) throw new Error(`cannot run op (the 1Password CLI): ${result.error.message}`);
     if (result.status !== 0) {
         const error = new Error(`op ${args.slice(0, 2).join(' ')} failed: ${result.stderr.trim()}`);
