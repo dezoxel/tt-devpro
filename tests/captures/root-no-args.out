@@ -1,0 +1,11 @@
+Usage: tt-devpro [<options>] <command> [<args>]...
+
+  Settle Dev.Pro time reports from Chrono
+
+Options:
+  -h, --help  Show this message and exit
+
+Commands:
+  settle   Plan worklogs from Chrono and show them; --apply writes the plan to DevPro
+  api      Direct API calls to Time Tracking Portal
+  mapping  Manage Chrono → DevPro project mappings in the config

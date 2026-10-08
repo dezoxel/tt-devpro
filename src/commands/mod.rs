@@ -27,8 +27,8 @@
 
 pub mod api;
 pub mod holidays;
+pub mod mapping;
 pub mod settle;
-pub mod settle_render;
 pub mod settle_window;
 
 use crate::service::normalizer::java_min;
@@ -58,6 +58,28 @@ impl Outcome {
             Outcome::Ok => 0,
             Outcome::Failed => 1,
         }
+    }
+}
+
+/// Where a command writes, behind a seam a test can record. No command reads the keyboard:
+/// `settle` stopped prompting when the plan became a file the agent edits.
+pub trait Console {
+    /// One line on stdout.
+    fn out(&mut self, line: &str);
+    /// One line on stderr.
+    fn err(&mut self, line: &str);
+}
+
+/// The production [`Console`].
+pub struct Stdio;
+
+impl Console for Stdio {
+    fn out(&mut self, line: &str) {
+        println!("{line}");
+    }
+
+    fn err(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 }
 
@@ -238,19 +260,14 @@ pub fn usage_error(usage: &str, messages: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Kotlin's two ways of reading a number out of a string
+// Kotlin's way of reading a number out of a string
 // ---------------------------------------------------------------------------
 //
-// `ApiCommand.kt:120` uses `String.toDouble()` and `SettleCommand.kt:765` uses
-// `String.toDoubleOrNull()`. They are the same parser: `toDoubleOrNull` screens
-// the input against `ScreenFloatValueRegEx` and then calls `parseDouble` anyway,
-// and the screen was measured to accept exactly what `parseDouble` accepts.
-// Measured by calling the shipped `kotlin-stdlib-1.9.22.jar`'s own function over a
-// 49-value corpus — `~/.cache/tt-devpro-rewrite/measurements/kotlin/NumProbe.java`
-// and `toOrNull.out` — rather than read off the regex: `0x1p3` is accepted (8.0),
-// `0x10` is not, `010` is decimal 10, `\u00a0` is not whitespace and `1_000` is
-// not a number. So one parser serves both, and the hex divergence named in
-// [`api`]'s `parse_hours` applies to the settle prompt too.
+// `ApiCommand.kt:120` uses `String.toDouble()`. Measured by calling the shipped
+// `kotlin-stdlib-1.9.22.jar`'s own function over a 49-value corpus —
+// `~/.cache/tt-devpro-rewrite/measurements/kotlin/NumProbe.java` and `toOrNull.out` —
+// rather than read off the regex: `0x1p3` is accepted (8.0), `0x10` is not, `010` is
+// decimal 10, `\u00a0` is not whitespace and `1_000` is not a number.
 
 /// The measured `Double.parseDouble` surface, including its two error messages.
 pub fn java_parse_double(raw: &str) -> Result<f64, String> {
@@ -310,17 +327,6 @@ fn parse_trimmed_double(trimmed: &str) -> Option<f64> {
         body.to_string()
     };
     signed.parse::<f64>().ok()
-}
-
-/// Kotlin's `String.toDoubleOrNull()` — `SettleCommand.kt:765`, the `New hours:`
-/// prompt. Same accepted set as [`java_parse_double`], with `None` where that one
-/// returns its message, because the caller has its own: `Invalid. Must be >= 0.25`.
-pub fn kotlin_double_or_null(raw: &str) -> Option<f64> {
-    let trimmed = raw.trim_matches(|c: char| c <= ' ');
-    if trimmed.is_empty() {
-        return None;
-    }
-    parse_trimmed_double(trimmed)
 }
 
 #[cfg(test)]

@@ -153,6 +153,11 @@ pub(crate) mod stub {
         captured: Arc<Mutex<Vec<CapturedRequest>>>,
     }
 
+    /// A canned "response" that answers nothing: the server reads the request and leaves
+    /// the connection open past the client's timeout, which is how a write whose answer
+    /// never came looks from the client.
+    pub(crate) const STALL: &str = "<stall>";
+
     /// `HTTP/1.1 200 OK` with a JSON body.
     pub(crate) fn json_200(body: &str) -> String {
         response(200, "OK", "application/json", body)
@@ -210,10 +215,19 @@ pub(crate) mod stub {
                         .set_nonblocking(false)
                         .expect("the accepted socket goes back to blocking");
                     let request = read_request(&mut stream);
-                    stream
-                        .write_all(canned.as_bytes())
-                        .expect("write the canned response");
-                    stream.flush().ok();
+                    if canned == STALL {
+                        // Held open in its own thread so the next request is served
+                        // while this one waits out the client's timeout.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_secs(3));
+                            drop(stream);
+                        });
+                    } else {
+                        stream
+                            .write_all(canned.as_bytes())
+                            .expect("write the canned response");
+                        stream.flush().ok();
+                    }
                     sink.lock().expect("the capture lock").push(request);
                     served += 1;
                 }

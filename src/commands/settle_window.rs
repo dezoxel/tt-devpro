@@ -33,7 +33,11 @@
 //!   a `.distinct().sorted()` list today (`SettleCommand.kt:242-243`), which is
 //!   exactly what would hide a sort introduced here.
 
-use chrono::NaiveDate;
+use std::collections::HashMap;
+
+use chrono::{Datelike, NaiveDate, Weekday};
+
+use crate::commands::holidays::is_us_federal_holiday;
 
 /// The last date `settle` may propose. Yesterday by default; `include_today`
 /// moves it to today for the rare deliberate case (closing the books early
@@ -130,6 +134,78 @@ pub fn nothing_to_settle_message(not_final: &[NaiveDate], today: NaiveDate) -> S
             describe_not_final_days(not_final, today)
         )
     }
+}
+
+/// `SettleCommand.kt:197` — `today.minusDays(45)`. Named here because the number
+/// is the whole of the scan's lower bound and the project's own CLAUDE.md quotes
+/// it ("Scans the last 45 days").
+pub const SCAN_DAYS: u64 = 45;
+
+/// A day DevPro holds at this many hours is closed.
+const FULL_DAY_HOURS: f64 = 8.0;
+
+/// `SettleCommand.kt:115`'s `ResolvedRange`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedRange {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+}
+
+/// C22. Fills in the ends the user did not type, under the rule "any date you
+/// didn't type is a completed date", and returns the stderr note when the
+/// resolved upper end reaches past the cutoff.
+///
+/// The comparison is against `cutoff`, **not** `today`: under `--include-today`
+/// the cutoff *is* today, and a note saying the range runs "past the last
+/// completed day" about the very day that flag just made settleable would
+/// contradict itself.
+///
+/// The note is returned rather than printed so the two call sites
+/// (`SettleCommand.kt:99`, `SettleCommand.kt:286`) can stay the only place a stream is chosen.
+pub fn resolve_range(
+    from: Option<NaiveDate>,
+    to: Option<NaiveDate>,
+    today: NaiveDate,
+    cutoff: NaiveDate,
+) -> (ResolvedRange, Option<String>) {
+    let range = ResolvedRange {
+        // `LocalDate.now().withDayOfMonth(1)`. Day 1 exists in every month, so the
+        // `expect` is unreachable for any date `chrono` can represent.
+        from: from.unwrap_or_else(|| today.with_day(1).expect("every month has a first day")),
+        to: to.unwrap_or(cutoff),
+    };
+    let note = if range.to > cutoff {
+        Some(format!(
+            "\u{2139} Range ends {}, past the last completed day ({cutoff}) \u{2014} those days' hours aren't final.",
+            range.to
+        ))
+    } else {
+        None
+    };
+    (range, note)
+}
+
+/// C16's filter, lifted out of the fetch so it can be tested without a portal.
+///
+/// A day is offered when it has Chrono data, is logged under 8h in DevPro, is not
+/// a weekend and is not a US federal holiday. `devpro_hours_by_day` missing a day
+/// means zero hours, which is the common case — a day nobody has touched.
+///
+/// The comparison is `< 8.0` on the portal's own figure, not on a rounded one: a
+/// day logged at 7.99h is unfilled and a day at 8.0h is not.
+pub fn unfilled_days(
+    settleable: &[NaiveDate],
+    devpro_hours_by_day: &HashMap<NaiveDate, f64>,
+) -> Vec<NaiveDate> {
+    settleable
+        .iter()
+        .copied()
+        .filter(|day| {
+            let hours = devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
+            let weekend = matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
+            hours < FULL_DAY_HOURS && !weekend && !is_us_federal_holiday(*day)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -729,5 +805,162 @@ mod tests {
         assert_eq!(vec![today()], window.settleable);
         let notice = describe_not_final_days(&window.not_final, today());
         assert_eq!("2026-08-14 — those days haven't happened yet.", notice);
+    }
+
+    // -----------------------------------------------------------------------
+    // C22 — the explicit range
+    // -----------------------------------------------------------------------
+
+    /// `LocalDate.now().withDayOfMonth(1)`, and not "45 days back" — the two
+    /// coincide for no month.
+    #[test]
+    fn an_unspecified_from_is_the_first_of_the_month_today_falls_in() {
+        let (range, note) = resolve_range(
+            None,
+            Some(d("2026-09-20")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert_eq!(range.from, d("2026-09-01"));
+        assert_eq!(note, None);
+    }
+
+    /// The upper default is the cutoff, which under `--include-today` is today and
+    /// otherwise yesterday. A port defaulting to `today` settles an unfinished day.
+    #[test]
+    fn an_unspecified_to_is_the_cutoff_and_not_today() {
+        let (range, _) = resolve_range(
+            Some(d("2026-09-01")),
+            None,
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert_eq!(range.to, d("2026-09-21"));
+
+        let (included, _) = resolve_range(
+            Some(d("2026-09-01")),
+            None,
+            d("2026-09-22"),
+            d("2026-09-22"),
+        );
+        assert_eq!(included.to, d("2026-09-22"));
+    }
+
+    /// C22's rule: an explicit range is honoured verbatim and the note is
+    /// non-blocking. A port that clamped `to` to the cutoff would pass every other
+    /// test here.
+    #[test]
+    fn a_to_past_the_cutoff_is_honoured_and_carries_the_stderr_note() {
+        let (range, note) = resolve_range(
+            Some(d("2026-09-01")),
+            Some(d("2026-09-30")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert_eq!(range.to, d("2026-09-30"));
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "\u{2139} Range ends 2026-09-30, past the last completed day (2026-09-21) \u{2014} those days' hours aren't final."
+            )
+        );
+    }
+
+    /// The boundary. `>` and not `>=`, so the cutoff itself is silent.
+    #[test]
+    fn a_to_exactly_on_the_cutoff_produces_no_note() {
+        let (_, note) = resolve_range(
+            None,
+            Some(d("2026-09-21")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert_eq!(note, None);
+    }
+
+    /// The comparison is against the cutoff, not today. Under `--include-today` the
+    /// two are the same date, and a port comparing with `today` would announce that
+    /// the range runs past the last completed day about the very day the flag just
+    /// made settleable.
+    #[test]
+    fn under_include_today_a_to_of_today_produces_no_note() {
+        let (range, note) = resolve_range(
+            None,
+            Some(d("2026-09-22")),
+            d("2026-09-22"),
+            d("2026-09-22"),
+        );
+        assert_eq!(range.to, d("2026-09-22"));
+        assert_eq!(note, None);
+
+        let (_, without_the_flag) = resolve_range(
+            None,
+            Some(d("2026-09-22")),
+            d("2026-09-22"),
+            d("2026-09-21"),
+        );
+        assert!(
+            without_the_flag.is_some(),
+            "the premise: without the flag the same date is noted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C16 — which days are offered
+    // -----------------------------------------------------------------------
+
+    /// The comparison is `< 8.0` on the portal's own figure. A day at exactly 8h is
+    /// settled; a hundredth under is not.
+    #[test]
+    fn a_day_at_exactly_eight_hours_is_settled_and_a_hundredth_under_is_not() {
+        let days = vec![d("2026-09-15"), d("2026-09-16")];
+        let mut logged = HashMap::new();
+        logged.insert(d("2026-09-15"), 8.0);
+        logged.insert(d("2026-09-16"), 7.99);
+        assert_eq!(unfilled_days(&days, &logged), vec![d("2026-09-16")]);
+    }
+
+    /// A day nobody has touched is missing from the portal's map, which is zero
+    /// hours and therefore unfilled — the common case, and the one an
+    /// `unwrap_or(8.0)` style default would silently drop.
+    #[test]
+    fn a_day_the_portal_never_mentioned_counts_as_zero_hours_and_is_offered() {
+        let days = vec![d("2026-09-15")];
+        assert_eq!(unfilled_days(&days, &HashMap::new()), vec![d("2026-09-15")]);
+    }
+
+    /// 2026-09-19 is a Saturday and 2026-09-20 a Sunday. Neither is ever offered,
+    /// whatever the portal says about them.
+    #[test]
+    fn weekends_are_never_offered_even_at_zero_hours() {
+        let days = vec![
+            d("2026-09-18"),
+            d("2026-09-19"),
+            d("2026-09-20"),
+            d("2026-09-21"),
+        ];
+        assert_eq!(
+            unfilled_days(&days, &HashMap::new()),
+            vec![d("2026-09-18"), d("2026-09-21")]
+        );
+    }
+
+    /// 2026-09-07 is Labor Day. The holiday predicate is consulted for the same
+    /// reason the weekend test is: neither day is expected to hold eight hours.
+    #[test]
+    fn a_us_federal_holiday_is_never_offered() {
+        let days = vec![d("2026-09-04"), d("2026-09-07"), d("2026-09-08")];
+        assert_eq!(
+            unfilled_days(&days, &HashMap::new()),
+            vec![d("2026-09-04"), d("2026-09-08")]
+        );
+    }
+
+    /// The input order is kept — the day-by-day listing prints these in the order
+    /// this returns them.
+    #[test]
+    fn the_offered_days_keep_the_order_they_arrived_in() {
+        let days = vec![d("2026-09-18"), d("2026-09-15"), d("2026-09-16")];
+        assert_eq!(unfilled_days(&days, &HashMap::new()), days);
     }
 }

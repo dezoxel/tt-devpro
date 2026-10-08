@@ -1,145 +1,14 @@
-//! Java number formatting, reproduced.
+//! Java library behaviour the obvious Rust spelling gets wrong, reproduced.
 //!
-//! Two of this tool's three ways of printing an hour figure are JVM library
-//! behaviour rather than anything the source chose, and neither has the Rust
-//! equivalent it looks like. Both were measured against JDK 21 and `rustc` 1.91.1.
+//! - Interpolating a `Double` calls `Double.toString`, which keeps a `.0` on every whole
+//!   number and switches to `E` notation outside `[1e-3, 1e7)`. Rust's `{}` does neither.
+//!   Three of the ten distinct values in the captured `api get-worklogs` output are `1.0`,
+//!   `3.0` and `5.0`. See C32. Measured against JDK 21 and `rustc` 1.91.1; probes, raw
+//!   output and the commands: `~/.cache/tt-devpro-rewrite/measurements/fmt/README.md`.
+//! - `String.compareTo` orders by UTF-16 code unit, Rust's `str` by code point.
 //!
-//! - `String.format("%.Nf", v)` rounds the **shortest round-trip decimal
-//!   representation** of `v` HALF_UP. Rust's `{:.N}` rounds the **exact binary
-//!   value** half-to-even. `0.125` at `%.2f` is `0.13` against `0.12`, `1.005` is
-//!   `1.01` against `1.00`, and `0.25` at `%.1f` is `0.3` against `0.2` — all
-//!   three measured, all three live on this tool's data, since multiples of
-//!   `0.25` are exact in `f64` and the half-way cases are ordinary here. See C25.
-//! - Interpolating a `Double` calls `Double.toString`, which keeps a `.0` on every
-//!   whole number and switches to `E` notation outside `[1e-3, 1e7)`. Rust's `{}`
-//!   does neither. Three of the ten distinct values in the captured
-//!   `api get-worklogs` output are `1.0`, `3.0` and `5.0`. See C32.
-//!
-//! The third way is `ApiCommand.kt:132,180`, which prints the raw `String` the
-//! option carried — `--hours 8.00` prints `8.00` — and needs no helper. All three
-//! are contracts; none of them may be unified into the others.
-//!
-//! **The agreement result, which is the one worth quoting.** Over a 160 288-value
-//! corpus built from this tool's own domain — whole-second Chrono durations over
-//! 3600, quarter multiples and their sums, the normalizer's `raw * 8 / total`
-//! scaling shape, `8.0 - quarter`, and adversarial exact ties — [`java_fmt`] at
-//! one and two decimals and [`java_dbl`] match JDK 21 on **all 480 864 calls,
-//! with zero mismatches**. On the same corpus Rust's own forms miss the JVM 2 263
-//! times out of 320 576 `%.Nf` calls and 636 times out of 160 288 `{}` calls,
-//! which is what the two helpers exist to close. Probes, raw output and the
-//! commands: `~/.cache/tt-devpro-rewrite/measurements/fmt/README.md`.
-//!
-//! An earlier corpus is referred to in the plan notes, but its generator did not
-//! survive, so its divergence rate is not re-runnable and is deliberately not
-//! quoted here. The rate is in any case a property of how many exact ties a
-//! generator plants, not of this tool; the three named values above and the
-//! zero-mismatch result are the parts that mean something.
-
-/// Java's `String.format("%.Nf", v)`.
-///
-/// Verified against JDK 21 on all 160 288 values of the corpus described in the
-/// module docs, at both the one- and two-decimal widths this tool prints.
-pub fn java_fmt(v: f64, decimals: usize) -> String {
-    if v.is_nan() {
-        return "NaN".to_string();
-    }
-    if v.is_infinite() {
-        return if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
-    }
-
-    let neg = v.is_sign_negative() && v != 0.0;
-
-    // `{:?}` is the shortest round-trip representation — the same family of
-    // algorithm as `Double.toString` on JDK 19+, which is what Java rounds.
-    let shortest = format!("{:?}", v.abs());
-    let (mant, exp) = match shortest.split_once(['e', 'E']) {
-        Some((m, e)) => (m.to_string(), e.parse::<i32>().expect("exponent")),
-        None => (shortest, 0),
-    };
-    let (int_part, frac_part) = match mant.split_once('.') {
-        Some((i, f)) => (i.to_string(), f.to_string()),
-        None => (mant, String::new()),
-    };
-
-    let mut digits: Vec<u8> = int_part
-        .bytes()
-        .chain(frac_part.bytes())
-        .map(|c| c - b'0')
-        .collect();
-    let mut point = int_part.len() as i32 + exp;
-
-    let cut = point + decimals as i32;
-    if cut < 0 {
-        let zero = if decimals == 0 {
-            "0".to_string()
-        } else {
-            format!("0.{}", "0".repeat(decimals))
-        };
-        return format!("{}{}", if neg { "-" } else { "" }, zero);
-    }
-
-    let cut = cut as usize;
-    if cut < digits.len() {
-        let round_up = digits[cut] >= 5;
-        digits.truncate(cut);
-        if round_up {
-            // HALF_UP on the decimal string, carrying left.
-            let mut i = cut;
-            loop {
-                if i == 0 {
-                    digits.insert(0, 1);
-                    point += 1;
-                    break;
-                }
-                i -= 1;
-                if digits[i] == 9 {
-                    digits[i] = 0;
-                } else {
-                    digits[i] += 1;
-                    break;
-                }
-            }
-        }
-    } else {
-        while digits.len() < cut {
-            digits.push(0);
-        }
-    }
-
-    let mut s = String::new();
-    if neg {
-        s.push('-');
-    }
-    if point <= 0 {
-        s.push('0');
-        if decimals > 0 {
-            s.push('.');
-            for _ in 0..(-point) {
-                s.push('0');
-            }
-            for d in &digits {
-                s.push((b'0' + d) as char);
-            }
-        }
-    } else {
-        let p = point as usize;
-        for i in 0..p {
-            s.push((b'0' + digits.get(i).copied().unwrap_or(0)) as char);
-        }
-        if decimals > 0 {
-            s.push('.');
-            for i in p..(p + decimals) {
-                s.push((b'0' + digits.get(i).copied().unwrap_or(0)) as char);
-            }
-        }
-    }
-    s
-}
-
-/// Java's `String.format("%W.Nf", v)` — right-aligned, space-padded.
-pub fn java_fmt_width(v: f64, decimals: usize, width: usize) -> String {
-    format!("{:>width$}", java_fmt(v, decimals), width = width)
-}
+//! The `%.Nf` reproduction that used to live here went with the old settle renderer. The
+//! plan is not compared byte for byte with the Kotlin output, so it prints with `{:.2}`.
 
 /// Kotlin's `"$aDouble"`, i.e. `Double.toString`.
 ///
@@ -187,26 +56,6 @@ pub fn java_dbl(v: f64) -> String {
     format!("{sign}{}.{frac}E{exp}", &digits[..1])
 }
 
-// ---------------------------------------------------------------------------
-// Java string semantics
-// ---------------------------------------------------------------------------
-//
-// The three below are `java.lang.String` behaviour rather than number formatting,
-// and they live here for the same reason the rest of this module does: they are
-// JVM library semantics that the obvious Rust spelling gets wrong. Each had two
-// private copies before `settle.rs` needed a third — `aggregator.rs` and
-// `settle_render.rs` — which is the shape C27 warns about, so they are one copy
-// now and both of those call this one.
-
-/// `String.length` — UTF-16 code units.
-///
-/// This is the number `%-Ns` pads to and the unit `take(n)` counts, so a port
-/// that reaches for `chars().count()` is right only until a description carries
-/// an emoji. `"A\u{1F600}B"` is 4 to Java and 3 to Rust.
-pub fn utf16_len(s: &str) -> usize {
-    s.encode_utf16().count()
-}
-
 /// `java.lang.String.compareTo` — lexicographic over UTF-16 code units.
 ///
 /// Rust's `str` ordering compares UTF-8 bytes, i.e. code points. Measured
@@ -215,114 +64,9 @@ pub fn utf16_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
 
-/// `String.format("%-<width>s", s)`. Left-justified, space-padded to `width`
-/// UTF-16 units, never truncated.
-pub fn pad_right(s: &str, width: usize) -> String {
-    let len = utf16_len(s);
-    if len >= width {
-        s.to_string()
-    } else {
-        let mut padded = String::with_capacity(s.len() + (width - len));
-        padded.push_str(s);
-        for _ in 0..(width - len) {
-            padded.push(' ');
-        }
-        padded
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// `(value, %.2f, %.1f, %5.2f)` — every expectation measured on JDK 21. These
-    /// are the cases where a naive `{:.N}` prints something else.
-    const JVM_FMT_CASES: &[(f64, &str, &str, &str)] = &[
-        (0.015, "0.02", "0.0", " 0.02"),
-        (0.125, "0.13", "0.1", " 0.13"),
-        (0.175, "0.18", "0.2", " 0.18"),
-        (0.25, "0.25", "0.3", " 0.25"),
-        (0.615, "0.62", "0.6", " 0.62"),
-        (0.955, "0.96", "1.0", " 0.96"),
-        (1.005, "1.01", "1.0", " 1.01"),
-        (1.785, "1.79", "1.8", " 1.79"),
-        (2.125, "2.13", "2.1", " 2.13"),
-        (2.675, "2.68", "2.7", " 2.68"),
-        (2.695, "2.70", "2.7", " 2.70"),
-        (3.625, "3.63", "3.6", " 3.63"),
-        (4.545, "4.55", "4.5", " 4.55"),
-        (5.435, "5.44", "5.4", " 5.44"),
-        (6.345, "6.35", "6.3", " 6.35"),
-        (7.255, "7.26", "7.3", " 7.26"),
-        (8.225, "8.23", "8.2", " 8.23"),
-        (9.135, "9.14", "9.1", " 9.14"),
-        (10.045, "10.05", "10.0", "10.05"),
-        (11.165, "11.17", "11.2", "11.17"),
-        (13.85, "13.85", "13.9", "13.85"),
-        (20.95, "20.95", "21.0", "20.95"),
-        (28.125, "28.13", "28.1", "28.13"),
-        (35.125, "35.13", "35.1", "35.13"),
-        (42.15, "42.15", "42.2", "42.15"),
-        (49.25, "49.25", "49.3", "49.25"),
-        (56.55, "56.55", "56.6", "56.55"),
-        (63.625, "63.63", "63.6", "63.63"),
-        (70.85, "70.85", "70.9", "70.85"),
-        (78.05, "78.05", "78.1", "78.05"),
-        (85.125, "85.13", "85.1", "85.13"),
-        (92.25, "92.25", "92.3", "92.25"),
-        (99.35, "99.35", "99.4", "99.35"),
-        (115.25, "115.25", "115.3", "115.25"),
-        (132.125, "132.13", "132.1", "132.13"),
-        (148.625, "148.63", "148.6", "148.63"),
-        (165.25, "165.25", "165.3", "165.25"),
-        (182.125, "182.13", "182.1", "182.13"),
-        (198.625, "198.63", "198.6", "198.63"),
-        (215.25, "215.25", "215.3", "215.25"),
-        (232.125, "232.13", "232.1", "232.13"),
-        (248.625, "248.63", "248.6", "248.63"),
-    ];
-
-    #[test]
-    fn matches_the_jvm_on_every_divergent_case() {
-        for (v, two, one, width) in JVM_FMT_CASES {
-            assert_eq!(&java_fmt(*v, 2), two, "%.2f of {v}");
-            assert_eq!(&java_fmt(*v, 1), one, "%.1f of {v}");
-            assert_eq!(&java_fmt_width(*v, 2, 5), width, "%5.2f of {v}");
-        }
-    }
-
-    /// The point of the table: these are cases the obvious port gets wrong, so a
-    /// test that both implementations pass would be testing nothing.
-    #[test]
-    fn the_naive_port_really_does_diverge() {
-        let divergent = JVM_FMT_CASES
-            .iter()
-            .filter(|(v, two, one, _)| &format!("{v:.2}") != two || &format!("{v:.1}") != one)
-            .count();
-        assert!(divergent > 30, "only {divergent} of the table diverge");
-    }
-
-    /// Quantized values cannot hit a half-way case, which is why the renderer's
-    /// own sites are safe either way and only the portal-sourced and raw-duration
-    /// ones were ever at risk.
-    #[test]
-    fn quarter_hours_are_unambiguous() {
-        for n in 0..=32 {
-            let v = f64::from(n) * 0.25;
-            assert_eq!(java_fmt(v, 2), format!("{v:.2}"), "quarter {v}");
-        }
-    }
-
-    #[test]
-    fn handles_zero_and_carry_and_sign() {
-        assert_eq!(java_fmt(0.0, 2), "0.00");
-        assert_eq!(java_fmt(0.0, 0), "0");
-        assert_eq!(java_fmt(9.999, 2), "10.00");
-        assert_eq!(java_fmt(0.999, 2), "1.00");
-        assert_eq!(java_fmt(-0.125, 2), "-0.13");
-        assert_eq!(java_fmt(0.004, 2), "0.00");
-        assert_eq!(java_fmt(8.0, 2), "8.00");
-    }
 
     /// C32's table, verbatim.
     #[test]

@@ -30,6 +30,9 @@ pub struct Config {
     /// every real run uses.
     #[serde(default = "default_max_synthetic_hours")]
     pub max_synthetic_hours: f64,
+    /// The model `settle` plans with, passed to `claude -p --model` as written.
+    #[serde(default = "default_plan_model")]
+    pub plan_model: String,
     /// The Obsidian vault whose `Calendar` folders mark meetings. Required, with no
     /// default: the vault sits at a different path on each machine, and the
     /// incumbent's hard-coded `~/knowledge-base` silently found no meetings wherever
@@ -77,6 +80,10 @@ pub struct OverrideRule {
 
 fn default_max_synthetic_hours() -> f64 {
     4.0
+}
+
+fn default_plan_model() -> String {
+    "haiku".to_string()
 }
 
 /// The body of `ConfigLoader.kt:10-21`, after `trimIndent()`.

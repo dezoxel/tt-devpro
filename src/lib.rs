@@ -13,7 +13,9 @@ mod commands;
 mod config;
 mod cookie;
 mod fmt;
+mod llm;
 mod model;
+mod plan;
 mod service;
 
 pub use cli::run;

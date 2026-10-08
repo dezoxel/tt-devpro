@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, NaiveDate, TimeZone};
 
 use crate::config::{Config, OverrideRule};
 use crate::fmt::utf16_cmp;
@@ -47,6 +47,42 @@ use crate::model::{ChronoTimeEntry, DayProjectAggregate, Project};
 pub struct FallbackId {
     pub name: String,
     pub id: String,
+}
+
+/// One aggregate with the two facts about its entries the plan shows: how many merged into it
+/// and when the first of them started.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Aggregated {
+    pub aggregate: DayProjectAggregate,
+    pub entry_count: u32,
+    pub first_start: DateTime<chrono::FixedOffset>,
+}
+
+/// A Chrono line that passed the `DevPro - Work` suffix filter but has neither an override
+/// nor a mapping. It is reported, not dropped: its day cannot be planned until it is mapped.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnmappedEntry {
+    pub date: NaiveDate,
+    pub chrono_project: String,
+    pub description: String,
+    pub hours: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Aggregation {
+    pub lines: Vec<Aggregated>,
+    pub unmapped: Vec<UnmappedEntry>,
+}
+
+#[cfg(test)]
+impl Aggregation {
+    /// The aggregates alone, for the tests that pin nothing else.
+    pub fn aggregates(&self) -> Vec<DayProjectAggregate> {
+        self.lines
+            .iter()
+            .map(|line| line.aggregate.clone())
+            .collect()
+    }
 }
 
 /// `Aggregator.kt:28-31`.
@@ -74,30 +110,18 @@ pub fn entry_local_date<Tz: TimeZone>(start_time: &str, zone: &Tz) -> Result<Nai
     Ok(instant.with_timezone(zone).date_naive())
 }
 
-/// `Aggregator.kt:35-88`, with the system zone.
-pub fn aggregate(
-    entries: &[ChronoTimeEntry],
-    config: &Config,
-    date_from: Option<NaiveDate>,
-    date_to: Option<NaiveDate>,
-) -> Result<Vec<DayProjectAggregate>> {
-    aggregate_in_zone(entries, config, date_from, date_to, &Local)
-}
-
-/// The body of [`aggregate`] with the zone as a parameter.
+/// `Aggregator.kt:35-88`, with the zone as a parameter.
 ///
-/// Kotlin reads `ZoneId.systemDefault()` inline twice. Lifting it to a parameter
-/// is the same move the plan sanctions for the normalizer's knowledge-base root
-/// and the filler's RNG: production passes `Local` through [`aggregate`], and the
-/// C2 tests get to assert a fixed offset instead of asserting whatever zone the
-/// machine running them happens to sit in.
+/// Kotlin reads `ZoneId.systemDefault()` inline twice. Lifting it to a parameter lets
+/// production pass `Local` (settle carries it as its zone) and lets the C2 tests assert a
+/// fixed offset instead of whatever zone the machine running them happens to sit in.
 pub fn aggregate_in_zone<Tz: TimeZone>(
     entries: &[ChronoTimeEntry],
     config: &Config,
     date_from: Option<NaiveDate>,
     date_to: Option<NaiveDate>,
     zone: &Tz,
-) -> Result<Vec<DayProjectAggregate>> {
+) -> Result<Aggregation> {
     // `config.mappings.associateBy { it.chronoProject }` (`Aggregator.kt:41`).
     // `associateBy` puts without a guard, so a duplicated `chrono_project` keeps
     // the LAST mapping; read by key only, so a plain `insert` in order matches.
@@ -158,9 +182,13 @@ pub fn aggregate_in_zone<Tz: TimeZone>(
         }
     }
 
-    let mut aggregates: Vec<DayProjectAggregate> = Vec::with_capacity(groups.len());
+    let mut lines: Vec<Aggregated> = Vec::with_capacity(groups.len());
+    let mut unmapped: Vec<UnmappedEntry> = Vec::new();
 
     for ((date, chrono_project, description), bucket) in groups {
+        let total_seconds: i64 = bucket.iter().map(|e| e.duration.unwrap_or(0)).sum();
+        let raw_hours = total_seconds as f64 / 3600.0;
+
         // C9 — overrides are consulted before the mapping (`Aggregator.kt:63`).
         let matched = find_override(&description, &config.overrides);
 
@@ -176,15 +204,20 @@ pub fn aggregate_in_zone<Tz: TimeZone>(
                     mapping.billability.clone(),
                     None,
                 ),
-                // `Aggregator.kt:69` — `error(...)`, not a skip. The repo's own
-                // "unmapped Chrono projects are silently skipped" note describes
-                // C10's suffix filter, not this.
-                None => bail!(unmapped_project_error(&chrono_project, config)),
+                // Not a skip: the caller turns it into an error of its day, so the
+                // other days still plan and this one says what to map.
+                None => {
+                    unmapped.push(UnmappedEntry {
+                        date,
+                        chrono_project,
+                        description,
+                        hours: raw_hours,
+                    });
+                    continue;
+                }
             },
         };
 
-        let total_seconds: i64 = bucket.iter().map(|e| e.duration.unwrap_or(0)).sum();
-        let raw_hours = total_seconds as f64 / 3600.0;
         // C9's cap (`Aggregator.kt:76`). Strictly greater, so an entry landing
         // exactly on the cap keeps its own value.
         let total_hours = match max_hours {
@@ -192,7 +225,16 @@ pub fn aggregate_in_zone<Tz: TimeZone>(
             _ => raw_hours,
         };
 
-        aggregates.push(DayProjectAggregate {
+        let mut first_start: Option<DateTime<chrono::FixedOffset>> = None;
+        for entry in &bucket {
+            let start = DateTime::parse_from_rfc3339(&entry.start_time).with_context(|| {
+                format!("Could not parse Chrono start_time '{}'", entry.start_time)
+            })?;
+            if first_start.is_none_or(|first| start < first) {
+                first_start = Some(start);
+            }
+        }
+        let aggregate = DayProjectAggregate {
             date,
             chrono_project,
             total_hours,
@@ -205,19 +247,25 @@ pub fn aggregate_in_zone<Tz: TimeZone>(
             devpro_project_name: devpro_project,
             billability,
             max_hours,
+        };
+        lines.push(Aggregated {
+            aggregate,
+            entry_count: bucket.len() as u32,
+            first_start: first_start.expect("a group holds at least one entry"),
         });
     }
 
     // `Aggregator.kt:87` — `sortedWith(compareBy(date, devproProjectName))`, a
     // stable TimSort. `sort_by`, never `sort_unstable_by`: ties keep the
     // encounter order the grouping above established (C28).
-    aggregates.sort_by(|a, b| {
+    lines.sort_by(|a, b| {
+        let (a, b) = (&a.aggregate, &b.aggregate);
         a.date
             .cmp(&b.date)
             .then_with(|| utf16_cmp(&a.devpro_project_name, &b.devpro_project_name))
     });
 
-    Ok(aggregates)
+    Ok(Aggregation { lines, unmapped })
 }
 
 /// C3. `Aggregator.kt:100-126`.
@@ -396,30 +444,6 @@ fn simple_lowercase(c: char) -> char {
     }
 }
 
-/// `Aggregator.kt:135-150`, after `trimMargin()`.
-fn unmapped_project_error(chrono_project: &str, config: &Config) -> String {
-    let configured = config
-        .mappings
-        .iter()
-        .map(|m| format!("  - {}", m.chrono_project))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        "Chrono project '{chrono_project}' has no mapping in config.\n\
-         \n\
-         Add to ~/.config/tt-devpro/config.yaml:\n\
-         \n\
-         mappings:\n\
-         \x20 - chrono_project: \"{chrono_project}\"\n\
-         \x20   devpro_project: \"YourDevProProjectName\"\n\
-         \x20   billability: \"Billable\"\n\
-         \n\
-         Currently configured projects:\n\
-         {configured}"
-    )
-}
-
 /// `Aggregator.kt:152-166`, after `trimMargin()`.
 fn devpro_not_found_error(name: &str, available: &[Project]) -> String {
     let names = available
@@ -513,6 +537,7 @@ mod tests {
             overrides,
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
+            plan_model: "haiku".to_string(),
             vault_path: "/vault".into(),
             session_cookie: None,
         }
@@ -531,7 +556,9 @@ mod tests {
     }
 
     fn run(entries: &[ChronoTimeEntry], config: &Config) -> Vec<DayProjectAggregate> {
-        aggregate_in_zone(entries, config, None, None, &edt()).expect("aggregation should succeed")
+        aggregate_in_zone(entries, config, None, None, &edt())
+            .expect("aggregation should succeed")
+            .aggregates()
     }
 
     fn live_projects() -> Vec<Project> {
@@ -1035,7 +1062,8 @@ mod tests {
         ];
 
         let result = aggregate_in_zone(&entries, &config, None, None, &edt())
-            .expect("a skipped project is not an error");
+            .expect("a skipped project is not an error")
+            .aggregates();
 
         assert_eq!(result.len(), 1, "only the Work entry survives");
         assert_eq!(result[0].chrono_project, "Practices - DevPro - Work");
@@ -1113,35 +1141,76 @@ mod tests {
         assert!(run(&[e], &practices_config()).is_empty());
     }
 
-    /// `Aggregator.kt:69`. A Chrono project that *passes* the C10 suffix filter
-    /// but has no mapping is a hard error, not a silent skip — the opposite of
-    /// the case two tests above, and the distinction the repo's one-line note
-    /// about "unmapped projects are silently skipped" blurs.
+    /// A Chrono project that *passes* the C10 suffix filter but has no mapping is reported
+    /// as unmapped, with its day, description and hours, so `settle` can fail that day alone
+    /// and say what to map — the opposite of the silent suffix filter two tests above.
     #[test]
-    fn a_work_project_with_no_mapping_is_a_hard_error_listing_the_configured_ones() {
-        let entries = vec![entry(
-            1,
-            "2026-09-18T13:00:00Z",
-            3600,
-            "Velocitor - DevPro - Work",
-            "NLP",
-        )];
-        let error = aggregate_in_zone(&entries, &practices_config(), None, None, &edt())
-            .expect_err("an unmapped Work project must be an error");
+    fn a_work_project_with_no_mapping_is_reported_as_unmapped() {
+        let entries = vec![
+            entry(
+                1,
+                "2026-09-18T13:00:00Z",
+                3600,
+                "Velocitor - DevPro - Work",
+                "NLP",
+            ),
+            entry(
+                2,
+                "2026-09-18T15:00:00Z",
+                1800,
+                "Velocitor - DevPro - Work",
+                "NLP",
+            ),
+            entry(
+                3,
+                "2026-09-18T16:00:00Z",
+                1800,
+                "Practices - DevPro - Work",
+                "Docs",
+            ),
+        ];
+        let result = aggregate_in_zone(&entries, &practices_config(), None, None, &edt())
+            .expect("an unmapped project does not fail the aggregation");
 
         assert_eq!(
-            error.to_string(),
-            "Chrono project 'Velocitor - DevPro - Work' has no mapping in config.\n\
-             \n\
-             Add to ~/.config/tt-devpro/config.yaml:\n\
-             \n\
-             mappings:\n\
-             \x20 - chrono_project: \"Velocitor - DevPro - Work\"\n\
-             \x20   devpro_project: \"YourDevProProjectName\"\n\
-             \x20   billability: \"Billable\"\n\
-             \n\
-             Currently configured projects:\n\
-             \x20 - Practices - DevPro - Work"
+            result.unmapped,
+            vec![UnmappedEntry {
+                date: day(2026, 9, 18),
+                chrono_project: "Velocitor - DevPro - Work".to_string(),
+                description: "NLP".to_string(),
+                hours: 1.5,
+            }]
+        );
+        assert_eq!(result.lines.len(), 1);
+        assert_eq!(
+            result.lines[0].aggregate.descriptions,
+            vec!["Docs".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_merged_line_counts_its_entries_and_keeps_the_earliest_start() {
+        let entries = vec![
+            entry(
+                1,
+                "2026-09-18T15:00:00Z",
+                600,
+                "Practices - DevPro - Work",
+                "Docs",
+            ),
+            entry(
+                2,
+                "2026-09-18T13:00:00Z",
+                600,
+                "Practices - DevPro - Work",
+                "Docs",
+            ),
+        ];
+        let result = aggregate_in_zone(&entries, &practices_config(), None, None, &edt()).unwrap();
+        assert_eq!(result.lines[0].entry_count, 2);
+        assert_eq!(
+            result.lines[0].first_start,
+            DateTime::parse_from_rfc3339("2026-09-18T13:00:00Z").unwrap()
         );
     }
 
@@ -1157,8 +1226,10 @@ mod tests {
             "practices - DevPro - Work",
             "Docs",
         )];
+        let result = aggregate_in_zone(&entries, &practices_config(), None, None, &edt())
+            .expect("an unmapped project does not fail the aggregation");
         assert!(
-            aggregate_in_zone(&entries, &practices_config(), None, None, &edt()).is_err(),
+            result.lines.is_empty() && result.unmapped.len() == 1,
             "a differently-cased chrono_project must not match the mapping"
         );
     }
@@ -1440,7 +1511,8 @@ mod tests {
             Some(day(2026, 9, 18)),
             &edt(),
         )
-        .expect("aggregation should succeed");
+        .expect("aggregation should succeed")
+        .aggregates();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, day(2026, 9, 18));
@@ -1466,7 +1538,8 @@ mod tests {
             None,
             &edt(),
         )
-        .expect("aggregation should succeed");
+        .expect("aggregation should succeed")
+        .aggregates();
 
         assert!(
             result.is_empty(),
@@ -1536,29 +1609,6 @@ mod tests {
         );
     }
 
-    /// C2 through the public entry point, which reads the system zone. Built from
-    /// a *local* noon so the expectation holds in any zone the test machine sits
-    /// in — the one assertion that proves `aggregate` actually wires `Local` in.
-    #[test]
-    fn the_public_entry_point_re_dates_through_the_system_zone() {
-        let local_noon = Local
-            .with_ymd_and_hms(2026, 9, 18, 12, 0, 0)
-            .single()
-            .expect("local noon is unambiguous");
-        let entries = vec![entry(
-            1,
-            &local_noon.to_rfc3339(),
-            3600,
-            "Practices - DevPro - Work",
-            "Docs",
-        )];
-
-        let result = aggregate(&entries, &practices_config(), None, None)
-            .expect("aggregation should succeed");
-
-        assert_eq!(result[0].date, day(2026, 9, 18));
-    }
-
     // =======================================================================
     // Range bounds
     // =======================================================================
@@ -1580,7 +1630,8 @@ mod tests {
             None,
             &edt(),
         )
-        .expect("aggregation should succeed");
+        .expect("aggregation should succeed")
+        .aggregates();
         assert_eq!(result.len(), 1);
     }
 
@@ -1601,7 +1652,8 @@ mod tests {
             Some(day(2026, 9, 18)),
             &edt(),
         )
-        .expect("aggregation should succeed");
+        .expect("aggregation should succeed")
+        .aggregates();
         assert_eq!(result.len(), 1);
     }
 
@@ -1639,7 +1691,8 @@ mod tests {
             Some(day(2026, 9, 18)),
             &edt(),
         )
-        .expect("aggregation should succeed");
+        .expect("aggregation should succeed")
+        .aggregates();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].date, day(2026, 9, 18));
@@ -1686,15 +1739,16 @@ mod tests {
             Some(day(2026, 9, 10)),
             &edt(),
         )
-        .expect("an inverted range is not an error");
+        .expect("an inverted range is not an error")
+        .aggregates();
         assert!(result.is_empty());
     }
 
     /// An entry filtered out by the range never reaches the mapping lookup, so an
-    /// unmapped project outside the window cannot fail the run. The filter order
-    /// at `Aggregator.kt:45-57` is what guarantees it.
+    /// unmapped project outside the window is not reported against the planned days.
+    /// The filter order at `Aggregator.kt:45-57` is what guarantees it.
     #[test]
-    fn an_unmapped_project_outside_the_range_does_not_fail_the_run() {
+    fn an_unmapped_project_outside_the_range_is_not_reported() {
         let entries = vec![
             entry(
                 1,
@@ -1718,8 +1772,9 @@ mod tests {
             None,
             &edt(),
         )
-        .expect("the unmapped entry is filtered before the mapping lookup");
-        assert_eq!(result.len(), 1);
+        .expect("aggregation succeeds");
+        assert_eq!(result.lines.len(), 1);
+        assert!(result.unmapped.is_empty());
     }
 
     // =======================================================================
@@ -1778,7 +1833,8 @@ mod tests {
         )];
 
         let result = aggregate_in_zone(&entries, &config, None, None, &edt())
-            .expect("an override is consulted before the mapping");
+            .expect("an override is consulted before the mapping")
+            .aggregates();
         assert_eq!(result[0].devpro_project_name, "Inveniam SOW #3");
     }
 

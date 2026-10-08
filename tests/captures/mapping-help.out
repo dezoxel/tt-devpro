@@ -1,0 +1,9 @@
+Usage: tt-devpro mapping [<options>] <command> [<args>]...
+
+  Manage Chrono → DevPro project mappings in the config
+
+Options:
+  -h, --help  Show this message and exit
+
+Commands:
+  add  Map a Chrono project to a DevPro project

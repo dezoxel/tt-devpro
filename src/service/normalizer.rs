@@ -1,46 +1,18 @@
-//! Port of `service/TimeNormalizer.kt` — C5 (8h normalization) and C26 (meeting
-//! detection). The Kotlin object has no tests at all (G1), so every test below is new.
+//! Meeting detection, ported from `service/TimeNormalizer.kt` (C26). The 8-hour scaling the
+//! Kotlin object also carried is gone: the plan model spreads the hours now, and a meeting is
+//! the one thing it is never allowed to stretch — which is what this probe decides.
 //!
-//! Three things here are literal translations of JVM semantics rather than the
-//! idiomatic Rust, and each one was measured against GraalVM JDK 21 before being
-//! written down:
-//!
-//! * **Quantization rounds, it does not truncate** (C27). `TimeNormalizer.kt:149` is
-//!   one of three textually identical `(hours / 0.25).roundToInt() * 0.25` copies;
-//!   the five `toInt()` sites in `SettleCommand.kt` truncate instead, and both
-//!   regimes are contracts. `0.375` becomes `0.5` here and `0.25` there.
-//! * **`roundToInt()` is Java's `Math.round`, which is not `(x + 0.5).floor()`.**
-//!   `javap -p -c` on kotlin-stdlib 1.9.22 `MathKt__MathJVMKt.roundToInt(double)`
-//!   shows NaN → `IllegalArgumentException`, saturation at the **32-bit** bounds,
-//!   then `Math.round`. And `Math.round(0.49999999999999994)` is `0` on the JVM
-//!   while `floor(0.49999999999999994 + 0.5)` is `1` — measured, not cited. So the
-//!   bit-exact algorithm is reproduced below; see [`round_to_quarter`].
-//! * **Java's `$` matches before a trailing line terminator, and `replaceAll` keeps
-//!   that terminator.** `"Event, Apr 8 2026\n"` becomes `"Event\n"` on the JVM, not
-//!   `"Event"`. A Rust regex anchored `(?:\r?\n)?$` with an empty replacement would
-//!   eat the newline and derive a different meeting filename, so the date-suffix
-//!   strip is hand-rolled to keep the terminator.
-//!
-//! Two silent swallows are preserved deliberately: a knowledge base that cannot be
-//! walked yields an empty directory list, which makes **every** entry a non-meeting
-//! rather than an error (`TimeNormalizer.kt:21-29`), and a mid-walk I/O error
-//! discards the directories already found rather than returning them — Kotlin's
-//! `try` wraps the terminal `.toList()`, so the `UncheckedIOException` takes the
-//! whole stream with it (measured).
+//! One detail is a literal translation of JVM semantics rather than idiomatic Rust, measured
+//! against GraalVM JDK 21 before being written down: **Java's `$` matches before a trailing
+//! line terminator, and `replaceAll` keeps that terminator.** `"Event, Apr 8 2026\n"` becomes
+//! `"Event\n"` on the JVM, not `"Event"`. A Rust regex anchored `(?:\r?\n)?$` with an empty
+//! replacement would eat the newline and derive a different meeting filename, so the
+//! date-suffix strip is hand-rolled to keep the terminator.
 
 use anyhow::{Context, Result, bail};
-use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
-use crate::model::{DayProjectAggregate, NormalizedAggregate};
-
-/// `TimeNormalizer.kt:14`.
-const TARGET_HOURS: f64 = 8.0;
-
-/// `TimeNormalizer.kt:15`. Public because `FillerService.kt:165` and
-/// `BorrowerService.kt:175` are the other two copies of the same constant and the
-/// same helper, and the plan expects the three to collapse into this one.
-pub const HOUR_INCREMENT: f64 = 0.25;
+use crate::model::DayProjectAggregate;
 
 /// `TimeNormalizer.kt:23`. `Files.walk(start, 10)` visits the start itself at depth
 /// 0 and descends while depth < 10, so a `Calendar` directory whose path relative to
@@ -125,123 +97,6 @@ impl TimeNormalizer {
         &self.calendar_dirs
     }
 
-    /// `TimeNormalizer.normalize` (`TimeNormalizer.kt:40-47`). Groups by date in
-    /// first-encounter order (Kotlin's `groupBy` is a `LinkedHashMap`), normalizes
-    /// each day, then stably sorts the concatenation by `(date, devproProjectName)`.
-    pub fn normalize(&self, aggregates: &[DayProjectAggregate]) -> Vec<NormalizedAggregate> {
-        let mut groups: Vec<Vec<&DayProjectAggregate>> = Vec::new();
-        for agg in aggregates {
-            match groups.iter_mut().find(|g| g[0].date == agg.date) {
-                Some(group) => group.push(agg),
-                None => groups.push(vec![agg]),
-            }
-        }
-
-        let mut out: Vec<NormalizedAggregate> = Vec::new();
-        for group in &groups {
-            out.extend(self.normalize_day(group));
-        }
-        out.sort_by(by_date_then_project);
-        out
-    }
-
-    /// `TimeNormalizer.normalizeDay` (`TimeNormalizer.kt:49-109`).
-    fn normalize_day(&self, aggregates: &[&DayProjectAggregate]) -> Vec<NormalizedAggregate> {
-        // `TimeNormalizer.kt:51-54` — flag first, hours untouched.
-        let with_meeting_flag: Vec<NormalizedAggregate> = aggregates
-            .iter()
-            .map(|agg| NormalizedAggregate {
-                original: (*agg).clone(),
-                normalized_hours: agg.total_hours,
-                is_meeting: self.is_meeting_entry(agg),
-            })
-            .collect();
-
-        // `TimeNormalizer.kt:57-58` — fixed = meetings OR anything carrying a cap.
-        let fixed_entries: Vec<NormalizedAggregate> = with_meeting_flag
-            .iter()
-            .filter(|e| e.is_meeting || e.original.max_hours.is_some())
-            .cloned()
-            .collect();
-        let fixed_hours = sum_hours(&fixed_entries);
-
-        // `TimeNormalizer.kt:61-63`.
-        let work_entries: Vec<NormalizedAggregate> = with_meeting_flag
-            .iter()
-            .filter(|e| !e.is_meeting && e.original.max_hours.is_none())
-            .cloned()
-            .collect();
-        let work_hours = sum_hours(&work_entries);
-        let total_hours = fixed_hours + work_hours;
-
-        // `TimeNormalizer.kt:66-68` — already 8h within half an increment: round
-        // everything and stop. Note what this branch does *not* do: no 0.25h floor,
-        // and no final sort.
-        if (total_hours - TARGET_HOURS).abs() < HOUR_INCREMENT / 2.0 {
-            return rounded(&with_meeting_flag);
-        }
-
-        // `TimeNormalizer.kt:71`.
-        let target_work_hours = TARGET_HOURS - fixed_hours;
-
-        // `TimeNormalizer.kt:74-76`.
-        if work_entries.is_empty() || target_work_hours <= 0.0 {
-            return rounded(&with_meeting_flag);
-        }
-
-        // `TimeNormalizer.kt:79`.
-        let scale_factor = target_work_hours / work_hours;
-
-        // `TimeNormalizer.kt:82-85` — scale, round, floor at one increment so
-        // nothing lands on zero.
-        let scaled_work: Vec<NormalizedAggregate> = work_entries
-            .iter()
-            .map(|entry| {
-                let scaled = entry.normalized_hours * scale_factor;
-                let mut copy = entry.clone();
-                copy.normalized_hours = java_max(HOUR_INCREMENT, round_to_quarter(scaled));
-                copy
-            })
-            .collect();
-
-        // `TimeNormalizer.kt:89-95`.
-        let scaled_work_total = sum_hours(&scaled_work);
-        let rounded_fixed = rounded(&fixed_entries);
-        let rounded_fixed_total = sum_hours(&rounded_fixed);
-        let adjusted_target = TARGET_HOURS - rounded_fixed_total;
-        let diff = adjusted_target - scaled_work_total;
-
-        // `TimeNormalizer.kt:97-105` — the whole residual goes to the largest scalable entry.
-        //
-        // C28: `sortedByDescending {}.first()` is a *stable* TimSort, so a tie at the
-        // top keeps the entry seen first. Rust's `max_by` returns the **last**
-        // maximum and would move hours to a different project on an ordinary day, so
-        // this is a stable `sort_by` with the comparator reversed, then `[0]`.
-        let final_work = if diff.abs() >= HOUR_INCREMENT / 2.0 && !scaled_work.is_empty() {
-            let mut sorted = scaled_work;
-            sorted.sort_by(|a, b| b.normalized_hours.total_cmp(&a.normalized_hours));
-            let mut adjusted = sorted[0].clone();
-            adjusted.normalized_hours = java_max(
-                HOUR_INCREMENT,
-                round_to_quarter(adjusted.normalized_hours + diff),
-            );
-            let mut out = vec![adjusted];
-            out.extend(sorted.into_iter().skip(1));
-            out
-        } else {
-            scaled_work
-        };
-
-        // `TimeNormalizer.kt:107-108` — fixed entries lead the concatenation, so a
-        // `(date, project)` tie between a fixed and a scaled row puts the fixed one
-        // first whatever the input order was. The early-return branches above keep
-        // the input order.
-        let mut out = rounded_fixed;
-        out.extend(final_work);
-        out.sort_by(by_date_then_project);
-        out
-    }
-
     /// `TimeNormalizer.isMeetingEntry` (`TimeNormalizer.kt:111-145`) — C26.
     pub fn is_meeting_entry(&self, agg: &DayProjectAggregate) -> bool {
         // `TimeNormalizer.kt:113-115` — admin work is a meeting unconditionally, before any I/O.
@@ -282,112 +137,14 @@ impl TimeNormalizer {
     }
 }
 
-/// `TimeNormalizer.kt:147-150` — the rounding half of C27, shared by the three
-/// identical copies the plan collapses into one.
+/// `kotlin.math.min(Double, Double)` is `Math.min`, which `f64::min` disagrees with twice,
+/// both measured on GraalVM JDK 21.0.11 (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`):
+/// `f64::min` discards NaN and hands back the other operand, and it is documented to return
+/// either operand when both are zero. The Jaro-Winkler cap in [`crate::commands`] is the
+/// caller.
 ///
-/// Not `(x / 0.25).round() * 0.25`: `f64::round` sends halves away from zero and
-/// Kotlin's sends them toward `+∞`, so `-0.375` would become `-0.5` instead of
-/// `-0.25`. Not `((x / 0.25) + 0.5).floor() * 0.25` either — that agrees with the
-/// JVM everywhere except where the `+ 0.5` itself rounds up, and
-/// `Math.round(0.49999999999999994) == 0` while `floor(… + 0.5) == 1`.
-///
-/// # Panics
-///
-/// On NaN, reproducing `roundToInt`'s `IllegalArgumentException`. This is reachable:
-/// a day whose scalable entries all have zero hours divides by zero, and `0.0 * ∞`
-/// is NaN.
-pub fn round_to_quarter(hours: f64) -> f64 {
-    f64::from(kotlin_round_to_int(hours / HOUR_INCREMENT)) * HOUR_INCREMENT
-}
-
-/// `kotlin.math.roundToInt(Double)`, read off `javap -p -c` of kotlin-stdlib 1.9.22
-/// `MathKt__MathJVMKt`: NaN throws, then saturation at the **32-bit** bounds (not
-/// 64-bit), then `Math.round`.
-fn kotlin_round_to_int(x: f64) -> i32 {
-    if x.is_nan() {
-        panic!("Cannot round NaN value.");
-    }
-    if x > f64::from(i32::MAX) {
-        return i32::MAX;
-    }
-    if x < f64::from(i32::MIN) {
-        return i32::MIN;
-    }
-    java_math_round(x) as i32
-}
-
-/// `java.lang.Math.round(double)`, transcribed from the JDK. Exact round-half-up on
-/// the bit pattern, which is why it differs from `(x + 0.5).floor()`.
-fn java_math_round(a: f64) -> i64 {
-    const SIGNIFICAND_WIDTH: i64 = 53;
-    const EXP_BIAS: i64 = 1023;
-    const EXP_BIT_MASK: u64 = 0x7ff0_0000_0000_0000;
-    const SIGNIF_BIT_MASK: u64 = 0x000f_ffff_ffff_ffff;
-
-    let long_bits = a.to_bits() as i64;
-    let biased_exp = ((a.to_bits() & EXP_BIT_MASK) >> (SIGNIFICAND_WIDTH - 1)) as i64;
-    let shift = (SIGNIFICAND_WIDTH - 2 + EXP_BIAS) - biased_exp;
-    if (shift & -64) == 0 {
-        // shift >= 0 && shift < 64
-        let mut r = ((a.to_bits() & SIGNIF_BIT_MASK) | (SIGNIF_BIT_MASK + 1)) as i64;
-        if long_bits < 0 {
-            r = -r;
-        }
-        ((r >> shift) + 1) >> 1
-    } else {
-        // Java's narrowing `(long)` cast saturates and maps NaN to 0, and so does
-        // Rust's `as`.
-        a as i64
-    }
-}
-
-/// `kotlin.comparisons.maxOf(Double, Double)` is `Math.max`, which propagates NaN and
-/// orders `-0.0` below `0.0`. `f64::max` does neither: it returns the *other* operand
-/// on NaN, and on two zeroes it is documented to return either one.
-///
-/// Measured on GraalVM JDK 21.0.11 — the toolchain the Kotlin build used — rather than
-/// recalled (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`).
-///
-/// Neither clause is reachable from this module's two call sites: both pass
-/// `HOUR_INCREMENT` as `a` and a `round_to_quarter` result as `b`, and
-/// `round_to_quarter` panics on NaN before `java_max` could see one. The
-/// transcription is kept and tested anyway, because the function is *named* as a JDK
-/// method and the next caller will take that at face value.
-pub fn java_max(a: f64, b: f64) -> f64 {
-    if a.is_nan() || b.is_nan() {
-        return f64::NAN;
-    }
-    if a == 0.0 && b == 0.0 {
-        return if a.is_sign_negative() { b } else { a };
-    }
-    if a > b { a } else { b }
-}
-
-/// `kotlin.math.min(Double, Double)` is `Math.min` — the sibling of [`java_max`], and
-/// the one whose divergence is live rather than defensive.
-///
-/// `f64::min` disagrees twice, both measured on GraalVM JDK 21.0.11
-/// (`~/.cache/tt-devpro-rewrite/measurements/maxcmp/`): it discards NaN and hands back
-/// the other operand, and it is documented to return either operand when both are
-/// zero.
-///
-/// The NaN clause is reachable from a single config line. `min_hours`, `max_hours` and
-/// `max_synthetic_hours` all come from `~/.config/tt-devpro/config.yaml`, and the two YAML parsers
-/// agree exactly on which special floats they accept — kaml 0.57.0's
-/// `YamlScalar.toDouble()` takes nine literals (`.inf`, `.Inf`, `.INF`, `-.inf`,
-/// `-.Inf`, `-.INF`, `.nan`, `.NaN`, `.NAN`, read off its bytecode) and `serde_yaml`
-/// 0.9 parses all nine to the same values. So a `max_synthetic_hours: .nan` reaches
-/// the arithmetic on both sides: the incumbent computes NaN, fails
-/// `>= HOUR_INCREMENT`, and emits nothing, while a port built on `f64::min` would hand
-/// back the real gap and fill or borrow a whole day.
-///
-/// Lives here rather than in `filler.rs` and `borrower.rs`, which both used to carry
-/// their own copy — identical in behaviour but written differently, which is how two
-/// copies of a measured divergence start to drift.
-///
-/// The signed-zero test is `b.is_sign_negative()` where the JDK compares raw bits;
-/// inside the `a == 0.0 && b == 0.0` guard the two are the same predicate, and this
-/// spelling matches [`java_max`] directly above.
+/// The signed-zero test is `b.is_sign_negative()` where the JDK compares raw bits; inside the
+/// `a == 0.0 && b == 0.0` guard the two are the same predicate.
 pub fn java_min(a: f64, b: f64) -> f64 {
     if a.is_nan() {
         return a;
@@ -396,31 +153,6 @@ pub fn java_min(a: f64, b: f64) -> f64 {
         return b;
     }
     if a <= b { a } else { b }
-}
-
-fn sum_hours(entries: &[NormalizedAggregate]) -> f64 {
-    entries.iter().map(|e| e.normalized_hours).sum()
-}
-
-fn rounded(entries: &[NormalizedAggregate]) -> Vec<NormalizedAggregate> {
-    entries
-        .iter()
-        .map(|e| {
-            let mut copy = e.clone();
-            copy.normalized_hours = round_to_quarter(copy.normalized_hours);
-            copy
-        })
-        .collect()
-}
-
-/// `compareBy({ it.original.date }, { it.original.devproProjectName })`
-/// (`TimeNormalizer.kt:46,108`).
-fn by_date_then_project(a: &NormalizedAggregate, b: &NormalizedAggregate) -> Ordering {
-    a.original.date.cmp(&b.original.date).then_with(|| {
-        a.original
-            .devpro_project_name
-            .cmp(&b.original.devpro_project_name)
-    })
 }
 
 /// Names the setting in every error [`TimeNormalizer::for_settle`] raises, so the
@@ -505,14 +237,7 @@ fn sanitize(s: &str) -> String {
 /// **The single copy.** The incumbent carries this regex three times —
 /// `TimeNormalizer.kt:32` (C26, the meeting-filename probe), `SettleCommand.kt:486`
 /// and `BorrowerService.kt:145` (both C12, the task title). They are one pattern, so
-/// they are one function here, and [`crate::commands::settle_render`] calls this one
-/// rather than keeping its own.
-///
-/// It was briefly two: this module and `settle_render` each hand-ported the regex
-/// independently, with different day-digit strategies — one arguing the greedy
-/// `\d{1,2}` needs no backtracking, the other backtracking explicitly. They were
-/// collapsed into this one, so the surviving question is not whether the two
-/// agreed with each other but whether this one agrees with the JVM.
+/// they are one function here, and the plan context's title cleaning calls this one.
 ///
 /// It does, measured 2026-09-22 over **3 338 100** adversarial inputs — the
 /// deduped product of five prefixes, five separators, eighteen month tokens
@@ -524,8 +249,8 @@ fn sanitize(s: &str) -> String {
 /// 0. Generator, both probes and the commands:
 /// `~/.cache/tt-devpro-rewrite/measurements/datecmp/README.md`.
 ///
-/// `pub` rather than private for that reason, and no third copy when
-/// `borrower.rs` needs it.
+/// `pub` because the plan context strips the same suffix from a meeting's title, and a
+/// second copy of a measured matcher is how two of them start to drift.
 pub fn strip_date_suffix(s: &str) -> String {
     let (core, terminator) = split_final_line_terminator(s);
     match date_suffix_start(core) {
@@ -600,8 +325,8 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
     }
 
-    /// A scalable work entry: not an `Operations -` project, no cap, and a description
-    /// that will not match anything on disk.
+    /// An entry that is no meeting: not an `Operations -` project, and a description that
+    /// will not match anything on disk.
     fn work(project: &str, hours: f64) -> DayProjectAggregate {
         DayProjectAggregate {
             date: date(2026, 9, 18),
@@ -614,32 +339,10 @@ mod tests {
         }
     }
 
-    /// A meeting by the `Operations -` short circuit, so no filesystem is involved.
-    fn meeting(project: &str, hours: f64) -> DayProjectAggregate {
-        DayProjectAggregate {
-            chrono_project: "Operations - DevPro - Work".to_string(),
-            ..work(project, hours)
-        }
-    }
-
-    fn capped(project: &str, hours: f64, cap: f64) -> DayProjectAggregate {
-        DayProjectAggregate {
-            max_hours: Some(cap),
-            ..work(project, hours)
-        }
-    }
-
     /// No knowledge base on disk, so `calendarDirs` is empty and only the
     /// `Operations -` short circuit can produce a meeting.
     fn offline() -> TimeNormalizer {
         TimeNormalizer::with_knowledge_base("/definitely/not/a/knowledge/base")
-    }
-
-    fn hours_by_project(result: &[NormalizedAggregate]) -> Vec<(String, f64)> {
-        result
-            .iter()
-            .map(|e| (e.original.devpro_project_name.clone(), e.normalized_hours))
-            .collect()
     }
 
     /// Builds a knowledge base whose files are given as paths relative to the root.
@@ -671,8 +374,9 @@ mod tests {
     #[test]
     fn an_operations_project_is_a_meeting_without_touching_the_filesystem() {
         let entry = DayProjectAggregate {
+            chrono_project: "Operations - DevPro - Work".to_string(),
             descriptions: vec![],
-            ..meeting("Operations", 1.0)
+            ..work("Operations", 1.0)
         };
         assert!(offline().is_meeting_entry(&entry));
     }
@@ -1220,455 +924,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C27 — quantization. `TimeNormalizer.kt:147-150`.
+    // The JDK float primitive this module owns
     // -----------------------------------------------------------------------
 
-    /// C27: this helper is the **rounding** one. `0.375` is the value that separates
-    /// it from the five truncating `toInt()` sites in `SettleCommand.kt`, which give
-    /// `0.25` for the same input. A port that unified the two regimes dies here.
-    #[test]
-    fn round_to_quarter_rounds_a_half_increment_up_rather_than_truncating() {
-        assert_eq!(round_to_quarter(0.375), 0.5);
-        assert_eq!(round_to_quarter(0.124), 0.0);
-        assert_eq!(round_to_quarter(0.125), 0.25);
-        assert_eq!(round_to_quarter(7.9999), 8.0);
-        assert_eq!(round_to_quarter(2.6666666666666665), 2.75);
-    }
-
-    /// `roundToInt()` sends halves toward `+∞`; `f64::round` sends them away from
-    /// zero. They only disagree on negatives, and the second assertion pins the naive
-    /// port's answer so the difference cannot be argued away.
-    #[test]
-    fn round_to_quarter_sends_negative_halves_toward_positive_infinity() {
-        assert_eq!(round_to_quarter(-0.375), -0.25);
-        assert_eq!((-0.375f64 / HOUR_INCREMENT).round() * HOUR_INCREMENT, -0.5);
-        assert_eq!(round_to_quarter(-2.625), -2.5);
-    }
-
-    /// `Math.round` is exact round-half-up on the bit pattern, and
-    /// `Math.round(0.49999999999999994) == 0` on the JVM while `floor(x + 0.5) == 1`.
-    /// Second assertion pins what the `(x + 0.5).floor()` recipe would have produced.
-    #[test]
-    fn round_to_quarter_matches_the_jvm_where_floor_of_x_plus_a_half_does_not() {
-        let hours = 0.49999999999999994 * HOUR_INCREMENT;
-        assert_eq!(round_to_quarter(hours), 0.0);
-        assert_eq!(
-            ((hours / HOUR_INCREMENT) + 0.5).floor() * HOUR_INCREMENT,
-            0.25
-        );
-    }
-
-    /// The measured JVM table for `Math.round`, so the transcription is checked rather
-    /// than trusted.
-    #[test]
-    fn kotlin_round_to_int_reproduces_the_measured_jvm_table() {
-        let cases: [(f64, i32); 9] = [
-            (0.49999999999999994, 0),
-            (0.5, 1),
-            (1.5, 2),
-            (2.5, 3),
-            (-2.5, -2),
-            (-0.5, 0),
-            (-1.5, -1),
-            (2.0000000000000004, 2),
-            (0.0, 0),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(kotlin_round_to_int(input), expected, "input: {input}");
-        }
-    }
-
-    /// `roundToInt` saturates at the **32-bit** bounds, not the 64-bit ones. Wholly
-    /// unreachable on real data; a three-character difference in the port.
-    #[test]
-    fn kotlin_round_to_int_saturates_at_the_32_bit_bounds() {
-        assert_eq!(kotlin_round_to_int(1e30), i32::MAX);
-        assert_eq!(kotlin_round_to_int(-1e30), i32::MIN);
-        assert_eq!(kotlin_round_to_int(f64::INFINITY), i32::MAX);
-        assert_eq!(round_to_quarter(1e30), f64::from(i32::MAX) * HOUR_INCREMENT);
-    }
-
-    /// `roundToInt` throws `IllegalArgumentException("Cannot round NaN value.")`.
-    #[test]
-    #[should_panic(expected = "Cannot round NaN value.")]
-    fn round_to_quarter_rejects_nan_the_way_kotlin_does() {
-        round_to_quarter(f64::NAN);
-    }
-
-    // -----------------------------------------------------------------------
-    // C5 — 8h normalization. `TimeNormalizer.kt:40-109`.
-    // -----------------------------------------------------------------------
-
-    /// C5, `TimeNormalizer.kt:57-85`. The meeting keeps its hours and the work entry
-    /// takes the whole adjustment.
-    #[test]
-    fn meetings_keep_their_hours_while_work_entries_are_scaled() {
-        let result = offline().normalize(&[meeting("M", 2.0), work("W", 10.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("M".to_string(), 2.0), ("W".to_string(), 6.0),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:57`. A `maxHours` cap makes an entry fixed even though
-    /// it is not a meeting.
-    #[test]
-    fn a_capped_entry_is_fixed_alongside_the_meetings() {
-        let result = offline().normalize(&[capped("C", 1.0, 1.0), work("W", 10.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("C".to_string(), 1.0), ("W".to_string(), 7.0),]
-        );
-    }
-
-    /// C5. The cap marks the entry fixed but is never applied to its hours — the value
-    /// carried forward is `totalHours`, not `maxHours`. Faithful to the incumbent, and
-    /// the reason the cap is worth its own assertion.
-    #[test]
-    fn a_capped_entry_keeps_its_actual_hours_not_its_cap() {
-        let result = offline().normalize(&[capped("C", 3.0, 1.0), work("W", 10.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("C".to_string(), 3.0), ("W".to_string(), 5.0),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:66-68`. Already 8h: round and stop.
-    #[test]
-    fn a_day_of_exactly_eight_hours_passes_through_untouched() {
-        let result = offline().normalize(&[work("A", 4.0), work("B", 4.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("A".to_string(), 4.0), ("B".to_string(), 4.0),]
-        );
-    }
-
-    /// C5. A day a ten-thousandth short of 8h is inside the shortcut and rounds to 8h.
-    #[test]
-    fn a_day_of_seven_point_nine_nine_nine_nine_hours_rounds_to_eight() {
-        let result = offline().normalize(&[work("A", 7.9999)]);
-        assert_eq!(hours_by_project(&result), vec![("A".to_string(), 8.0)]);
-    }
-
-    /// C5, `TimeNormalizer.kt:66`. The shortcut skips the 0.25h floor entirely, so a
-    /// zero-hour entry stays at zero instead of being floored — the only observable
-    /// difference between the two paths on this input.
-    #[test]
-    fn the_already_eight_shortcut_skips_the_quarter_hour_floor() {
-        let result = offline().normalize(&[work("A", 8.1), work("B", 0.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("A".to_string(), 8.0), ("B".to_string(), 0.0),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:66`. The comparison is a strict `<` against half an
-    /// increment, so 8.125 falls through to scaling. Under a `<=` the shortcut would
-    /// fire and round 8.125 up to 8.25 — which is what this asserts against.
-    #[test]
-    fn a_day_exactly_half_an_increment_over_eight_is_scaled_not_shortcut() {
-        let result = offline().normalize(&[work("A", 8.125)]);
-        assert_eq!(hours_by_project(&result), vec![("A".to_string(), 8.0)]);
-        assert_eq!(
-            round_to_quarter(8.125),
-            8.25,
-            "the shortcut would have given this"
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:74-76`. No scalable entries: round and stop, even though
-    /// the day is nowhere near 8h.
-    #[test]
-    fn a_meeting_only_day_is_only_rounded_never_scaled() {
-        let result = offline().normalize(&[meeting("A", 3.1), meeting("B", 2.2)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("A".to_string(), 3.0), ("B".to_string(), 2.25),]
-        );
-    }
-
-    /// C5. A meeting-only day over 8h stays over 8h — nothing scales meetings down.
-    #[test]
-    fn a_meeting_only_day_above_eight_hours_is_left_above_eight() {
-        let result = offline().normalize(&[meeting("A", 5.0), meeting("B", 5.0)]);
-        assert_eq!(sum_hours(&result), 10.0);
-    }
-
-    /// C5, `TimeNormalizer.kt:74`. Meetings already past 8h make the work target
-    /// negative, so the work entries are merely rounded, not scaled to a negative.
-    #[test]
-    fn a_negative_work_target_leaves_the_work_entries_only_rounded() {
-        let result = offline().normalize(&[meeting("M", 9.0), work("W", 1.1)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("M".to_string(), 9.0), ("W".to_string(), 1.0),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:74`. The guard is `<= 0`, so a target of exactly zero
-    /// takes the same exit — with `< 0` the scale factor would be 0 and the floor
-    /// would put every work entry at 0.25.
-    #[test]
-    fn a_work_target_of_exactly_zero_leaves_the_work_entries_only_rounded() {
-        let result = offline().normalize(&[meeting("M", 8.0), work("W", 1.1)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("M".to_string(), 8.0), ("W".to_string(), 1.0),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:82-85`. A near-zero entry is floored at one increment
-    /// rather than rounded away to nothing.
-    #[test]
-    fn a_tiny_work_entry_is_floored_at_a_quarter_hour_rather_than_vanishing() {
-        let result = offline().normalize(&[work("A", 0.05), work("B", 10.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("A".to_string(), 0.25), ("B".to_string(), 7.75),]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:97-102`. Three equal entries round to 8.25 between them,
-    /// and the whole −0.25 residual goes to one of them.
-    #[test]
-    fn the_rounding_residual_lands_on_a_single_entry_and_the_day_hits_eight() {
-        let result = offline().normalize(&[work("A", 1.0), work("B", 1.0), work("C", 1.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![
-                ("A".to_string(), 2.5),
-                ("B".to_string(), 2.75),
-                ("C".to_string(), 2.75),
-            ]
-        );
-        assert_eq!(sum_hours(&result), 8.0);
-    }
-
-    /// C28, `TimeNormalizer.kt:99-100`. `sortedByDescending {}.first()` is stable, so
-    /// the residual goes to the **first** of two equally large entries. Rust's
-    /// `max_by`/`max_by_key` return the last maximum and would put 3.75 on B — moving
-    /// a quarter hour between two projects on an ordinary day.
-    #[test]
-    fn the_residual_lands_on_the_first_of_two_equally_large_entries() {
-        let result = offline().normalize(&[meeting("M", 0.25), work("A", 1.0), work("B", 1.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![
-                ("A".to_string(), 3.75),
-                ("B".to_string(), 4.0),
-                ("M".to_string(), 0.25),
-            ]
-        );
-        assert_eq!(sum_hours(&result), 8.0);
-    }
-
-    /// C28, the same site with the tie broken the other way round: reversing the input
-    /// moves the residual with it, which is what makes the previous test a statement
-    /// about order rather than about project names.
-    #[test]
-    fn reversing_two_equally_large_entries_moves_the_residual_with_them() {
-        let result = offline().normalize(&[meeting("M", 0.25), work("B", 1.0), work("A", 1.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![
-                ("A".to_string(), 4.0),
-                ("B".to_string(), 3.75),
-                ("M".to_string(), 0.25),
-            ]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:99-101`. With no tie, the residual goes to the strictly
-    /// largest scaled entry — here C, not the two small ones.
-    #[test]
-    fn the_residual_lands_on_the_strictly_largest_scaled_entry() {
-        let result = offline().normalize(&[work("A", 1.0), work("B", 1.0), work("C", 5.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![
-                ("A".to_string(), 1.25),
-                ("B".to_string(), 1.25),
-                ("C".to_string(), 5.5),
-            ]
-        );
-        assert_eq!(sum_hours(&result), 8.0);
-    }
-
-    /// C5, `TimeNormalizer.kt:97`. The residual is applied only when it reaches half
-    /// an increment; a day that already lands on target is left alone.
-    #[test]
-    fn a_day_that_already_lands_on_target_gets_no_residual_adjustment() {
-        let result = offline().normalize(&[meeting("M", 2.0), work("A", 1.0), work("B", 2.0)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![
-                ("A".to_string(), 2.0),
-                ("B".to_string(), 4.0),
-                ("M".to_string(), 2.0),
-            ]
-        );
-    }
-
-    /// C5, `TimeNormalizer.kt:101`. The 0.25h floor applies to the adjusted entry too,
-    /// and it wins over the residual — so this day ends on 8.25h, not 8h. The
-    /// incumbent's guarantee is "adjust the largest entry", not "always reach 8h".
-    #[test]
-    fn the_quarter_hour_floor_beats_the_residual_and_the_day_can_overshoot_eight() {
-        let result = offline().normalize(&[meeting("M", 7.9), work("W", 0.5)]);
-        assert_eq!(
-            hours_by_project(&result),
-            vec![("M".to_string(), 8.0), ("W".to_string(), 0.25),]
-        );
-        assert_eq!(sum_hours(&result), 8.25);
-    }
-
-    /// C5. A single work entry is scaled straight onto the target.
-    #[test]
-    fn a_day_of_one_work_entry_is_scaled_to_exactly_eight() {
-        let result = offline().normalize(&[work("A", 6.4)]);
-        assert_eq!(hours_by_project(&result), vec![("A".to_string(), 8.0)]);
-    }
-
-    /// C5. A day that is one long meeting and nothing else is not touched at all.
-    #[test]
-    fn a_single_meeting_day_is_neither_scaled_nor_floored() {
-        let result = offline().normalize(&[meeting("M", 1.5)]);
-        assert_eq!(hours_by_project(&result), vec![("M".to_string(), 1.5)]);
-    }
-
-    /// C5. `workHours` is zero while `workEntries` is not empty, so the scale factor is
-    /// infinite and `0.0 * ∞` is NaN — which `roundToInt` turns into an
-    /// `IllegalArgumentException` in the incumbent. Reproduced rather than repaired:
-    /// the parity bar covers the crashes too.
-    #[test]
-    #[should_panic(expected = "Cannot round NaN value.")]
-    fn a_day_whose_only_work_entry_has_zero_hours_dies_the_way_the_incumbent_does() {
-        offline().normalize(&[meeting("M", 2.0), work("W", 0.0)]);
-    }
-
-    // -----------------------------------------------------------------------
-    // C28 — ordering. `TimeNormalizer.kt:42,46,99,108`.
-    // -----------------------------------------------------------------------
-
-    /// C5, `TimeNormalizer.kt:42-44`. Days are normalized independently; the 12h day
-    /// is scaled to 8h without borrowing anything from the 4h one.
-    #[test]
-    fn each_day_is_normalized_independently_of_the_others() {
-        let mut second = work("A", 4.0);
-        second.date = date(2026, 9, 19);
-        let result = offline().normalize(&[work("A", 12.0), second]);
-        assert_eq!(result[0].original.date, date(2026, 9, 18));
-        assert_eq!(result[0].normalized_hours, 8.0);
-        assert_eq!(result[1].original.date, date(2026, 9, 19));
-        assert_eq!(result[1].normalized_hours, 8.0);
-    }
-
-    /// C28, `TimeNormalizer.kt:46`. Output order is `(date, devproProjectName)`, not
-    /// input order.
-    #[test]
-    fn the_output_is_ordered_by_date_then_project_name() {
-        let mut earlier = work("Zeta", 4.0);
-        earlier.date = date(2026, 9, 17);
-        let result = offline().normalize(&[work("Beta", 4.0), work("Alpha", 4.0), earlier]);
-        let order: Vec<_> = result
-            .iter()
-            .map(|e| (e.original.date, e.original.devpro_project_name.as_str()))
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                (date(2026, 9, 17), "Zeta"),
-                (date(2026, 9, 18), "Alpha"),
-                (date(2026, 9, 18), "Beta"),
-            ]
-        );
-    }
-
-    /// C28, `TimeNormalizer.kt:107`. On the scaling path the concatenation is
-    /// `roundedFixed + finalWork`, so a fixed row precedes a scaled row that shares its
-    /// `(date, project)` key — whatever order they arrived in.
-    #[test]
-    fn on_the_scaling_path_a_fixed_row_precedes_a_tied_scaled_row() {
-        let result = offline().normalize(&[work("P", 9.0), meeting("P", 1.0)]);
-        assert!(result[0].is_meeting, "the meeting should lead the tie");
-        assert_eq!(result[0].normalized_hours, 1.0);
-        assert_eq!(result[1].normalized_hours, 7.0);
-    }
-
-    /// C28, `TimeNormalizer.kt:67`. The already-8h shortcut never builds that
-    /// concatenation, so the same tie keeps the input order instead. Two paths, two
-    /// answers for identical rows — worth pinning, because a port that hoisted the
-    /// sort out of the branches would quietly unify them.
-    #[test]
-    fn on_the_shortcut_path_a_tied_row_keeps_its_input_order() {
-        let result = offline().normalize(&[work("P", 7.0), meeting("P", 1.0)]);
-        assert!(
-            !result[0].is_meeting,
-            "the work entry arrived first and stays first"
-        );
-        assert_eq!(result[0].normalized_hours, 7.0);
-        assert!(result[1].is_meeting);
-    }
-
-    /// C28's cheap guard: a randomized map anywhere in the pipeline makes consecutive
-    /// runs disagree. Six rows sharing a `(date, project)` key is the shape the
-    /// captured 2026-09-18 run actually has.
-    #[test]
-    fn normalizing_the_same_input_twice_produces_the_same_output() {
-        let input: Vec<_> = (0..6).map(|_| work("Inveniam SOW #5", 1.5)).collect();
-        let normalizer = offline();
-        assert_eq!(normalizer.normalize(&input), normalizer.normalize(&input));
-    }
-
-    /// The degenerate input, which must not panic on the empty `sorted.first()`.
-    #[test]
-    fn an_empty_input_yields_an_empty_output() {
-        assert!(offline().normalize(&[]).is_empty());
-    }
-
-    /// The `isMeeting` flag computed at `TimeNormalizer.kt:52` survives into the
-    /// result — `settle.rs` reads it to decide filler and borrowing eligibility.
-    #[test]
-    fn the_meeting_flag_is_carried_through_to_the_result() {
-        let result = offline().normalize(&[meeting("M", 2.0), work("W", 10.0)]);
-        assert!(result[0].is_meeting);
-        assert!(!result[1].is_meeting);
-        assert_eq!(
-            result[0].original.chrono_project,
-            "Operations - DevPro - Work"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // The two JDK float primitives this module owns
-    // -----------------------------------------------------------------------
-
-    /// `Math.max`'s two departures from `f64::max`. Every expected value here was read
-    /// off GraalVM JDK 21.0.11, not derived.
-    ///
-    /// This test was written because the whole body of `java_max` could be replaced by
-    /// `a.max(b)` and all 490 tests still passed — measured, not suspected. The
-    /// clauses are unreachable from `normalize_day` (see the note on the function), so
-    /// nothing else in the suite can see the difference.
-    #[test]
-    fn java_max_propagates_nan_and_orders_the_zeroes_where_f64_max_does_neither() {
-        assert!(java_max(f64::NAN, 1.0).is_nan());
-        assert!(java_max(1.0, f64::NAN).is_nan());
-        // The divergence itself, so a port written on `f64::max` cannot pass.
-        assert_eq!(f64::NAN.max(1.0), 1.0);
-
-        assert!(java_max(0.0, -0.0).is_sign_positive());
-        assert!(java_max(-0.0, 0.0).is_sign_positive());
-        assert!(java_max(-0.0, -0.0).is_sign_negative());
-        assert!(java_max(0.0, 0.0).is_sign_positive());
-
-        assert_eq!(java_max(-3.0, 2.0), 2.0);
-        assert_eq!(java_max(0.25, 0.25), 0.25);
-    }
-
-    /// `Math.min`'s two departures from `f64::min`, same probe, same JDK. This is the
-    /// reachable one: `max_synthetic_hours: .nan` parses on both sides, so the answer
-    /// below decides whether a day gets silently filled to 8h or left alone.
+    /// `Math.min`'s two departures from `f64::min`, read off GraalVM JDK 21.0.11.
     ///
     /// The `f64::min` assertions are the point — they pin the divergence rather than
     /// the agreement, so a port that "simplifies" `java_min` back to `a.min(b)` fails

@@ -21,6 +21,15 @@
 //! the portal, both of which change daily; they belong to the step-6 differential
 //! harness at `~/.cache/tt-devpro-rewrite/parity/`, not here.
 //!
+//! # Where the port is its own oracle
+//!
+//! Parity with Kotlin is no longer the bar for `settle` or for the command list. Settle
+//! now plans instead of normalising, its flags were replaced, and `mapping` is new. The
+//! cases whose Kotlin bytes no longer describe the CLI — named in `PORT_CAPTURED` — are
+//! read from `tests/captures/` in this repository instead: the new binary's own output,
+//! reviewed once and pinned from then on. The Kotlin baseline stays untouched as the
+//! record of the incumbent, and every other case is still held against it.
+//!
 //! # Compare bytes
 //!
 //! Every assertion here is equality on the whole stream, trailing newline included.
@@ -40,8 +49,9 @@
 //! read. **No invocation in this file can reach the network.** Every argv here
 //! either prints help or fails in the parser, before any client is built.
 //!
-//! There is no bare `settle`, no `settle --dry-run`, no `settle --json`, no
-//! `api get-projects` with a valid date, and no `api create-worklog` /
+//! There is no bare `settle`, no `settle --replan` or `--apply` that parses, no
+//! `mapping add` that parses, no `api get-projects` with a valid date, and no
+//! `api create-worklog` /
 //! `update-worklog` / `delete-worklog` in a form that parses. A bogus cookie is
 //! **not** a substitute: `portal::BASE_URL` is the live host, and a request that
 //! fails authentication is still a request to production.
@@ -127,13 +137,35 @@ fn read_capture_file(path: &Path) -> Vec<u8> {
     })
 }
 
-/// Read one three-file case.
+/// The cases read from `tests/captures/` rather than from the Kotlin baseline.
+const PORT_CAPTURED: [&str; 6] = [
+    "help",
+    "root-no-args",
+    "settle-help",
+    "mapping-help",
+    "mapping-no-args",
+    "mapping-add-help",
+];
+
+fn port_captures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/captures")
+}
+
+/// Read one three-file case. A name in [`PORT_CAPTURED`] is read from
+/// `tests/captures/` whatever `dir` says, so a case moves between the two oracles by
+/// that list alone.
 ///
 /// **The exit code is compared as a parsed integer, not as bytes.** Three of the
 /// `.code` files — `help`, `api-help`, `settle-help` — hold `0 ` with a trailing
 /// space, an artifact of how those three were captured rather than anything the
 /// binary does. `baseline/README.md` records it and says to compare the integer.
 fn capture(dir: &Path, name: &str) -> Capture {
+    let port_dir = port_captures();
+    let dir = if PORT_CAPTURED.contains(&name) {
+        port_dir.as_path()
+    } else {
+        dir
+    };
     let code = String::from_utf8(read_capture_file(&dir.join(format!("{name}.code"))))
         .expect("an exit-code capture is ASCII");
     Capture {
@@ -273,6 +305,8 @@ const USAGE_GET_WORKLOGS: &str = "Usage: tt-devpro api get-worklogs [<options>]"
 const USAGE_CREATE_WORKLOG: &str = "Usage: tt-devpro api create-worklog [<options>]";
 const USAGE_UPDATE_WORKLOG: &str = "Usage: tt-devpro api update-worklog [<options>]";
 const USAGE_DELETE_WORKLOG: &str = "Usage: tt-devpro api delete-worklog [<options>] <id>";
+const USAGE_MAPPING: &str = "Usage: tt-devpro mapping [<options>] <command> [<args>]...";
+const USAGE_MAPPING_ADD: &str = "Usage: tt-devpro mapping add [<options>]";
 
 /// The usage block as the incumbent lays it out: the usage line, a blank line, then
 /// one `Error: ` line per problem, in the order they were found.
@@ -327,17 +361,18 @@ fn prints_the_help_of(argv: &[&str], capture_name: &str) {
 // The eight help captures — D6, the help surface served as captured bytes
 // ---------------------------------------------------------------------------
 
-/// D6 — `baseline/help.out`. Catches a port that lets clap render its own help,
-/// which differs from Clikt's in the usage line, the option column and the order.
+/// `tests/captures/help.out`: Clikt's layout with the new command list. Catches a port
+/// that lets clap render its own help, which differs from Clikt's in the usage line,
+/// the option column and the order.
 #[test]
-fn root_help_is_the_incumbents_own_bytes() {
+fn root_help_is_clikts_layout_with_the_three_commands() {
     matches_help_capture("help", &["--help"]);
 }
 
-/// D6 — `baseline/settle-help.out`. The longest of the seven, with wrapped option
+/// `tests/captures/settle-help.out`. The longest help, with wrapped option
 /// descriptions; catches a reflowed or re-indented help column.
 #[test]
-fn settle_help_is_the_incumbents_own_bytes() {
+fn settle_help_lists_the_planning_flags() {
     matches_help_capture("settle-help", &["settle", "--help"]);
 }
 
@@ -393,7 +428,7 @@ fn api_delete_worklog_help_is_the_incumbents_own_bytes() {
     );
 }
 
-/// The eight `USAGE_*` constants below are transcriptions, and a transcription can
+/// The ten `USAGE_*` constants below are transcriptions, and a transcription can
 /// be wrong. Each one is the first line of the help capture for the same command,
 /// so this holds them against the oracle instead of against a careful read.
 #[test]
@@ -407,6 +442,8 @@ fn every_usage_line_constant_is_the_first_line_of_its_own_help_capture() {
         (USAGE_CREATE_WORKLOG, "api-create-worklog-help"),
         (USAGE_UPDATE_WORKLOG, "api-update-worklog-help"),
         (USAGE_DELETE_WORKLOG, "api-delete-worklog-help"),
+        (USAGE_MAPPING, "mapping-help"),
+        (USAGE_MAPPING_ADD, "mapping-add-help"),
     ];
     for (usage, capture_name) in pairs {
         let help = show(&capture(&help_captures(), capture_name).stdout);
@@ -422,7 +459,8 @@ fn every_usage_line_constant_is_the_first_line_of_its_own_help_capture() {
 // The seventeen cli-errors captures — C33, the argument-parsing failure surface
 // ---------------------------------------------------------------------------
 
-/// `cli-errors/root-no-args` — argv `` (empty).
+/// `tests/captures/root-no-args` — argv `` (empty). The Kotlin capture holds the old
+/// command list; the rule it pins is unchanged.
 ///
 /// A group command reached with no subcommand prints its own help on **stdout**
 /// and exits **0**: Clikt's `override fun run() = Unit` (`Main.kt:16`). Two of the
@@ -438,6 +476,35 @@ fn no_arguments_at_all_prints_the_root_help_on_stdout_and_exits_zero() {
 #[test]
 fn the_api_group_with_no_subcommand_prints_its_own_help_and_exits_zero() {
     matches_error_capture("api-no-args", &["api"]);
+}
+
+/// `tests/captures/mapping-no-args` — argv `mapping`. The same rule on the new group.
+#[test]
+fn the_mapping_group_with_no_subcommand_prints_its_own_help_and_exits_zero() {
+    matches_error_capture("mapping-no-args", &["mapping"]);
+}
+
+/// `tests/captures/mapping-help` and `mapping-add-help`.
+#[test]
+fn mapping_and_mapping_add_help_are_their_captured_bytes() {
+    matches_help_capture("mapping-help", &["mapping", "--help"]);
+    matches_help_capture("mapping-add-help", &["mapping", "add", "--help"]);
+}
+
+/// The three options are required, and a missing set is reported in declaration
+/// order, as Clikt does for `api create-worklog`. This argv fails in the parser, so it
+/// never reaches the config or the portal.
+#[test]
+fn mapping_add_without_options_names_all_three_in_declaration_order() {
+    fails_with(
+        &["mapping", "add"],
+        USAGE_MAPPING_ADD,
+        &[
+            "missing option --chrono-project",
+            "missing option --devpro-project",
+            "missing option --billability",
+        ],
+    );
 }
 
 /// `cli-errors/unknown-option` — argv `settle --nosuchflag`.
@@ -469,26 +536,29 @@ fn a_near_miss_subcommand_suggests_the_one_it_nearly_matched() {
     matches_error_capture("near-miss-subcommand", &["api", "create-worklog-typo"]);
 }
 
-/// `cli-errors/from-unparseable` — argv `settle --from notadate --dry-run`.
+/// `cli-errors/from-unparseable` — captured as `settle --from notadate --dry-run`.
+/// `--dry-run` is gone; `--include-today` stands in for it, and the bytes are the
+/// same because the date error is the only message either argv produces.
 ///
 /// C33's named divergence. Everything but the tail is byte-identical: the usage
 /// line, the blank line, the empty stdout, the exit code 1 and the
 /// `Error: invalid value for --from: ` prefix.
 ///
-/// Note what this case also proves: `--dry-run` is on the command line and nothing
+/// Note what this case also proves: a flag is on the command line and nothing
 /// ran. The failure is in the parser, which is why this argv is safe here.
 #[test]
 fn an_unparseable_from_date_keeps_the_incumbents_prefix_and_carries_chronos_tail() {
     diverging_date_error(
         "from-unparseable",
-        &["settle", "--from", "notadate", "--dry-run"],
+        &["settle", "--from", "notadate", "--include-today"],
         "Error: invalid value for --from: ",
         "Text 'notadate' could not be parsed at index 0",
         "notadate is not a date in YYYY-MM-DD form",
     );
 }
 
-/// `cli-errors/from-bad-month` — argv `settle --from 2026-13-01 --dry-run`.
+/// `cli-errors/from-bad-month` — captured as `settle --from 2026-13-01 --dry-run`,
+/// run with `--include-today` in its place, as above.
 ///
 /// C33, and the second of the two port tails: a well-shaped string whose fields are
 /// out of range says `is not a date on the calendar`, where an unparseable one says
@@ -498,14 +568,15 @@ fn an_unparseable_from_date_keeps_the_incumbents_prefix_and_carries_chronos_tail
 fn a_from_date_with_month_thirteen_reports_a_calendar_failure_not_a_shape_failure() {
     diverging_date_error(
         "from-bad-month",
-        &["settle", "--from", "2026-13-01", "--dry-run"],
+        &["settle", "--from", "2026-13-01", "--include-today"],
         "Error: invalid value for --from: ",
         "Text '2026-13-01' could not be parsed: Invalid value for MonthOfYear (valid values 1 - 12): 13",
         "2026-13-01 is not a date on the calendar",
     );
 }
 
-/// `cli-errors/to-bad-day` — argv `settle --to 2026-02-30 --dry-run`.
+/// `cli-errors/to-bad-day` — captured as `settle --to 2026-02-30 --dry-run`, run
+/// with `--include-today` in its place, as above.
 ///
 /// C33, and the only capture that exercises `--to` rather than `--from`, so it is
 /// what stops the two options sharing one hard-coded name in the message.
@@ -513,7 +584,7 @@ fn a_from_date_with_month_thirteen_reports_a_calendar_failure_not_a_shape_failur
 fn a_to_date_of_february_thirtieth_names_to_rather_than_from() {
     diverging_date_error(
         "to-bad-day",
-        &["settle", "--to", "2026-02-30", "--dry-run"],
+        &["settle", "--to", "2026-02-30", "--include-today"],
         "Error: invalid value for --to: ",
         "Text '2026-02-30' could not be parsed: Invalid date 'FEBRUARY 30'",
         "2026-02-30 is not a date on the calendar",
@@ -910,13 +981,15 @@ fn a_near_miss_long_option_lists_both_its_spellings() {
 /// `Did you mean X?`. Both forms are live and the suggester picks between them by
 /// how many names cleared its threshold.
 ///
-/// Here `-h` is help's own short letter, because `settle` leaves it free.
+/// Here `-h` is help's own short letter, because `settle` leaves it free. Settle's
+/// `--replan` clears the same threshold, so the list the incumbent printed with two
+/// names now has three.
 #[test]
 fn a_near_miss_of_help_lists_both_of_helps_spellings_where_short_h_is_free() {
     fails_with(
         &["settle", "--hel"],
         USAGE_SETTLE,
-        &["no such option --hel. (Possible options: --help, -h)"],
+        &["no such option --hel. (Possible options: --help, -h, --replan)"],
     );
 }
 
@@ -1027,17 +1100,18 @@ fn two_excess_tokens_under_a_group_are_extra_arguments_not_a_subcommand_miss() {
     );
 }
 
-/// Measured 2026-09-22 (this run) — argv `settle --json=yes`.
+/// Measured 2026-09-22 on the incumbent as `settle --json=yes`; `--apply` is a flag
+/// of the same kind.
 ///
 /// A declared flag rejects an attached value the same way `--help` does. Catches a
-/// port that parsed `--json=yes` as truthy and then **ran the command**, which on
-/// this flag means reaching the portal.
+/// port that parsed `--apply=yes` as truthy and then **ran the command**, which on
+/// this flag means writing to the portal.
 #[test]
 fn a_boolean_flag_given_an_attached_value_is_a_usage_error() {
     fails_with(
-        &["settle", "--json=yes"],
+        &["settle", "--apply=yes"],
         USAGE_SETTLE,
-        &["option --json does not take a value"],
+        &["option --apply does not take a value"],
     );
 }
 
@@ -1277,14 +1351,15 @@ fn a_token_error_leaves_a_single_missing_option_reported_after_it() {
     );
 }
 
-/// Measured 2026-09-22 (this run) — argv `settle --dry-run extra --nosuchflag`.
+/// Measured 2026-09-22 on the incumbent as `settle --dry-run extra --nosuchflag`;
+/// `--apply` stands in for the flag that is gone.
 ///
 /// The excess token `extra` is suppressed by the later unknown option, and
-/// `--dry-run` — which would otherwise reach Chrono and the portal — never runs.
+/// `--apply` — which would otherwise write to the portal — never runs.
 #[test]
 fn an_excess_token_is_suppressed_by_a_later_unknown_option() {
     fails_with(
-        &["settle", "--dry-run", "extra", "--nosuchflag"],
+        &["settle", "--apply", "extra", "--nosuchflag"],
         USAGE_SETTLE,
         &["no such option --nosuchflag"],
     );
@@ -1457,7 +1532,7 @@ fn help_never_touches_stderr_and_a_usage_failure_never_touches_stdout() {
         &["--version"],
         &["-h=x"],
         &["settle", "--nosuchflag"],
-        &["settle", "--json=yes"],
+        &["settle", "--apply=yes"],
         &["api", "no-such-thing"],
         &["api", "get-worklogs"],
         &["api", "create-worklog"],
@@ -1488,7 +1563,7 @@ fn every_parse_failure_exits_one_and_never_claps_own_two() {
         &["-hx"],
         &["settle", "--nosuchflag"],
         &["settle", "extra-arg"],
-        &["settle", "--from", "notadate", "--dry-run"],
+        &["settle", "--from", "notadate", "--include-today"],
         &["api", "no-such-thing"],
         &["api", "create-worklog-typo"],
         &["api", "get-projects", "--date", "nope"],

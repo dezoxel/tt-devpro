@@ -38,9 +38,11 @@ use crate::commands::api::{
     GET_PROJECTS_HELP, GET_WORKLOGS_HELP, GetProjectsArgs, GetWorklogsArgs, UPDATE_WORKLOG_HELP,
     UpdateWorklogArgs,
 };
-use crate::commands::settle::{Console, SETTLE_HELP, SettleArgs, Stdio};
+use crate::commands::mapping::{MAPPING_ADD_HELP, MAPPING_HELP, MappingAddArgs};
+use crate::commands::settle::{SETTLE_HELP, SettleArgs};
 use crate::commands::{
-    Outcome, no_such_option, no_such_subcommand, parse_iso_date, suggest, usage_error, usage_line,
+    Console, Outcome, Stdio, no_such_option, no_such_subcommand, parse_iso_date, suggest,
+    usage_error, usage_line,
 };
 
 // ---------------------------------------------------------------------------
@@ -66,8 +68,9 @@ Options:
   -h, --help  Show this message and exit
 
 Commands:
-  settle  Settle daily hours: normalize to 8h, auto-fill gaps, push to DevPro
-  api     Direct API calls to Time Tracking Portal"#;
+  settle   Plan worklogs from Chrono and show them; --apply writes the plan to DevPro
+  api      Direct API calls to Time Tracking Portal
+  mapping  Manage Chrono → DevPro project mappings in the config"#;
 
 // ---------------------------------------------------------------------------
 // The clap tree
@@ -106,6 +109,17 @@ enum TopCommand {
         #[command(subcommand)]
         command: Option<ApiCommand>,
     },
+    #[command(disable_help_flag = true, disable_help_subcommand = true)]
+    Mapping {
+        #[command(subcommand)]
+        command: Option<MappingCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MappingCommand {
+    #[command(disable_help_flag = true)]
+    Add(MappingAddArgs),
 }
 
 /// `apiSubcommands()` (`ApiCommand.kt:221-227`), in registration order — which is
@@ -185,6 +199,8 @@ fn help_for(path: &[&str]) -> Option<&'static str> {
         ["api", "create-worklog"] => CREATE_WORKLOG_HELP,
         ["api", "update-worklog"] => UPDATE_WORKLOG_HELP,
         ["api", "delete-worklog"] => DELETE_WORKLOG_HELP,
+        ["mapping"] => MAPPING_HELP,
+        ["mapping", "add"] => MAPPING_ADD_HELP,
         _ => return None,
     })
 }
@@ -309,7 +325,7 @@ fn option_names(options: &[OptionSpec]) -> Vec<String> {
 ///    reports four missing options — `-h` is `--hours` and took `--help`.
 /// 3. **Help belongs to the deepest command reached before it.** `--help api`
 ///    prints the root's, `api --help get-projects` prints `api`'s,
-///    `settle --dry-run --help` prints settle's.
+///    `settle --apply --help` prints settle's.
 /// 4. **An unrecognised token does not end the scan.** `api nosuchsub --help`
 ///    prints `api`'s help: the token became a positional, and the loop ran on.
 /// 5. **Token-pass errors come out in token order**, finalization errors after
@@ -321,7 +337,7 @@ fn option_names(options: &[OptionSpec]) -> Vec<String> {
 ///    error. `api delete-worklog --nosuchopt` reports the unknown option **and**
 ///    `missing argument <id>`, while `api delete-worklog --nosuchopt aaa bbb`
 ///    reports only the unknown option — `<id>` is satisfied by `aaa` and `bbb`'s
-///    excess is dropped — and `settle --dry-run extra --nosuchflag` likewise drops
+///    excess is dropped — and `settle --apply extra --nosuchflag` likewise drops
 ///    `extra`. Yet `api create-worklog --nosuchopt` still lists its five missing
 ///    options. `delete-worklog` is the only command in the tree with a positional,
 ///    which is the only reason the two halves of the argument pass can be told
@@ -395,7 +411,7 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
             match options.iter().find(|option| option.long == name) {
                 None => messages.push(no_such_option(name, &suggest(name, &names))),
                 Some(option) if !option.takes_value => {
-                    // `settle --json=yes` → `option --json does not take a value`.
+                    // `settle --apply=yes` → `option --apply does not take a value`.
                     // Help is an ordinary flag here, so `--help=x` takes the same
                     // line rather than printing help.
                     if attached.is_some() {
@@ -542,7 +558,7 @@ fn walk(cmd: &clap::Command, path: &[&str], tokens: &[String]) -> Verdict {
             };
         }
         // …whereas the extra-arguments message is an ordinary accumulated one and
-        // a token error cancels it (`settle --dry-run extra --nosuchflag`).
+        // a token error cancels it (`settle --apply extra --nosuchflag`).
         if messages.is_empty() {
             let noun = if excess.len() == 1 {
                 "argument"
@@ -704,6 +720,13 @@ async fn dispatch(cli: &Cli, io: &mut dyn Console) -> Outcome {
                 commands::api::run_delete_worklog(args, io).await
             }
         },
+        Some(TopCommand::Mapping { command }) => match command {
+            None => {
+                io.out(MAPPING_HELP);
+                Outcome::Ok
+            }
+            Some(MappingCommand::Add(args)) => commands::mapping::run_add(args, io).await,
+        },
     }
 }
 
@@ -734,7 +757,7 @@ pub async fn run() {
         }
     };
 
-    let mut io = Stdio::new();
+    let mut io = Stdio;
     std::process::exit(dispatch(&cli, &mut io).await.exit_code());
 }
 
@@ -784,17 +807,18 @@ mod tests {
     // The help surface (D6)
     // -----------------------------------------------------------------------
 
-    /// `~/.cache/tt-devpro-rewrite/baseline/help.out`, and `cli-errors/root-no-args.out`,
-    /// which the baseline README records as byte-identical to it. Transcribed rather
-    /// than read off disk so the suite does not depend on a cache directory.
+    /// The incumbent's layout (`~/.cache/tt-devpro-rewrite/baseline/help.out`) with the
+    /// command list it no longer matches: settle plans instead of normalising, and
+    /// `mapping` is new, so the name column widens to fit it.
     #[test]
-    fn the_root_help_is_the_captured_bytes_of_the_incumbents_own_help() {
+    fn the_root_help_lists_the_three_commands_in_clikts_layout() {
         let captured = "Usage: tt-devpro [<options>] <command> [<args>]...\n\
                         \n  Settle Dev.Pro time reports from Chrono\n\
                         \nOptions:\n  -h, --help  Show this message and exit\n\
                         \nCommands:\n  \
-                        settle  Settle daily hours: normalize to 8h, auto-fill gaps, push to DevPro\n  \
-                        api     Direct API calls to Time Tracking Portal\n";
+                        settle   Plan worklogs from Chrono and show them; --apply writes the plan to DevPro\n  \
+                        api      Direct API calls to Time Tracking Portal\n  \
+                        mapping  Manage Chrono → DevPro project mappings in the config\n";
         assert_eq!(outcome(&["--help"]).stdout.as_deref(), Some(captured));
         assert_eq!(
             usage_line(ROOT_HELP),
@@ -817,7 +841,11 @@ mod tests {
                 path.join(" ")
             );
         }
-        assert_eq!(every_path().len(), 8, "root, settle, api and api's five");
+        assert_eq!(
+            every_path().len(),
+            10,
+            "root, settle, api and api's five, mapping and its add"
+        );
     }
 
     /// C21's mechanism rather than its symptom: with clap's own help flag left on,
@@ -840,7 +868,7 @@ mod tests {
     }
 
     /// Measured on the pinned incumbent: `--help api` prints the root's help,
-    /// `api --help get-projects` prints `api`'s, `settle --dry-run --help` prints
+    /// `api --help get-projects` prints `api`'s, `settle --apply --help` prints
     /// settle's. A scan that took the *last* command named, or the deepest one
     /// present anywhere in the list, would fail every row.
     #[test]
@@ -848,7 +876,7 @@ mod tests {
         for (tokens, expected) in [
             (vec!["--help", "api"], ROOT_HELP),
             (vec!["api", "--help", "get-projects"], API_HELP),
-            (vec!["settle", "--dry-run", "--help"], SETTLE_HELP),
+            (vec!["settle", "--apply", "--help"], SETTLE_HELP),
             (
                 vec!["api", "get-projects", "--help", "--date"],
                 GET_PROJECTS_HELP,
@@ -886,7 +914,7 @@ mod tests {
     }
 
     /// `--help` is a flag, so an attached value is refused exactly as
-    /// `settle --json=yes` is, and help does **not** print. The four rows are all
+    /// `settle --apply=yes` is, and help does **not** print. The four rows are all
     /// four depths, because the thing they pin beyond the message is that the usage
     /// line is the *deepest command reached* rather than the root's — a renderer
     /// that reached for `ROOT_HELP` here passes on row one and fails on rows two to
@@ -1204,19 +1232,19 @@ mod tests {
     fn the_four_date_failures_keep_the_prefix_and_diverge_only_in_javas_tail() {
         let cases: &[(&[&str], &str, &str, &str)] = &[
             (
-                &["settle", "--from", "notadate", "--dry-run"],
+                &["settle", "--from", "notadate", "--include-today"],
                 "from-unparseable",
                 "Usage: tt-devpro settle [<options>]",
                 "Error: invalid value for --from: notadate is not a date in YYYY-MM-DD form",
             ),
             (
-                &["settle", "--from", "2026-13-01", "--dry-run"],
+                &["settle", "--from", "2026-13-01", "--include-today"],
                 "from-bad-month",
                 "Usage: tt-devpro settle [<options>]",
                 "Error: invalid value for --from: 2026-13-01 is not a date on the calendar",
             ),
             (
-                &["settle", "--to", "2026-02-30", "--dry-run"],
+                &["settle", "--to", "2026-02-30", "--include-today"],
                 "to-bad-day",
                 "Usage: tt-devpro settle [<options>]",
                 "Error: invalid value for --to: 2026-02-30 is not a date on the calendar",
@@ -1236,7 +1264,7 @@ mod tests {
             );
         }
         assert!(
-            stderr_of(&["settle", "--from", "notadate", "--dry-run"]).starts_with(
+            stderr_of(&["settle", "--from", "notadate", "--include-today"]).starts_with(
                 "Usage: tt-devpro settle [<options>]\n\nError: invalid value for --from: "
             ),
             "the prefix is the part C33 holds the port to"
@@ -1258,8 +1286,8 @@ mod tests {
             "Usage: tt-devpro settle [<options>]\n\nError: no such option --nosuchflag\n"
         );
         assert_eq!(
-            stderr_of(&["settle", "--dryrun"]),
-            "Usage: tt-devpro settle [<options>]\n\nError: no such option --dryrun. Did you mean --dry-run?\n"
+            stderr_of(&["settle", "--aply"]),
+            "Usage: tt-devpro settle [<options>]\n\nError: no such option --aply. Did you mean --apply?\n"
         );
         assert_eq!(
             stderr_of(&["settle", "--includetoday"]),
@@ -1377,7 +1405,7 @@ mod tests {
             "and it does not care which kind of token error preceded it"
         );
         assert_eq!(
-            stderr_of(&["settle", "--dry-run", "extra", "--nosuchflag"]),
+            stderr_of(&["settle", "--apply", "extra", "--nosuchflag"]),
             "Usage: tt-devpro settle [<options>]\n\nError: no such option --nosuchflag\n",
             "the excess half does not run: no `got unexpected extra argument (extra)`"
         );
@@ -1587,16 +1615,17 @@ mod tests {
         );
     }
 
-    /// Measured: `settle --json=yes` answers `option --json does not take a value`.
-    /// A flag that silently ignored an attached value would run the command.
+    /// Measured on the incumbent as `settle --json=yes`, which answered
+    /// `option --json does not take a value`; `--apply` is a flag of the same kind. A flag
+    /// that silently ignored an attached value would run the command — here, a write.
     #[test]
     fn a_flag_given_an_attached_value_is_refused_rather_than_ignored() {
         assert_eq!(
-            stderr_of(&["settle", "--json=yes"]),
-            "Usage: tt-devpro settle [<options>]\n\nError: option --json does not take a value\n"
+            stderr_of(&["settle", "--apply=yes"]),
+            "Usage: tt-devpro settle [<options>]\n\nError: option --apply does not take a value\n"
         );
         assert_eq!(
-            cli_failure(&argv(&["settle", "--json"])),
+            cli_failure(&argv(&["settle", "--apply"])),
             None,
             "the bare flag is fine"
         );
@@ -1735,8 +1764,19 @@ mod tests {
     fn a_well_formed_argument_list_is_handed_to_clap_and_parses() {
         for tokens in [
             vec!["settle"],
-            vec!["settle", "--dry-run"],
-            vec!["settle", "--json", "--include-today"],
+            vec!["settle", "--apply"],
+            vec!["settle", "--replan"],
+            vec!["settle", "--prefix", "Б", "--include-today"],
+            vec![
+                "mapping",
+                "add",
+                "--chrono-project",
+                "A",
+                "--devpro-project",
+                "B",
+                "--billability",
+                "Billable",
+            ],
             vec!["settle", "--from", "2026-09-01", "--to", "2026-09-18"],
             vec!["settle", "--from=2026-09-01"],
             vec!["api", "get-projects"],
@@ -1870,8 +1910,7 @@ mod tests {
     // A Console that remembers
     // -----------------------------------------------------------------------
 
-    /// Records what a command body wrote. `present` is false, which is the
-    /// non-interactive regime; neither group-command path prompts.
+    /// Records what a command body wrote.
     #[derive(Default)]
     struct Recorder {
         out: Vec<String>,
@@ -1884,12 +1923,6 @@ mod tests {
         }
         fn err(&mut self, line: &str) {
             self.err.push(line.to_string());
-        }
-        fn read_line(&mut self) -> Option<String> {
-            None
-        }
-        fn present(&self) -> bool {
-            false
         }
     }
 }

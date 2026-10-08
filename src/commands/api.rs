@@ -22,8 +22,8 @@ use chrono::{Local, NaiveDate};
 use clap::Args;
 
 use crate::api::portal::TtApiClient;
+use crate::commands::Console;
 use crate::commands::Outcome;
-use crate::commands::settle::Console;
 use crate::fmt::java_dbl;
 use crate::model::{CreateWorklogRequest, NormalViewResponse, Project, UpdateWorklogRequest};
 
@@ -1621,10 +1621,6 @@ mod tests {
     // running it prints those two lines into the test harness's stderr.
 
     /// A [`Console`] that keeps what was written.
-    ///
-    /// `read_line` panics: no `api` subcommand prompts, and a port that grew a
-    /// confirmation prompt on a destructive write should fail loudly rather than
-    /// silently read EOF and carry on.
     #[derive(Default)]
     struct FakeConsole {
         out: Vec<String>,
@@ -1648,14 +1644,6 @@ mod tests {
 
         fn err(&mut self, line: &str) {
             self.err.push(line.to_string());
-        }
-
-        fn read_line(&mut self) -> Option<String> {
-            panic!("no `api` subcommand reads from stdin");
-        }
-
-        fn present(&self) -> bool {
-            true
         }
     }
 

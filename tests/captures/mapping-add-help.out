@@ -1,0 +1,9 @@
+Usage: tt-devpro mapping add [<options>]
+
+  Map a Chrono project to a DevPro project
+
+Options:
+  --chrono-project=<text>  Chrono project name, as Chrono shows it
+  --devpro-project=<text>  DevPro project name, assigned to you today
+  --billability=<text>     Billable or NonBillable
+  -h, --help               Show this message and exit

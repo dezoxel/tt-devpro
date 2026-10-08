@@ -29,7 +29,6 @@ use chrono::NaiveDate;
 
 use crate::api::{CONNECT_TIMEOUT, REQUEST_TIMEOUT, build_client};
 use crate::model::ChronoTimeEntry;
-use crate::service::borrower::HistorySource;
 
 /// `ChronoClient` (`ChronoClient.kt:14`).
 pub struct ChronoClient {
@@ -95,18 +94,6 @@ impl ChronoClient {
             "Chrono API error ({status}): {body}\n\nIs Chrono running at {}?",
             self.base_url
         )
-    }
-}
-
-/// The production half of the seam the borrower is written against. The test half
-/// lives beside the tests that need it, in `service::borrower`.
-impl HistorySource for ChronoClient {
-    async fn get_time_entries(
-        &self,
-        start_date: NaiveDate,
-        end_date: NaiveDate,
-    ) -> Result<Vec<ChronoTimeEntry>> {
-        ChronoClient::get_time_entries(self, start_date, end_date).await
     }
 }
 
@@ -265,25 +252,5 @@ mod tests {
             .downcast_ref::<reqwest::Error>()
             .expect("the failure comes from the transport");
         assert!(source.is_timeout(), "expected a timeout, got {source}");
-    }
-
-    /// The trait the borrower is written against resolves to the same request. This
-    /// is the production impl of the seam that `service::borrower`'s fixtures stand
-    /// in for.
-    #[tokio::test]
-    async fn the_client_answers_as_a_history_source() {
-        let server = StubServer::start(vec![json_200(ONE_ENTRY)]);
-        let client = ChronoClient::new(&server.base_url).expect("client");
-
-        let entries = HistorySource::get_time_entries(&client, d(2026, 9, 11), d(2026, 9, 17))
-            .await
-            .expect("fetch");
-
-        assert_eq!(entries.len(), 1);
-        let requests = server.requests();
-        assert_eq!(
-            requests[0].target,
-            "/api/time-entries?start_date=2026-09-11&end_date=2026-09-17"
-        );
     }
 }

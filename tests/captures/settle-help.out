@@ -1,0 +1,15 @@
+Usage: tt-devpro settle [<options>]
+
+  Plan worklogs from Chrono and show them; --apply writes the plan to DevPro
+
+Options:
+  --from=<value>   Start date (YYYY-MM-DD), defaults to the 1st of this month.
+                   Without --from/--to scans the last 45 days for unfilled days
+  --to=<value>     End date (YYYY-MM-DD), defaults to the last completed day.
+                   Without --from/--to scans the last 45 days for unfilled days
+  --include-today  Also plan today. Off by default: today is unfinished, so its
+                   hours aren't final
+  --prefix=<text>  Letter in front of every line address, e.g. Б
+  --replan         Plan again from the edits made in the plan file
+  --apply          Write the plan last shown to DevPro
+  -h, --help       Show this message and exit
