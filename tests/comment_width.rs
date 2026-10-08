@@ -85,7 +85,7 @@ fn comment_text(line: &str) -> &str {
 /// The exemption cannot be stretched by someone who wants it, which is what makes it safe
 /// to have: prose has spaces in it, so nothing can be hidden inside one token.
 ///
-/// Two lines take it today, both in `src/main.rs` and both the same measurement path under
+/// Two lines take it today, both in `src/cli.rs` and both the same measurement path under
 /// `~/.cache/tt-devpro-rewrite/` — 75 characters of it, 24 columns deep, with no space
 /// after the marker at all. Those paths are absolute so they can be pasted into a shell,
 /// and the depth is the nesting of the code they document. The count is worth watching
@@ -270,7 +270,7 @@ fn a_long_code_line_is_not_a_violation_but_a_long_comment_is() {
 /// Pins the unbreakable exemption, and pins that it stops where it stops.
 ///
 /// The exemption exists for two real lines: a 75-character measurement path in
-/// `src/main.rs`, nested 24 columns deep, with no space anywhere after the marker. It has
+/// `src/cli.rs`, nested 24 columns deep, with no space anywhere after the marker. It has
 /// to be narrow or it is a hole — one space in the text and the comment has somewhere to
 /// wrap, so the limit applies again. Both halves are asserted here, off one fixture, so
 /// widening the rule breaks the second half immediately.
