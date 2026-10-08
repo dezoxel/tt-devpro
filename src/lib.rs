@@ -19,3 +19,4 @@ mod plan;
 mod service;
 
 pub use cli::run;
+pub use commands::settle::replay::replay;

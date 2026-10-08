@@ -1093,5 +1093,7 @@ fn failure_text(error: &anyhow::Error) -> String {
 // Tests
 // ---------------------------------------------------------------------------
 
+pub mod replay;
+
 #[cfg(test)]
 mod tests;
