@@ -10,9 +10,11 @@
 //!   are built again from the current config, which is how a mapping added in between
 //!   reaches the plan.
 //! - **`settle --apply`** writes the last table shown, and only that one: `plan.md` must still
-//!   hash to what was printed. It creates worklogs and never updates or deletes one, because
-//!   the portal's worklog listing does not carry every field an update would have to send
-//!   back, and an update that blanks a field Yurii typed in the portal is worse than none.
+//!   hash to what was printed. It creates worklogs and never updates one, because the
+//!   portal's worklog listing does not carry every field an update would have to send back,
+//!   and an update that blanks a field Yurii typed in the portal is worse than none. The one
+//!   delete is its own undo: a write that fails mid-day removes the lines this run created on
+//!   that day, so a day reaches DevPro whole or not at all.
 //!
 //! The window rules — which days are final, what the scan offers, what an explicit range
 //! means — live in [`super::settle_window`] and are unchanged by the plan.
@@ -441,7 +443,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             }
             match self.write_day(day, in_devpro, &plan.prefix, io).await {
                 Ok(count) => written.push((day.date, count)),
-                Err(stop) => return self.stopped(&stop, &plan, io).await,
+                Err(stop) => return self.stopped(&stop, in_devpro, &plan, io).await,
             }
         }
 
@@ -849,9 +851,22 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         Ok(new_matches > earlier)
     }
 
-    /// The write stopped: say where, show what DevPro holds now, and drop the plan — it no
-    /// longer describes DevPro, and the next `settle` reads what was written as recorded.
-    async fn stopped(&self, stop: &Stop, plan: &Plan, io: &mut dyn Console) -> Result<Outcome> {
+    /// The write stopped: take the stopped day back to what it held before the run, say
+    /// where it stopped, show what DevPro holds now, and drop the plan.
+    ///
+    /// A day is written whole or not at all. The next `settle` cannot tell which Chrono line
+    /// a written worklog came from — the title was rewritten on the way — so a half-written
+    /// day would come back with its written lines as recorded and every Chrono line proposed
+    /// again beside them: the same work twice, still adding up to 8.0 h. Removing only the
+    /// worklogs this run created on that day leaves DevPro in a state the next plan reads
+    /// right; days written whole before it stay.
+    async fn stopped(
+        &self,
+        stop: &Stop,
+        before: Option<&PortalDay>,
+        plan: &Plan,
+        io: &mut dyn Console,
+    ) -> Result<Outcome> {
         io.err(&format!(
             "\u{2717} {} {}{}: {}",
             day_label(stop.date),
@@ -859,6 +874,19 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             stop.addr,
             stop.message
         ));
+        match self.roll_back(stop.date, before).await {
+            Ok(0) => {}
+            Ok(removed) => io.err(&format!(
+                "\u{21A9} {} — the {removed} line(s) this run had written to the day are removed \
+                 again: a day goes to DevPro whole or not at all",
+                day_label(stop.date)
+            )),
+            Err(left) => io.err(&format!(
+                "\u{26A0}\u{FE0F} {} — {left}. Until they are gone, the next settle plans this \
+                 day's work a second time beside them.",
+                day_label(stop.date)
+            )),
+        }
         io.err("Writing stopped. DevPro now holds:");
         let first = plan.days[0].date;
         let last = plan.days[plan.days.len() - 1].date;
@@ -874,6 +902,45 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         self.state.clear()?;
         io.err("The plan is dropped. Run `tt-devpro settle` again: it shows what was written as lines already in DevPro.");
         Ok(Outcome::Failed)
+    }
+
+    /// Deletes the worklogs on `date` that were not there before the run: the ones this run
+    /// created. Returns how many, or what is left and the command that removes each.
+    async fn roll_back(
+        &self,
+        date: NaiveDate,
+        before: Option<&PortalDay>,
+    ) -> Result<usize, String> {
+        let before_ids: HashSet<&str> = before
+            .map(|day| day.worklogs.iter().map(|w| w.unique_id.as_str()).collect())
+            .unwrap_or_default();
+        let now = self
+            .read_portal(date, date)
+            .await
+            .map_err(|error| format!("DevPro could not be read to undo the day ({error:#})"))?;
+        let created: Vec<String> = now
+            .iter()
+            .filter(|day| day.date == date)
+            .flat_map(|day| &day.worklogs)
+            .filter(|w| !before_ids.contains(w.unique_id.as_str()))
+            .map(|w| w.unique_id.clone())
+            .collect();
+        for (done, id) in created.iter().enumerate() {
+            let failure = match self.portal.delete_worklog(id).await {
+                Ok(true) => continue,
+                Ok(false) => "DevPro did not confirm the delete (no 200)".to_string(),
+                Err(error) => failure_text(&error),
+            };
+            let left: Vec<String> = created[done..]
+                .iter()
+                .map(|id| format!("`tt-devpro api delete-worklog {id}`"))
+                .collect();
+            return Err(format!(
+                "undoing the day stopped ({failure}); this run's lines still there: {}",
+                left.join(", ")
+            ));
+        }
+        Ok(created.len())
     }
 
     // -- fetching -----------------------------------------------------------

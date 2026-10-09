@@ -715,31 +715,73 @@ async fn apply_refuses_titles_still_marked_for_detail() {
     assert!(message.contains("Б2"), "{message}");
 }
 
-#[tokio::test]
-async fn a_failed_write_stops_the_run_shows_devpro_and_drops_the_plan() {
-    let h = Harness::new();
-    h.planned_monday().await;
-    let after = view(&[(
+fn half_written_monday() -> String {
+    view(&[(
         monday(),
         vec![worklog("w1", "Weekly sync", "Inveniam SOW #5", 1.0)],
-    )]);
+    )])
+}
+
+fn deletes(requests: &[crate::api::stub::CapturedRequest]) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .map(|r| r.target.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_failed_write_undoes_its_day_stops_the_run_and_drops_the_plan() {
+    let h = Harness::new();
+    h.planned_monday().await;
     let portal = StubServer::start(vec![
         user(),
         assigned(),
         empty_view(),
         json_200("{}"),
         response(500, "Internal Server Error", "text/plain", "boom"),
-        after,
+        half_written_monday(),
+        json_200("{}"),
+        empty_view(),
     ]);
 
     let model = FakePlanModel::new(vec![]);
     let (result, io) = h.run(Run::Apply, &portal.base_url, NOWHERE, &model).await;
 
     assert_eq!(result.unwrap(), Outcome::Failed);
-    assert_eq!(posts(&portal.requests()).len(), 2);
+    let requests = portal.requests();
+    assert_eq!(posts(&requests).len(), 2);
+    assert_eq!(deletes(&requests), vec!["/worklog/w1"]);
     let err = io.err_text();
     assert!(err.contains("Б2"), "{err}");
+    assert!(err.contains("1 line(s) this run had written"), "{err}");
     assert!(err.contains("Writing stopped"), "{err}");
+    assert!(!err.contains("Weekly sync"), "{err}");
+    assert!(!h.state().md_path().exists());
+}
+
+#[tokio::test]
+async fn an_undo_that_fails_names_each_line_left_and_its_command() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    let portal = StubServer::start(vec![
+        user(),
+        assigned(),
+        empty_view(),
+        json_200("{}"),
+        response(500, "Internal Server Error", "text/plain", "boom"),
+        half_written_monday(),
+        response(500, "Internal Server Error", "text/plain", "boom"),
+        half_written_monday(),
+    ]);
+
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Apply, &portal.base_url, NOWHERE, &model).await;
+
+    assert_eq!(result.unwrap(), Outcome::Failed);
+    let err = io.err_text();
+    assert!(err.contains("`tt-devpro api delete-worklog w1`"), "{err}");
+    assert!(err.contains("a second time"), "{err}");
     assert!(
         err.contains("Weekly sync (1.0 h, Inveniam SOW #5)"),
         "{err}"
@@ -791,18 +833,16 @@ async fn a_timed_out_write_that_landed_counts_as_written() {
 async fn a_timed_out_write_that_did_not_land_is_not_sent_again() {
     let h = Harness::new();
     h.planned_monday().await;
-    let half = view(&[(
-        monday(),
-        vec![worklog("w1", "Weekly sync", "Inveniam SOW #5", 1.0)],
-    )]);
     let portal = StubServer::start(vec![
         user(),
         assigned(),
         empty_view(),
         json_200("{}"),
         STALL.to_string(),
-        half.clone(),
-        half,
+        half_written_monday(),
+        half_written_monday(),
+        json_200("{}"),
+        empty_view(),
     ]);
 
     let model = FakePlanModel::new(vec![]);
@@ -817,7 +857,9 @@ async fn a_timed_out_write_that_did_not_land_is_not_sent_again() {
         .await;
 
     assert_eq!(result.unwrap(), Outcome::Failed);
-    assert_eq!(posts(&portal.requests()).len(), 2);
+    let requests = portal.requests();
+    assert_eq!(posts(&requests).len(), 2);
+    assert_eq!(deletes(&requests), vec!["/worklog/w1"]);
     assert!(
         io.err_text().contains("not sent again"),
         "{}",
