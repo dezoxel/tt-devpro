@@ -205,15 +205,7 @@ async fn dispatch(
         model: &model,
         is_meeting: |aggregate: &DayProjectAggregate| normalizer.is_meeting_entry(aggregate),
     };
-    let outcome = if args.replan {
-        settle.replan(&planning, io).await?
-    } else {
-        settle.plan(args, &planning, io).await?
-    };
-    if outcome == Outcome::Ok {
-        settle.period(io).await;
-    }
-    Ok(outcome)
+    settle.plan_then_period(args, &planning, io).await
 }
 
 // ---------------------------------------------------------------------------
@@ -425,6 +417,29 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         plan.closed.dedup();
         self.show(plan, io)?;
         Ok(Outcome::Ok)
+    }
+
+    /// `settle` or `settle --replan`, then the billing-period block under the plan it showed.
+    /// `--apply` never comes here: the block is a morning readout, not part of a write.
+    async fn plan_then_period<M, P>(
+        &self,
+        args: &SettleArgs,
+        planning: &Planning<'_, M, P>,
+        io: &mut dyn Console,
+    ) -> Result<Outcome>
+    where
+        M: PlanModel,
+        P: Fn(&DayProjectAggregate) -> bool,
+    {
+        let outcome = if args.replan {
+            self.replan(planning, io).await?
+        } else {
+            self.plan(args, planning, io).await?
+        };
+        if outcome == Outcome::Ok {
+            self.period(io).await;
+        }
+        Ok(outcome)
     }
 
     /// The billing-period block under the plan just shown, read from the plan as stored.

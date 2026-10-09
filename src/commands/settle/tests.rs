@@ -190,6 +190,8 @@ enum Run {
     Replan,
     Apply,
     Period,
+    /// What `dispatch` runs for `settle` and `--replan`: the plan, then the period block.
+    Settle(SettleArgs),
 }
 
 struct Harness {
@@ -249,6 +251,7 @@ impl Harness {
                 settle.period(&mut io).await;
                 Ok(Outcome::Ok)
             }
+            Run::Settle(args) => settle.plan_then_period(&args, &planning, &mut io).await,
         };
         (result, io)
     }
@@ -1101,5 +1104,90 @@ async fn a_failed_period_read_is_one_warning_and_the_run_succeeds() {
         io.out[1].starts_with("⚠️ Период не прочитан: "),
         "{}",
         io.out[1]
+    );
+}
+
+/// The block's place in the run: `settle` shows the plan, stores it, and only then prints
+/// the block under it — on stdout, never into `plan.md`.
+#[tokio::test]
+async fn settle_prints_the_period_block_under_the_plan_it_shows() {
+    let h = Harness::new();
+    let portal = StubServer::start(vec![
+        user(),
+        empty_view(),
+        empty_view(),
+        assigned(),
+        ptr_periods(),
+        october_so_far(),
+    ]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.0))]);
+    let (result, io) = h
+        .run(
+            Run::Settle(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    let header = io
+        .out
+        .iter()
+        .position(|line| line.starts_with("**Период 1–15 октября**"))
+        .unwrap_or_else(|| panic!("no period header in:\n{}", io.out_text()));
+    let md = h.md();
+    assert_eq!(io.out[..header - 1].join("\n"), md);
+    assert_eq!(io.out[header - 1], "");
+    assert!(!md.contains("Период"), "{md}");
+    assert!(
+        io.out[header + 1].starts_with("- 💵 Inveniam SOW #5 — 7.75 ч"),
+        "{}",
+        io.out[header + 1]
+    );
+}
+
+/// A run that fails shows no plan, so no block follows it and the portal is not asked.
+#[tokio::test]
+async fn a_failed_replan_prints_no_period_block() {
+    let h = Harness::new();
+    let args = SettleArgs {
+        replan: true,
+        ..SettleArgs::default()
+    };
+
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Settle(args), NOWHERE, NOWHERE, &model).await;
+
+    assert!(result.is_err());
+    assert!(!io.out_text().contains("Период"), "{}", io.out_text());
+}
+
+/// `--apply` writes and reads DevPro back; the period reads are never among its requests.
+#[tokio::test]
+async fn apply_prints_no_period_block() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    let ok = json_200("{}");
+    let portal = StubServer::start(vec![
+        user(),
+        assigned(),
+        empty_view(),
+        ok.clone(),
+        ok,
+        monday_written(),
+    ]);
+
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Apply, &portal.base_url, NOWHERE, &model).await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    assert!(!io.out_text().contains("Период"), "{}", io.out_text());
+    assert!(
+        portal
+            .requests()
+            .iter()
+            .all(|request| !request.target.contains("ptrPeriods"))
     );
 }

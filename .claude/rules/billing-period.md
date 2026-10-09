@@ -5,7 +5,7 @@ paths:
 
 # Billing-period block under the settle plan
 
-`settle_period.rs` is pure: it takes the period, the portal days, the stored plan and the `allocations` and returns lines. The reads live in `settle.rs` (`Settle::period` / `period_block`), which runs it in `dispatch` only after `plan` or `replan` returned `Outcome::Ok` — also under «Все дни закрыты» — and never for `--apply`.
+`settle_period.rs` is pure: it takes the period, the portal days, the stored plan and the `allocations` and returns lines. The reads live in `settle.rs` (`Settle::period` / `period_block`), which `Settle::plan_then_period` runs only after `plan` or `replan` returned `Outcome::Ok` — also under «Все дни закрыты». `dispatch` sends `--apply` elsewhere before it, so the block never follows a write. The settle tests run `plan_then_period` itself (`Run::Settle`), so keep the ordering there rather than back in `dispatch`, which builds real clients and is not tested.
 
 ## Printed, never stored
 
@@ -28,7 +28,7 @@ paths:
 - Plus plan lines not yet in DevPro (`kind != Recorded`), dated in `[period.start, through]`. A `Recorded` line is counted from DevPro only.
 - A plan day whose DevPro worklogs are no longer exactly its `Recorded` lines is skipped from the plan side — the same `recorded_ids` / `portal_ids` test `--apply` makes before writing a day. Reuse those helpers; do not keep a second copy of the check here.
 - A planned line is named by the `project_short_name` DevPro gives its `project_id`, falling back to `devpro_project` only when DevPro has no worklog on that id. That keeps a project the config spells differently as one line.
-- Days in `plan.errors` have no lines; the block prints how many fall in the period and that their planned hours are missing.
+- Days in `plan.errors` have no lines; the block prints how many fall in `[period.start, through]` and that their planned hours are missing.
 
 ## Allocation and pace
 

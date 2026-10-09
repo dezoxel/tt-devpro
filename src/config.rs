@@ -46,8 +46,9 @@ pub struct Config {
     /// stand in for it.
     #[serde(default)]
     pub session_cookie: Option<String>,
-    /// The planned billable allocation per DevPro project, in FTE. The portal exposes
-    /// none (checked 2026-10-09), so the period line in `settle` reads it from here.
+    /// The planned billable allocation per DevPro project, in FTE. The portal frontend
+    /// shows FTE only to an approver (`teamFte`), not to the person logging time, so the
+    /// period line in `settle` reads it from here.
     /// Optional: without it the line shows the FTE so far and no pace.
     #[serde(default)]
     pub allocations: Vec<Allocation>,
