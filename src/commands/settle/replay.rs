@@ -18,8 +18,9 @@ use super::*;
 const HOURS_TOLERANCE: f64 = 0.25;
 
 /// Plans `from..=to` with the live config, Chrono, DevPro and model, and returns the plan
-/// followed by the comparison with DevPro, as markdown.
-pub async fn replay(from: NaiveDate, to: NaiveDate) -> Result<String> {
+/// followed by the comparison with DevPro, as markdown. `model` replaces the config's
+/// `plan_model` for this run, to compare models on the same days.
+pub async fn replay(from: NaiveDate, to: NaiveDate, model: Option<String>) -> Result<String> {
     if from > to {
         bail!("--from {from} is after --to {to}");
     }
@@ -36,7 +37,7 @@ pub async fn replay(from: NaiveDate, to: NaiveDate) -> Result<String> {
         today: Local::now().date_naive(),
     };
     let normalizer = TimeNormalizer::for_settle(&config.vault_path)?;
-    let model = ClaudeCliModel::new(config.plan_model.clone());
+    let model = ClaudeCliModel::new(model.unwrap_or_else(|| config.plan_model.clone()));
     let planning = Planning {
         model: &model,
         is_meeting: |aggregate: &DayProjectAggregate| normalizer.is_meeting_entry(aggregate),

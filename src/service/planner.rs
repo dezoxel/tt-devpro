@@ -41,8 +41,8 @@ HOURS
 - Every hours value is a multiple of 0.25 and at least 0.25.
 - A day's lines and extra lines together come to exactly its hours_to_fill.
 - Find the day's main work: the line that is its substantive work (design, analysis, building, writing, review), usually the one with the most chrono_hours. Communication, admin, inbox processing and short preparation are never the main work.
-- Every other line is stretched only as far as it plausibly took, roughly within 2x its chrono_hours; a two-minute admin note stays small.
-- The main work line takes everything else, however large that makes it: 0.58 h of chrono can become 5.5 h.
+- First stretch every line, the main one included, in proportion to what it plausibly took, typically 1.5x to 3x its chrono_hours; a two-minute admin note stays small. On a full day this alone reaches hours_to_fill and nothing else is needed.
+- Only what is still missing after that goes onto the main work line, however large that makes it: on a thin day 0.58 h of chrono can become 5.5 h.
 - Only when the day has no substantive work line at all, add one extra line of kind "main" instead: the main topic of the last days, picked from the candidates with source "history" (usually the one with the most recent_hours). At most one main line per day.
 - An extra line's title names its candidate's topic, never the work of another candidate or another project.
 - Lines of kind "borrow" (other history candidates) and "filler" (filler candidates, each within its max_hours) are a last resort, for a day with no substantive work line and no history candidate to carry it. Borrow and filler lines of a day together stay within max_synthetic_hours.
