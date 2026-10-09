@@ -755,7 +755,6 @@ mod tests {
                 billability: "NonBillable".to_string(),
                 min_hours: 0.5,
                 max_hours: 1.5,
-                max_hours_per_period: None,
             }],
             overrides: vec![OverrideRule {
                 pattern: "Scorecard".to_string(),

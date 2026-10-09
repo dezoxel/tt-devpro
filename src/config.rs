@@ -64,8 +64,6 @@ pub struct Filler {
     pub billability: String,
     pub min_hours: f64,
     pub max_hours: f64,
-    #[serde(default)]
-    pub max_hours_per_period: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,6 +238,25 @@ overrides:
         assert!(parse(override_rule).is_err());
     }
 
+    /// The per-period filler budget went with the old filler service. Accepted and ignored, it
+    /// would read as a cap that nothing enforces, so it is refused like any unknown key.
+    #[test]
+    fn a_per_period_filler_budget_is_refused_now_that_nothing_enforces_it() {
+        let yaml = r#"
+chrono_api: "http://localhost:9247"
+vault_path: "/vault"
+mappings: []
+fillers:
+  - devpro_project: "P"
+    task_title: "T"
+    billability: "NonBillable"
+    min_hours: 0.5
+    max_hours: 2.0
+    max_hours_per_period: 10.0
+"#;
+        assert!(parse(yaml).is_err());
+    }
+
     #[test]
     fn reads_every_optional_section_when_present() {
         let yaml = r#"
@@ -255,7 +272,6 @@ fillers:
     billability: "NonBillable"
     min_hours: 0.5
     max_hours: 2.0
-    max_hours_per_period: 10.0
 overrides:
   - pattern: "meeting"
     devpro_project: "P"
@@ -266,7 +282,7 @@ project_ids:
 max_synthetic_hours: 2.5
 "#;
         let config = parse(yaml).expect("full config should parse");
-        assert_eq!(config.fillers[0].max_hours_per_period, Some(10.0));
+        assert_eq!(config.fillers[0].max_hours, 2.0);
         assert_eq!(config.overrides[0].max_hours, Some(1.5));
         assert_eq!(
             config

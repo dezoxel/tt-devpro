@@ -290,9 +290,12 @@ pub fn diff(baseline: &Plan, rows: &[Row]) -> Result<BTreeMap<NaiveDate, DayEdit
     Ok(edits)
 }
 
+/// The stored text is compared in the form the table shows it: a cell is one line with single
+/// spaces, so a title with a double or trailing space (a worklog typed in the portal) reads
+/// back different from what is stored though nobody touched it.
 fn differs(line: &PlanLine, row: &Row) -> bool {
-    line.title != row.title
-        || line.devpro_project != row.devpro_project
+    one_line(&line.title) != row.title
+        || one_line(&line.devpro_project) != row.devpro_project
         || line.is_billable() != row.billable
         || line.quarters != row.quarters
         || line.needs_detail != row.needs_detail
@@ -367,6 +370,22 @@ mod tests {
         let error = diff(&plan(), &rows_of(&text)).unwrap_err().to_string();
         assert!(error.contains("already in DevPro"), "{error}");
         assert!(error.contains("api update-worklog"), "{error}");
+    }
+
+    /// A worklog typed in the portal with a double or trailing space renders as one line
+    /// with single spaces. Read back untouched, it must not count as an edit: an edit of a
+    /// recorded line is refused, which would block every replan of the plan.
+    #[test]
+    fn a_recorded_title_with_stray_spaces_reads_back_unchanged() {
+        let mut plan = plan();
+        let recorded = plan.days[0]
+            .lines
+            .iter_mut()
+            .find(|line| line.kind == LineKind::Recorded)
+            .unwrap();
+        recorded.title = "Interview  prep ".to_string();
+        let rows = parse(&render(&plan), &plan).unwrap();
+        assert!(diff(&plan, &rows).unwrap().is_empty());
     }
 
     #[test]

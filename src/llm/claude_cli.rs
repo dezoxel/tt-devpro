@@ -225,21 +225,11 @@ impl ClaudeCliModel {
             })?
             .map_err(|error| failure(FailureKind::Process, format!("waiting for it: {error}")))?;
 
-        match writer.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                return Err(failure(
-                    FailureKind::Process,
-                    format!("writing the prompt: {error}"),
-                ));
-            }
-            Err(error) => {
-                return Err(failure(
-                    FailureKind::Process,
-                    format!("the prompt writer stopped: {error}"),
-                ));
-            }
-        }
+        // The exit status is read before the writer's result. A CLI that refuses at once (an
+        // expired login) exits without reading a prompt larger than the pipe buffer, the
+        // writer then fails with a broken pipe, and reading that first would report "could
+        // not write the prompt" in place of the stderr that says why.
+        let written = writer.await;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -253,6 +243,22 @@ impl ClaudeCliModel {
                 classify(&text),
                 format!("exit {}: {}", output.status, text.trim()),
             ));
+        }
+
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                return Err(failure(
+                    FailureKind::Process,
+                    format!("writing the prompt: {error}"),
+                ));
+            }
+            Err(error) => {
+                return Err(failure(
+                    FailureKind::Process,
+                    format!("the prompt writer stopped: {error}"),
+                ));
+            }
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -491,6 +497,23 @@ mod tests {
         assert_eq!(kind_of(&error), FailureKind::Auth);
         assert!(error.to_string().contains("claude /login"), "{error}");
         assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 1);
+    }
+
+    /// The CLI refuses before reading its stdin, so writing a prompt larger than the pipe
+    /// buffer fails with a broken pipe. The failure is still the login it is.
+    #[tokio::test]
+    async fn an_auth_failure_before_the_prompt_is_read_is_still_auth() {
+        let dir = TempDir::new().unwrap();
+        let program = script(dir.path(), "echo 'Not logged in' >&2\nexit 1");
+        let model = ClaudeCliModel::for_test(program.to_str().unwrap(), Duration::from_secs(10));
+        let big = ModelCall {
+            prompt: "x".repeat(4 * 1024 * 1024),
+            schema: "{}".to_string(),
+        };
+
+        let error = model.complete(&big).await.unwrap_err();
+
+        assert_eq!(kind_of(&error), FailureKind::Auth);
     }
 
     #[tokio::test]

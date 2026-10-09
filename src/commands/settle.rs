@@ -393,6 +393,25 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             )
             .await?;
 
+        // A day with edits that cannot be planned around them stops the replan before
+        // anything is stored. Saving it as a day error would drop the edits — the error
+        // keeps no pins — and the next --replan would build the day from scratch while the
+        // message still names edits that are gone. plan.md stays as it is, to be corrected.
+        let refused: Vec<String> = planned
+            .errors
+            .iter()
+            .filter(|error| edits.contains_key(&error.date))
+            .map(|error| format!("{}: {}", day_label(error.date), error.message))
+            .collect();
+        if !refused.is_empty() {
+            bail!(
+                "the edits in {} cannot be planned; correct them there and run --replan \
+                 again:\n{}",
+                self.state.md_path().display(),
+                refused.join("\n")
+            );
+        }
+
         plan.days.retain(|day| !rebuild.contains(&day.date));
         plan.days.extend(planned.days);
         plan.errors = planned.errors;

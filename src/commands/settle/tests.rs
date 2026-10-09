@@ -604,6 +604,31 @@ async fn a_project_pair_nobody_configured_is_refused_with_its_line() {
     );
 }
 
+/// Б2 edited to 7.5 h beside the 1.0 h meeting pins 8.5 h. The day cannot be planned around
+/// the edit, and storing it as a day error would drop the edit with it: the replan stops
+/// and plan.md keeps the edit to correct.
+#[tokio::test]
+async fn an_edited_day_that_cannot_be_planned_stops_the_replan_and_keeps_the_edits() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    let edited = h.md().replace("1.5 → **7.0**", "1.5 → 7.5");
+    h.write_md(&edited);
+
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, _) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("cannot be planned"), "{message}");
+    assert!(message.contains("8.5"), "{message}");
+    portal.requests();
+    assert!(model.calls().is_empty());
+    assert_eq!(h.md(), edited);
+}
+
 #[tokio::test]
 async fn a_plan_without_edits_is_shown_again_without_a_request() {
     let h = Harness::new();
