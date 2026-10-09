@@ -77,6 +77,10 @@ mappings:
 fillers:        # Auto-fill meeting-only days with work entries
 overrides:      # Reroute entries by pattern before mapping
 project_ids:    # Fallback ids by DevPro project name (see below)
+
+allocations:    # Planned billable FTE per DevPro project, for the period line (see below)
+  - devpro_project: "Inveniam SOW #5"
+    fte: 0.5
 ```
 
 Chrono project names use the flat format (`Project - Parent - Work`) or the hierarchical slash format (`Project/Parent/Work`).
@@ -84,6 +88,8 @@ Chrono project names use the flat format (`Project - Parent - Work`) or the hier
 **Two different things happen to a Chrono project the config does not cover, and only one of them is silent.** Only projects whose name ends in `DevPro - Work` or `DevPro/Work` are considered at all; everything else is dropped without a word. That is the silent one, and it is why a day short on hours usually means the Chrono project is named outside that suffix rather than missing from `mappings`. A project that *does* end in the suffix but has no mapping is the opposite: the run stops with an error naming the project, printing the YAML block to paste into `~/.config/tt-devpro/config.yaml`, and listing what is configured today. Silence points at the Chrono name; a crash points at the config.
 
 **Meeting detection reads the vault at `vault_path` off disk.** The key is required and has no default, because the vault sits at a different path on each machine; it must be absolute (`~` is not expanded). On startup `settle` walks that directory to a depth of 10 collecting every folder named `Calendar`, and uses them to decide which entries are meetings — meetings keep their actual time while work entries get scaled to reach 8h. The walk fails loudly: a root that is missing or not a directory, a folder that cannot be read, or a vault with no `Calendar` folder at all stops the run with the path at fault. The Kotlin original turned all of those into *no meetings* and scaled every meeting as work without a word.
+
+**The billing-period line.** Under the plan, `settle` and `settle --replan` print how the current DevPro billing period is going: the period as the portal's PTR Periods view defines it (`contact/ptrPeriods`, never a 1–15 / 16–end rule — May 2026 ran 1–17), working days gone, and per billable project the hours so far — what DevPro holds plus planned lines not yet written — with their FTE. With an `allocations` entry for the project it also shows the share of the allocation used, a statusline-style bar with `┃` where the period's clock stands, and `↗N%`, the share of the allocation the period ends at if the rate holds. The portal exposes no allocation, so it lives in the config; `fte` is in (0, 1] and a project may appear once. The line is printed, not stored in `plan.md`, and reads the stored plan, so hand edits count only after `--replan`. A failed read is one `⚠️` line and the run still succeeds.
 
 `project_ids` is a **fallback, not an override.** Project ids normally come from the portal's assigned-projects list, and that list always wins. An entry here is used only when the name is missing from it — typically because the project was renamed or unassigned — and every time one fires, `settle` warns on stderr naming the project and the id it used, since a hardcoded id can quietly go stale. A stale configured id silently beating a correct live one would post worklogs to the wrong project unnoticed, which is worse than the crash the fallback prevents. When a name is in neither place, `settle` still fails and lists the projects the portal does offer.
 

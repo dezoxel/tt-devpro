@@ -33,9 +33,10 @@ const READ_BILLABLE: &str = "Billable";
 /// Cells in the pace bar, as in the statusline.
 const BAR_CELLS: u32 = 10;
 
-/// Below this share of the period an extrapolation is noise, so no pace is claimed. The
-/// statusline's `len / 33`.
-const MIN_ELAPSED_FOR_PACE: f64 = 1.0 / 33.0;
+/// Fewer working days than this and an extrapolation is noise, so no pace is claimed. The
+/// statusline's `len / 33` guard counts minutes; here the unit is a whole day, and one day
+/// of an 11-day period already turns a single full day into a 200% pace.
+const MIN_DAYS_FOR_PACE: u32 = 2;
 
 /// The statusline caps the pace at 999%.
 const MAX_PACE: u32 = 999;
@@ -277,7 +278,7 @@ fn project_line(
                 percent(used),
                 bar(used, elapsed_days > 0, elapsed)
             ));
-            if elapsed > MIN_ELAPSED_FOR_PACE {
+            if elapsed_days >= MIN_DAYS_FOR_PACE {
                 let pace = ((used / elapsed * 100.0).round() as u32).min(MAX_PACE);
                 line.push_str(&format!(" ↗{pace}%"));
             }
@@ -669,7 +670,7 @@ mod tests {
         );
         assert_eq!(
             out[2],
-            "- 💵 Inveniam SOW #5 — 0.0 из 44.0 ч (0%) ░┃░░░░░░░░░ ↗0% · 0.0 FTE из 0.5"
+            "- 💵 Inveniam SOW #5 — 0.0 из 44.0 ч (0%) ░┃░░░░░░░░░ · 0.0 FTE из 0.5"
         );
     }
 
