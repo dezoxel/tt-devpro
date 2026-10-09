@@ -765,7 +765,7 @@ mod tests {
             }],
             project_ids: HashMap::new(),
             max_synthetic_hours: 4.0,
-            plan_model: "haiku".to_string(),
+            plan_model: "sonnet".to_string(),
             vault_path: "/vault".into(),
             session_cookie: None,
         }

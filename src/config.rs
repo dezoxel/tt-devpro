@@ -82,8 +82,10 @@ fn default_max_synthetic_hours() -> f64 {
     4.0
 }
 
+/// Sonnet, not Haiku: on the replay of 23.09-06.10 Haiku broke the planner's rules on the
+/// same prompt (communication as a day's main work) and its titles drifted from run to run.
 fn default_plan_model() -> String {
-    "haiku".to_string()
+    "sonnet".to_string()
 }
 
 /// The body of `ConfigLoader.kt:10-21`, after `trimIndent()`.
