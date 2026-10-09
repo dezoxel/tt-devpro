@@ -1128,7 +1128,7 @@ fn check_ready(plan: &Plan) -> Result<()> {
 }
 
 /// The worklog ids the plan showed as already in DevPro for a day.
-fn recorded_ids(day: &DayPlan) -> BTreeSet<&str> {
+pub(crate) fn recorded_ids(day: &DayPlan) -> BTreeSet<&str> {
     day.lines
         .iter()
         .filter(|line| line.kind == LineKind::Recorded)
@@ -1136,7 +1136,7 @@ fn recorded_ids(day: &DayPlan) -> BTreeSet<&str> {
         .collect()
 }
 
-fn portal_ids(day: Option<&PortalDay>) -> BTreeSet<&str> {
+pub(crate) fn portal_ids(day: Option<&PortalDay>) -> BTreeSet<&str> {
     day.map(|day| day.worklogs.iter().map(|w| w.unique_id.as_str()).collect())
         .unwrap_or_default()
 }

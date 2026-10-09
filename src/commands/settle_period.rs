@@ -13,12 +13,13 @@
 //! The block is printed, not stored: `plan.md` is the edit surface `--apply` hashes, and a
 //! line that changes every day has no place in it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{Datelike, NaiveDate, Weekday};
 
 use crate::commands::holidays::is_us_federal_holiday;
+use crate::commands::settle::{portal_ids, recorded_ids};
 use crate::commands::settle_window::last_settleable_day;
 use crate::config::Allocation;
 use crate::model::PtrPeriod;
@@ -193,19 +194,9 @@ pub fn billable_hours(
         }
     }
     for day in plan.days.iter().filter(|day| within(day.date)) {
-        let recorded: BTreeSet<&str> = day
-            .lines
-            .iter()
-            .filter(|line| line.kind == LineKind::Recorded)
-            .filter_map(|line| line.worklog_id.as_deref())
-            .collect();
-        let held: BTreeSet<&str> = portal
-            .iter()
-            .filter(|portal_day| portal_day.date == day.date)
-            .flat_map(|portal_day| &portal_day.worklogs)
-            .map(|w| w.unique_id.as_str())
-            .collect();
-        if recorded != held {
+        // The same test `--apply` makes before writing a day.
+        let held = portal.iter().find(|portal_day| portal_day.date == day.date);
+        if recorded_ids(day) != portal_ids(held) {
             continue;
         }
         for line in &day.lines {
@@ -276,7 +267,7 @@ pub fn block(
         .count();
     if unplanned > 0 {
         out.push(format!(
-            "- ⚠️ не спланировано {unplanned} дн. в периоде — их часы не учтены"
+            "- ⚠️ не спланировано {unplanned} дн. в периоде — их плановые часы не учтены"
         ));
     }
     out
@@ -792,7 +783,7 @@ mod tests {
         );
         assert_eq!(
             out.last().unwrap(),
-            "- ⚠️ не спланировано 1 дн. в периоде — их часы не учтены"
+            "- ⚠️ не спланировано 1 дн. в периоде — их плановые часы не учтены"
         );
     }
 
