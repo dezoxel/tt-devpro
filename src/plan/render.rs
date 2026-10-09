@@ -90,26 +90,28 @@ pub fn day_label(date: NaiveDate) -> String {
         Weekday::Sat => "Сб",
         Weekday::Sun => "Вс",
     };
-    const MONTHS: [&str; 12] = [
-        "января",
-        "февраля",
-        "марта",
-        "апреля",
-        "мая",
-        "июня",
-        "июля",
-        "августа",
-        "сентября",
-        "октября",
-        "ноября",
-        "декабря",
-    ];
     format!(
         "{weekday} {} {}",
         date.day(),
-        MONTHS[date.month0() as usize]
+        MONTHS_GENITIVE[date.month0() as usize]
     )
 }
+
+/// Month names as a date says them: «5 октября».
+pub const MONTHS_GENITIVE: [&str; 12] = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+];
 
 fn render_day(day: &DayPlan, prefix: &str) -> String {
     let chrono_hours: f64 = day.lines.iter().filter_map(|line| line.chrono_hours).sum();

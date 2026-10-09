@@ -46,6 +46,11 @@ pub struct Config {
     /// stand in for it.
     #[serde(default)]
     pub session_cookie: Option<String>,
+    /// The planned billable allocation per DevPro project, in FTE. The portal exposes
+    /// none (checked 2026-10-09), so the period line in `settle` reads it from here.
+    /// Optional: without it the line shows the FTE so far and no pace.
+    #[serde(default)]
+    pub allocations: Vec<Allocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -64,6 +69,14 @@ pub struct Filler {
     pub billability: String,
     pub min_hours: f64,
     pub max_hours: f64,
+}
+
+/// `fte` of 0.5 is half of a full-time week on that project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allocation {
+    pub devpro_project: String,
+    pub fte: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +166,24 @@ pub fn parse(content: &str) -> Result<Config> {
             );
         }
     }
+    let mut allocated: Vec<&str> = Vec::new();
+    for allocation in &config.allocations {
+        if !(allocation.fte > 0.0 && allocation.fte <= 1.0) {
+            bail!(
+                "allocations in ~/.config/tt-devpro/config.yaml: fte of {} must be above 0 and at \
+                 most 1, got {}",
+                allocation.devpro_project,
+                allocation.fte
+            );
+        }
+        if allocated.contains(&allocation.devpro_project.as_str()) {
+            bail!(
+                "allocations in ~/.config/tt-devpro/config.yaml: {} is listed twice",
+                allocation.devpro_project
+            );
+        }
+        allocated.push(&allocation.devpro_project);
+    }
     Ok(config)
 }
 
@@ -177,6 +208,7 @@ mappings:
         assert!(config.fillers.is_empty());
         assert!(config.overrides.is_empty());
         assert!(config.project_ids.is_empty());
+        assert!(config.allocations.is_empty());
         // G4: no key in the live config, so this is the value every real run uses.
         assert_eq!(config.max_synthetic_hours, 4.0);
     }
@@ -325,6 +357,51 @@ max_synthetic_hours: 2.5
             parse(&yaml).expect("parses").session_cookie.as_deref(),
             Some("op://Dev.Pro/TT DevPro Session/credential")
         );
+    }
+
+    const ALLOCATION: &str = "  - devpro_project: \"Inveniam SOW #5\"\n";
+
+    #[test]
+    fn allocations_read_a_project_and_its_fte() {
+        let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: 0.5\n");
+        assert_eq!(
+            parse(&yaml).expect("parses").allocations,
+            vec![Allocation {
+                devpro_project: "Inveniam SOW #5".to_string(),
+                fte: 0.5,
+            }]
+        );
+    }
+
+    /// An fte of 0 would divide by zero in the pace; above 1 is a typo for a percentage.
+    #[test]
+    fn an_allocation_fte_outside_zero_to_one_is_refused() {
+        for fte in ["0", "-0.5", "50", ".nan"] {
+            let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: {fte}\n");
+            let message = parse(&yaml).expect_err(fte).to_string();
+            assert!(
+                message.contains("must be above 0 and at most 1"),
+                "{message}"
+            );
+        }
+    }
+
+    /// Two entries for one project would leave the reader to guess which one counts.
+    #[test]
+    fn a_project_allocated_twice_is_refused() {
+        let entry = format!("{ALLOCATION}    fte: 0.5\n");
+        let yaml = format!("{MINIMAL}allocations:\n{entry}{entry}");
+        let message = parse(&yaml).expect_err("duplicate").to_string();
+        assert!(
+            message.contains("Inveniam SOW #5 is listed twice"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_inside_an_allocation_is_refused() {
+        let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: 0.5\n    hours: 4\n");
+        assert!(parse(&yaml).is_err());
     }
 
     /// The cookie itself must never sit in the config file.

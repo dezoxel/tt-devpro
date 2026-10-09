@@ -540,6 +540,7 @@ mod tests {
             plan_model: "sonnet".to_string(),
             vault_path: "/vault".into(),
             session_cookie: None,
+            allocations: Vec::new(),
         }
     }
 

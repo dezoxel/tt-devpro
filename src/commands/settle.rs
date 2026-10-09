@@ -27,6 +27,7 @@ use clap::Args;
 
 use crate::api::chrono::ChronoClient;
 use crate::api::portal::{ApiError, TtApiClient};
+use crate::commands::settle_period;
 use crate::commands::settle_window::{
     SCAN_DAYS, describe_not_final_days, last_settleable_day, nothing_to_settle_message,
     resolve_range, split_by_finality, unfilled_days,
@@ -204,11 +205,15 @@ async fn dispatch(
         model: &model,
         is_meeting: |aggregate: &DayProjectAggregate| normalizer.is_meeting_entry(aggregate),
     };
-    if args.replan {
-        settle.replan(&planning, io).await
+    let outcome = if args.replan {
+        settle.replan(&planning, io).await?
     } else {
-        settle.plan(args, &planning, io).await
+        settle.plan(args, &planning, io).await?
+    };
+    if outcome == Outcome::Ok {
+        settle.period(io).await;
     }
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +425,39 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         plan.closed.dedup();
         self.show(plan, io)?;
         Ok(Outcome::Ok)
+    }
+
+    /// The billing-period block under the plan just shown, read from the plan as stored.
+    ///
+    /// Its own failure is one ⚠️ line on stdout and the run stays successful: the plan is
+    /// already shown and stored, and the block only reports.
+    async fn period(&self, io: &mut dyn Console) {
+        match self.period_block().await {
+            Ok(lines) => {
+                for line in lines {
+                    io.out(&line);
+                }
+            }
+            Err(error) => {
+                io.out("");
+                io.out(&format!("\u{26a0}\u{fe0f} Период не прочитан: {error:#}"));
+            }
+        }
+    }
+
+    async fn period_block(&self) -> Result<Vec<String>> {
+        let plan = self.state.load()?.plan;
+        let through = settle_period::through(plan.cutoff, self.today);
+        let periods = self.portal.get_ptr_periods(&through.to_string()).await?;
+        let period = settle_period::choose(&periods, through)?;
+        let portal = self.read_portal(period.start, through).await?;
+        Ok(settle_period::block(
+            &period,
+            through,
+            &portal,
+            &plan,
+            &self.config.allocations,
+        ))
     }
 
     /// `tt-devpro settle --apply`: write the plan last shown, then read DevPro back.

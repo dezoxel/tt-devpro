@@ -1,7 +1,7 @@
 //! The Dev.Pro Time Tracking Portal client.
 //!
-//! Ports `api/TtApiClient.kt`. Three reads, three writes, and the two status gates
-//! that stand in front of them.
+//! Ports `api/TtApiClient.kt`. Four reads, three writes, and the two status gates
+//! that stand in front of them. The fourth read, `ptrPeriods`, is new in the port.
 //!
 //! **The status gates are pure functions here, and in Kotlin they are not.** C18
 //! locks the write path's request body precisely because the write path gets no live
@@ -35,7 +35,7 @@ use serde::de::DeserializeOwned;
 
 use crate::api::{CONNECT_TIMEOUT, REQUEST_TIMEOUT, build_client};
 use crate::model::{
-    AssignedProjectsResponse, CreateWorklogRequest, CurrentUser, NormalViewResponse,
+    AssignedProjectsResponse, CreateWorklogRequest, CurrentUser, NormalViewResponse, PtrPeriod,
     UpdateWorklogRequest,
 };
 
@@ -251,6 +251,19 @@ impl TtApiClient {
                 ("pageInfo.pageIndex", "1"),
                 ("pageInfo.pageSize", "500"),
             ]),
+            &url,
+        )
+        .await
+    }
+
+    /// The billing periods of `on_date`'s month, as the portal's PTR Periods view shows
+    /// them. Not in the Kotlin client: found in the portal's own frontend (2026-10-09).
+    /// More than one period can contain a date — May 2026 came back as `May 01 - 17`
+    /// and `May 01 - 31` — so choosing one is the caller's job.
+    pub async fn get_ptr_periods(&self, on_date: &str) -> Result<Vec<PtrPeriod>> {
+        let url = format!("{}/contact/ptrPeriods", self.base_url);
+        self.read(
+            self.read_client.get(&url).query(&[("onDate", on_date)]),
             &url,
         )
         .await
@@ -626,6 +639,26 @@ mod tests {
             requests[0].target,
             "/timeTracking/normalView?period=2026-09-01+-+2026-09-30&pageInfo.pageIndex=1&pageInfo.pageSize=500"
         );
+    }
+
+    /// The periods are the current user's: no contact id in the path, the date in the
+    /// query, and the answer a bare array.
+    #[tokio::test]
+    async fn ptr_periods_asks_for_the_date_and_reads_a_bare_array() {
+        let server = StubServer::start(vec![json_200(
+            r#"[{"ptrPeriod":"October 01 - 15, 2026","expectedHours":88,"loggedHours":32.0,
+                "isShowExpectedHours":true,"differenceHours":-56.0}]"#,
+        )]);
+        let periods = client(&server.base_url)
+            .get_ptr_periods("2026-10-08")
+            .await
+            .expect("ptr periods");
+
+        assert_eq!(periods.len(), 1);
+        assert_eq!(periods[0].ptr_period, "October 01 - 15, 2026");
+        assert_eq!(periods[0].expected_hours, 88.0);
+        let requests = server.requests();
+        assert_eq!(requests[0].target, "/contact/ptrPeriods?onDate=2026-10-08");
     }
 
     // -- C18, the write bodies ----------------------------------------------

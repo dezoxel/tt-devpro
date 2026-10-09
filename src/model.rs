@@ -79,6 +79,15 @@ pub struct NormalViewResponse {
     pub page_list: Vec<PageItem>,
 }
 
+/// One billing period from `contact/ptrPeriods` — the portal's PTR Periods view. The
+/// label is the only place the boundaries are given: `"October 01 - 15, 2026"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtrPeriod {
+    pub ptr_period: String,
+    pub expected_hours: f64,
+}
+
 /// C18: the field list and its order are the contract. Ends with `pif` and
 /// `googleCalendarEventId`; carries five nulls on the settle path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

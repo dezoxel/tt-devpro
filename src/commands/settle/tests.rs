@@ -189,6 +189,7 @@ enum Run {
     Plan(SettleArgs),
     Replan,
     Apply,
+    Period,
 }
 
 struct Harness {
@@ -244,6 +245,10 @@ impl Harness {
             Run::Plan(args) => settle.plan(&args, &planning, &mut io).await,
             Run::Replan => settle.replan(&planning, &mut io).await,
             Run::Apply => settle.apply(&mut io).await,
+            Run::Period => {
+                settle.period(&mut io).await;
+                Ok(Outcome::Ok)
+            }
         };
         (result, io)
     }
@@ -969,5 +974,132 @@ async fn apply_with_only_errors_left_writes_nothing() {
         io.out_text().starts_with("Nothing to apply"),
         "{}",
         io.out_text()
+    );
+}
+
+// -- the billing-period block ----------------------------------------------
+
+fn ptr_periods() -> String {
+    json_200(
+        &json!([
+            {"ptrPeriod": "October 01 - 15, 2026", "expectedHours": 88, "loggedHours": 14.75,
+             "isShowExpectedHours": true, "differenceHours": -73.25},
+            {"ptrPeriod": "October 16 - 31, 2026", "expectedHours": 88, "loggedHours": 0.0,
+             "isShowExpectedHours": true, "differenceHours": -88.0}
+        ])
+        .to_string(),
+    )
+}
+
+/// The read side spells billability `Billable` / `Non-billable`.
+fn read_worklog(project: &str, billability: &str, hours: f64) -> Value {
+    let mut worklog = worklog("r", "Earlier work", project, hours);
+    worklog["billability"] = json!(billability);
+    worklog
+}
+
+fn october_so_far() -> String {
+    view(&[
+        (
+            date(2026, 10, 1),
+            vec![read_worklog("Inveniam SOW #5", "Billable", 6.75)],
+        ),
+        (
+            date(2026, 10, 2),
+            vec![read_worklog("AI Practices", "Non-billable", 8.0)],
+        ),
+    ])
+}
+
+fn allocate_inveniam(h: &mut Harness) {
+    h.config.allocations = vec![crate::config::Allocation {
+        devpro_project: "Inveniam SOW #5".to_string(),
+        fte: 0.5,
+    }];
+}
+
+/// Monday's plan holds the billable meeting (1.0 h) not yet in DevPro; with 6.75 h already
+/// recorded on the 1st that is 7.75 h of 44 by Wednesday, 5 of 11 days gone.
+#[tokio::test]
+async fn the_period_block_counts_devpro_and_the_plan_against_the_allocation() {
+    let mut h = Harness::new();
+    allocate_inveniam(&mut h);
+    h.planned_monday().await;
+
+    let portal = StubServer::start(vec![ptr_periods(), october_so_far()]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Period, &portal.base_url, NOWHERE, &model).await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok);
+    assert_eq!(
+        io.out,
+        vec![
+            String::new(),
+            "**Период 1–15 октября** — прошло 5 из 11 рабочих дней (45%), по Ср 7 октября"
+                .to_string(),
+            "- 💵 Inveniam SOW #5 — 7.75 из 44.0 ч (18%) █░░░░┃░░░░░ ↗39% · 0.19 FTE из 0.5 · \
+             из них в плане 1.0 ч"
+                .to_string(),
+        ]
+    );
+    let requests = portal.requests();
+    assert_eq!(requests[0].target, "/contact/ptrPeriods?onDate=2026-10-07");
+    assert!(
+        requests[1]
+            .target
+            .starts_with("/timeTracking/normalView?period=2026-10-01"),
+        "{}",
+        requests[1].target
+    );
+}
+
+/// «Все дни закрыты» is still a morning the period has moved on.
+#[tokio::test]
+async fn the_period_block_follows_a_plan_with_every_day_closed() {
+    let h = Harness::new();
+    let plan = Plan {
+        prefix: "Б".to_string(),
+        cutoff: date(2026, 10, 7),
+        days: Vec::new(),
+        errors: Vec::new(),
+        closed: Vec::new(),
+    };
+    h.state().save(&plan, &render(&plan)).unwrap();
+
+    let portal = StubServer::start(vec![ptr_periods(), october_so_far()]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Period, &portal.base_url, NOWHERE, &model).await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok);
+    assert_eq!(
+        io.out[2],
+        "- 💵 Inveniam SOW #5 — 6.75 ч · 0.17 FTE · плановой аллокации нет: allocations в \
+         ~/.config/tt-devpro/config.yaml"
+    );
+}
+
+/// The plan is already shown and stored when the block is read, so a portal failure costs
+/// the block and nothing else.
+#[tokio::test]
+async fn a_failed_period_read_is_one_warning_and_the_run_succeeds() {
+    let h = Harness::new();
+    h.planned_monday().await;
+
+    let portal = StubServer::start(vec![response(
+        500,
+        "Internal Server Error",
+        "text/plain",
+        "boom",
+    )]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h.run(Run::Period, &portal.base_url, NOWHERE, &model).await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok);
+    assert_eq!(io.out.len(), 2, "{}", io.out_text());
+    assert_eq!(io.out[0], "");
+    assert!(
+        io.out[1].starts_with("⚠️ Период не прочитан: "),
+        "{}",
+        io.out[1]
     );
 }

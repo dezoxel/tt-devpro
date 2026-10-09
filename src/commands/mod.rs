@@ -29,6 +29,7 @@ pub mod api;
 pub mod holidays;
 pub mod mapping;
 pub mod settle;
+pub mod settle_period;
 pub mod settle_window;
 
 use crate::service::normalizer::java_min;
