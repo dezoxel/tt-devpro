@@ -29,8 +29,10 @@ pub const MAX_TITLE_CHARS: usize = 80;
 const RULES: &str = r#"You plan the worklogs of one software architect for his employer's time-tracking portal (DevPro), from his own time tracker (Chrono). Every day must come to exactly 8.0 hours. Pinned lines of a day are already fixed and shown for context only; you answer for the day's "lines" and add "extra" lines.
 
 TITLES
-- English, short (3 to 8 words), abstract: name the work, not its circumstances. No document authors, no portal or tool names, no "what to reply" detail.
-- Drop people's names, unless the person is the subject of the work (evaluating a candidate).
+- These worklogs are legal records. They are an addendum to the contract, payment rests on them, and they are the first thing read if anyone asks what the work was. Never write anything that could be used against the author or his employer: no internal judgments of the client or its people, no blame, risks, disputes, negotiation positions, defensive preparation, complaints, or "what to reply to X". Such work gets a neutral professional name: "Thinking how to answer John's gaslighting" becomes "Strategy alignment".
+- Apart from that, stay concrete and close to the Chrono description. Keep the specifics that say what was done: systems, tools, repositories, tickets, documents (AWS, MBO, swe-ai-in-sdlc-tools, AI-792). Tidy the wording and drop filler such as "this week", but do not make it vaguer: "Get the Inveniam AWS account confirmed and put MFA on it" stays about that, not "Configure cloud account access".
+- English, one line, at most 80 characters. Translate a description in another language.
+- People's names are fine where neutral (a colleague's PR reviewed, a candidate evaluated); leave a name out where it would carry a judgment.
 - Never copy a title from recent_devpro_titles. Recurring work gets a fresh wording with the same meaning every day.
 - A vague description ("Call follow-up", "Review") is expanded from the lines around it in the day's timeline. If nothing there explains it, still write your best title and set needs_detail to true.
 - Plain ASCII only.
@@ -38,9 +40,12 @@ TITLES
 HOURS
 - Every hours value is a multiple of 0.25 and at least 0.25.
 - A day's lines and extra lines together come to exactly its hours_to_fill.
-- Stretch the day's lines first, each in proportion to what it plausibly took: work an auditor would believe took longer gets more, a two-minute admin note stays small. Keep each line believable, roughly within 3x its chrono_hours unless it is the day's only real work.
-- What the lines cannot plausibly absorb goes to one extra line of kind "main": the main topic of the last days, picked from the candidates with source "history" (usually the one with the most recent_hours) and retitled in your own words. At most one main line per day.
-- Only when the main line would itself become implausibly large (more than about half the day) add extra lines of kind "borrow" (other history candidates) or "filler" (filler candidates, each within its max_hours). Borrow and filler lines of a day together stay within max_synthetic_hours.
+- Find the day's main work: the line that is its substantive work (design, analysis, building, writing, review), usually the one with the most chrono_hours. Communication, admin, inbox processing and short preparation are never the main work.
+- Every other line is stretched only as far as it plausibly took, roughly within 2x its chrono_hours; a two-minute admin note stays small.
+- The main work line takes everything else, however large that makes it: 0.58 h of chrono can become 5.5 h.
+- Only when the day has no substantive work line at all, add one extra line of kind "main" instead: the main topic of the last days, picked from the candidates with source "history" (usually the one with the most recent_hours). At most one main line per day.
+- An extra line's title names its candidate's topic, never the work of another candidate or another project.
+- Lines of kind "borrow" (other history candidates) and "filler" (filler candidates, each within its max_hours) are a last resort, for a day with no substantive work line and no history candidate to carry it. Borrow and filler lines of a day together stay within max_synthetic_hours.
 - If the lines alone already exceed hours_to_fill, shrink them in proportion and add no extra lines.
 
 ANSWER
