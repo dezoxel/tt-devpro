@@ -482,7 +482,7 @@ fn plan_day<Tz: TimeZone, M: Fn(&DayProjectAggregate) -> bool>(
         }));
     }
 
-    let candidates = candidates(day, history, is_meeting, &mut resolve);
+    let candidates = candidates(day, history, is_meeting);
     Ok(Outcome::Model(DayContext {
         date: day.date,
         pinned,
@@ -587,13 +587,22 @@ fn unmapped_message(unmapped: &[&UnmappedEntry], assigned: &[Project]) -> String
 }
 
 /// The day's candidates: the biggest Chrono work of the working week before it, then the
-/// configured fillers, each only when its project resolves on the day.
+/// configured fillers, each only when its project is assigned on the day.
+///
+/// A candidate's project resolves against the day's assigned projects alone. The
+/// `project_ids` fallback is for a Chrono line whose project was renamed; a synthetic line
+/// has no Chrono work behind it, so a project not assigned on the day is no option for it.
 fn candidates<M: Fn(&DayProjectAggregate) -> bool>(
     day: &DayInputs,
     history: &[Aggregated],
     is_meeting: &M,
-    resolve: &mut impl FnMut(&str) -> Result<String, String>,
 ) -> Vec<Candidate> {
+    let assigned_id = |name: &str| {
+        day.assigned
+            .iter()
+            .find(|project| project.short_name == name)
+            .map(|project| project.unique_id.clone())
+    };
     let window: HashSet<NaiveDate> = working_days_before(day.date, HISTORY_WORKING_DAYS)
         .into_iter()
         .collect();
@@ -620,7 +629,7 @@ fn candidates<M: Fn(&DayProjectAggregate) -> bool>(
         if out.len() == HISTORY_CANDIDATES {
             break;
         }
-        let Ok(project_id) = resolve(&aggregate.devpro_project_name) else {
+        let Some(project_id) = assigned_id(&aggregate.devpro_project_name) else {
             continue;
         };
         out.push(Candidate {
@@ -637,7 +646,7 @@ fn candidates<M: Fn(&DayProjectAggregate) -> bool>(
 
     let mut fillers = 0;
     for filler in &day.config.fillers {
-        let Ok(project_id) = resolve(&filler.devpro_project) else {
+        let Some(project_id) = assigned_id(&filler.devpro_project) else {
             continue;
         };
         fillers += 1;
@@ -1153,7 +1162,16 @@ mod tests {
             entry(1, date(2026, 10, 2), 9, INVENIAM, "Connect mapping", 4.0),
             entry(2, day, 9, AI, "Notes", 1.0),
         ];
-        let config = config();
+        // A fallback id for each unassigned project: a synthetic line must not reach for it.
+        let mut config = config();
+        config.fillers.push(Filler {
+            devpro_project: "Artory".to_string(),
+            ..config.fillers[0].clone()
+        });
+        config.project_ids = HashMap::from([
+            ("Inveniam SOW #5".to_string(), "id-inv".to_string()),
+            ("Artory".to_string(), "id-artory".to_string()),
+        ]);
         let assigned = HashMap::from([(day, vec![project("AI Practices")])]);
         let pins = HashMap::new();
         let inputs = Inputs {
@@ -1171,12 +1189,13 @@ mod tests {
             &FixedOffset::east_opt(0).unwrap(),
         )
         .unwrap();
-        assert!(
-            context.days[0]
-                .candidates
-                .iter()
-                .all(|c| c.source == CandidateSource::Filler)
-        );
+        let projects: Vec<&str> = context.days[0]
+            .candidates
+            .iter()
+            .map(|c| c.devpro_project.as_str())
+            .collect();
+        assert_eq!(projects, ["AI Practices"]);
+        assert!(context.fallbacks.is_empty(), "{:?}", context.fallbacks);
     }
 
     #[test]
