@@ -13,7 +13,7 @@
 //! The block is printed, not stored: `plan.md` is the edit surface `--apply` hashes, and a
 //! line that changes every day has no place in it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{Datelike, NaiveDate, Weekday};
@@ -161,6 +161,12 @@ impl Billable {
 
 /// Billable hours per DevPro project in `[start, through]`. A plan line already in DevPro
 /// (`Recorded`) is counted from DevPro and only from there.
+///
+/// A plan day whose worklogs in DevPro are no longer the ones it recorded is not counted
+/// from the plan: someone wrote to it since, `--apply` would skip it, and its planned lines
+/// would count a second time next to what DevPro now holds. A planned line is named as
+/// DevPro names its project id, so a project the config spells differently (a renamed one
+/// resolved through `project_ids`, another case) stays one line.
 pub fn billable_hours(
     portal: &[PortalDay],
     plan: &Plan,
@@ -168,6 +174,11 @@ pub fn billable_hours(
     through: NaiveDate,
 ) -> BTreeMap<String, Billable> {
     let within = |date: NaiveDate| start <= date && date <= through;
+    let names: HashMap<&str, &str> = portal
+        .iter()
+        .flat_map(|day| &day.worklogs)
+        .map(|w| (w.project_unique_id.as_str(), w.project_short_name.as_str()))
+        .collect();
     let mut by_project: BTreeMap<String, Billable> = BTreeMap::new();
     for day in portal.iter().filter(|day| within(day.date)) {
         for worklog in day
@@ -182,9 +193,28 @@ pub fn billable_hours(
         }
     }
     for day in plan.days.iter().filter(|day| within(day.date)) {
+        let recorded: BTreeSet<&str> = day
+            .lines
+            .iter()
+            .filter(|line| line.kind == LineKind::Recorded)
+            .filter_map(|line| line.worklog_id.as_deref())
+            .collect();
+        let held: BTreeSet<&str> = portal
+            .iter()
+            .filter(|portal_day| portal_day.date == day.date)
+            .flat_map(|portal_day| &portal_day.worklogs)
+            .map(|w| w.unique_id.as_str())
+            .collect();
+        if recorded != held {
+            continue;
+        }
         for line in &day.lines {
             if line.kind != LineKind::Recorded && line.is_billable() {
-                let entry = by_project.entry(line.devpro_project.clone()).or_default();
+                let name = names
+                    .get(line.project_id.as_str())
+                    .copied()
+                    .unwrap_or(&line.devpro_project);
+                let entry = by_project.entry(name.to_string()).or_default();
                 entry.planned += quarters_to_hours(line.quarters);
             }
         }
@@ -367,7 +397,7 @@ mod tests {
     fn worklog(project: &str, billability: &str, hours: f64) -> WorklogDetail {
         WorklogDetail {
             unique_id: "w".to_string(),
-            project_unique_id: "p".to_string(),
+            project_unique_id: project.to_string(),
             project_short_name: project.to_string(),
             task_title: "t".to_string(),
             billability: billability.to_string(),
@@ -398,12 +428,19 @@ mod tests {
             title: "t".to_string(),
             needs_detail: false,
             devpro_project: project.to_string(),
-            project_id: "p".to_string(),
+            project_id: project.to_string(),
             billability: billability.to_string(),
             quarters,
             pinned: false,
             worklog_id: None,
             candidate_id: None,
+        }
+    }
+
+    fn recorded_line(worklog_id: &str, project: &str, quarters: u32) -> PlanLine {
+        PlanLine {
+            worklog_id: Some(worklog_id.to_string()),
+            ..line(LineKind::Recorded, project, BILLABLE, quarters)
         }
     }
 
@@ -544,7 +581,7 @@ mod tests {
             vec![DayPlan {
                 date: date(2026, 10, 6),
                 lines: vec![
-                    line(LineKind::Recorded, "Inveniam SOW #5", BILLABLE, 8),
+                    recorded_line("w", "Inveniam SOW #5", 8),
                     line(LineKind::Work, "Inveniam SOW #5", BILLABLE, 12),
                 ],
             }],
@@ -558,6 +595,53 @@ mod tests {
                 planned: 3.0
             }
         );
+    }
+
+    /// The day was planned empty, then written in the portal by hand: the plan no longer
+    /// describes it, and counting both would double the day.
+    #[test]
+    fn a_plan_day_written_to_devpro_since_is_counted_from_devpro_only() {
+        let portal = [portal_day(
+            date(2026, 10, 6),
+            vec![worklog("Inveniam SOW #5", "Billable", 8.0)],
+        )];
+        let plan = plan(
+            vec![DayPlan {
+                date: date(2026, 10, 6),
+                lines: vec![line(LineKind::Work, "Inveniam SOW #5", BILLABLE, 32)],
+            }],
+            Vec::new(),
+        );
+        let hours = billable_hours(&portal, &plan, date(2026, 10, 1), date(2026, 10, 8));
+        assert_eq!(
+            hours["Inveniam SOW #5"],
+            Billable {
+                recorded: 8.0,
+                planned: 0.0
+            }
+        );
+    }
+
+    /// The config may spell a project otherwise than DevPro does (a renamed project resolved
+    /// through `project_ids`); the id is the same, so it is one project.
+    #[test]
+    fn a_planned_line_takes_the_name_devpro_gives_its_project_id() {
+        let portal = [portal_day(
+            date(2026, 10, 1),
+            vec![worklog("Inveniam SOW #5", "Billable", 2.0)],
+        )];
+        let mut renamed = line(LineKind::Work, "Inveniam SOW 5 (old)", BILLABLE, 4);
+        renamed.project_id = "Inveniam SOW #5".to_string();
+        let plan = plan(
+            vec![DayPlan {
+                date: date(2026, 10, 7),
+                lines: vec![renamed],
+            }],
+            Vec::new(),
+        );
+        let hours = billable_hours(&portal, &plan, date(2026, 10, 1), date(2026, 10, 8));
+        assert_eq!(hours.len(), 1);
+        assert_eq!(hours["Inveniam SOW #5"].total(), 3.0);
     }
 
     #[test]
