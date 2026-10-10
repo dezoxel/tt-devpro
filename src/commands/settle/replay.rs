@@ -35,6 +35,7 @@ pub async fn replay(from: NaiveDate, to: NaiveDate, model: Option<String>) -> Re
         state: &state,
         zone: &Local,
         today: Local::now().date_naive(),
+        now: Utc::now,
     };
     let normalizer = TimeNormalizer::for_settle(&config.vault_path)?;
     let model = ClaudeCliModel::new(model.unwrap_or_else(|| config.plan_model.clone()));
@@ -100,6 +101,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             days: planned.days,
             errors: planned.errors,
             closed: planned.closed,
+            removed: BTreeMap::new(),
         };
         plan.number();
 
@@ -228,6 +230,7 @@ mod tests {
                 message: "Unmapped: X".to_string(),
             }],
             closed: vec![],
+            removed: BTreeMap::new(),
         };
         let report = comparison(
             &plan,

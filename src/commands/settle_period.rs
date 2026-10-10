@@ -423,6 +423,7 @@ mod tests {
             billability: billability.to_string(),
             quarters,
             pinned: false,
+            edited: false,
             worklog_id: None,
             candidate_id: None,
         }
@@ -442,6 +443,7 @@ mod tests {
             days,
             errors,
             closed: Vec::new(),
+            removed: BTreeMap::new(),
         }
     }
 

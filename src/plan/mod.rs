@@ -13,6 +13,8 @@ pub mod parse;
 pub mod render;
 pub mod state;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +72,7 @@ pub enum LineKind {
 }
 
 /// The identity of a Chrono line: entries merge on (project, description) within a day.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChronoKey {
     pub project: String,
     pub description: String,
@@ -95,9 +97,14 @@ pub struct PlanLine {
     pub project_id: String,
     pub billability: String,
     pub quarters: Quarters,
-    /// The title and hours are fixed: a meeting, a capped override, a recorded worklog, or a
-    /// line Yurii edited. A replan keeps them as they are.
+    /// The title and hours are fixed for the model: a meeting, a capped override, a recorded
+    /// worklog, or a line Yurii edited.
     pub pinned: bool,
+    /// Yurii changed or added the line in `plan.md`. Only these lines are carried into a
+    /// replan as they are; the other pins come back from Chrono and DevPro as they are now,
+    /// so a meeting corrected in Chrono since the last round shows its new hours.
+    #[serde(default)]
+    pub edited: bool,
     /// The DevPro id of a recorded worklog.
     pub worklog_id: Option<String>,
     /// The candidate a main, filler or borrowed line was built from.
@@ -140,6 +147,10 @@ pub struct Plan {
     pub errors: Vec<DayError>,
     /// Days of an explicit range that DevPro already holds at 8.0 h.
     pub closed: Vec<NaiveDate>,
+    /// The Chrono lines Yurii removed, per day. A removed line is gone from `days`, so without
+    /// this the next replan of its day would build it from Chrono again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub removed: BTreeMap<NaiveDate, BTreeSet<ChronoKey>>,
 }
 
 impl Plan {
@@ -208,6 +219,7 @@ pub(crate) mod fixtures {
             billability: if billable { BILLABLE } else { NON_BILLABLE }.to_string(),
             quarters: q,
             pinned: matches!(kind, LineKind::Meeting | LineKind::Recorded),
+            edited: false,
             worklog_id: None,
             candidate_id: None,
         }
@@ -302,6 +314,7 @@ pub(crate) mod fixtures {
                 message: "Chrono project 'X - DevPro - Work' has no mapping".to_string(),
             }],
             closed: vec![],
+            removed: BTreeMap::new(),
         };
         plan.number();
         plan

@@ -441,6 +441,7 @@ fn extra_line(candidate: &Candidate, kind: LineKind, title: &str, quarters: Quar
         billability: candidate.billability.clone(),
         quarters,
         pinned: false,
+        edited: false,
         worklog_id: None,
         candidate_id: Some(candidate.id.clone()),
     }

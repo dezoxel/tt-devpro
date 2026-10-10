@@ -8,17 +8,37 @@
 //! agent's discipline.
 //!
 //! One plan at a time: a new `settle` replaces both files. This is one person's tool.
+//!
+//! Beside them, `unconfirmed.json` lists the writes `--apply` sent that timed out and were not
+//! in DevPro when it looked. Such a write may still land after the run took its day back, and
+//! nothing else would remember it. The ledger is not part of the plan: dropping the plan, which
+//! a stopped `--apply` does, leaves it in place for the next `settle` to check.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::Plan;
+use super::{Plan, Quarters};
 
 const MD_FILE: &str = "plan.md";
 const JSON_FILE: &str = "plan.json";
+const UNCONFIRMED_FILE: &str = "unconfirmed.json";
+
+/// A write that timed out and was not in DevPro when `--apply` looked: the worklog it would
+/// make, and the ids the day held before that run, so a later read can tell it apart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnconfirmedWrite {
+    pub date: NaiveDate,
+    pub project_id: String,
+    pub devpro_project: String,
+    pub title: String,
+    pub quarters: Quarters,
+    pub before_ids: Vec<String>,
+    pub written_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Stored {
@@ -71,6 +91,10 @@ impl State {
         self.dir.join(JSON_FILE)
     }
 
+    pub fn unconfirmed_path(&self) -> PathBuf {
+        self.dir.join(UNCONFIRMED_FILE)
+    }
+
     /// Stores the plan and the text shown for it. `plan.json` goes first: a crash between the
     /// two leaves a new hash beside an old `plan.md`, which `--apply` refuses, rather than an
     /// old hash beside a new text, which it might not.
@@ -108,18 +132,54 @@ impl State {
         })
     }
 
-    /// Removes both files; a missing one is not an error.
+    /// Removes both plan files; a missing one is not an error. The ledger of unconfirmed
+    /// writes stays.
     pub fn clear(&self) -> Result<()> {
         for path in [self.json_path(), self.md_path()] {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(error).with_context(|| format!("removing {}", path.display()));
-                }
-            }
+            remove_if_present(&path)?;
         }
         Ok(())
+    }
+
+    /// The unconfirmed writes on record. No file is an empty ledger; a file that cannot be
+    /// read is an error and never an empty ledger, because an empty one is exactly what lets
+    /// a day be planned beside a worklog that landed late.
+    pub fn unconfirmed(&self) -> Result<Vec<UnconfirmedWrite>> {
+        let path = self.unconfirmed_path();
+        let json = match std::fs::read_to_string(&path) {
+            Ok(json) => json,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+        serde_json::from_str(&json).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// Replaces the ledger; an empty one removes the file.
+    pub fn save_unconfirmed(&self, writes: &[UnconfirmedWrite]) -> Result<()> {
+        let path = self.unconfirmed_path();
+        if writes.is_empty() {
+            return remove_if_present(&path);
+        }
+        std::fs::create_dir_all(&self.dir)
+            .with_context(|| format!("creating {}", self.dir.display()))?;
+        let json = serde_json::to_string_pretty(writes).context("serialising the ledger")?;
+        write_atomically(&path, &json)
+    }
+
+    pub fn record_unconfirmed(&self, write: UnconfirmedWrite) -> Result<()> {
+        let mut writes = self.unconfirmed()?;
+        writes.push(write);
+        self.save_unconfirmed(&writes)
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
     }
 }
 
@@ -181,6 +241,62 @@ mod tests {
         state.clear().unwrap();
         assert!(state.load().is_err());
         assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    fn unconfirmed(title: &str) -> UnconfirmedWrite {
+        UnconfirmedWrite {
+            date: crate::plan::fixtures::date(2026, 10, 5),
+            project_id: "id-ai".to_string(),
+            devpro_project: "AI Practices".to_string(),
+            title: title.to_string(),
+            quarters: 28,
+            before_ids: vec!["w0".to_string()],
+            written_at: "2026-10-08T09:00:00Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_ledger_is_recorded_into_a_missing_dir_and_survives_clearing_the_plan() {
+        let dir = TempDir::new().unwrap();
+        let state = State::at(dir.path().join("tt-devpro"));
+        assert!(state.unconfirmed().unwrap().is_empty());
+
+        state.record_unconfirmed(unconfirmed("a")).unwrap();
+        state.save(&plan(), "x").unwrap();
+        state.record_unconfirmed(unconfirmed("b")).unwrap();
+        state.clear().unwrap();
+
+        assert_eq!(
+            state.unconfirmed().unwrap(),
+            vec![unconfirmed("a"), unconfirmed("b")]
+        );
+        state.save_unconfirmed(&[]).unwrap();
+        assert!(!state.unconfirmed_path().exists());
+        state.save_unconfirmed(&[]).unwrap();
+    }
+
+    #[test]
+    fn a_ledger_that_cannot_be_parsed_is_an_error_naming_its_file() {
+        let dir = TempDir::new().unwrap();
+        let state = State::at(dir.path());
+        std::fs::write(state.unconfirmed_path(), "{not json").unwrap();
+        let error = format!("{:#}", state.unconfirmed().unwrap_err());
+        assert!(error.contains("unconfirmed.json"), "{error}");
+        assert!(state.record_unconfirmed(unconfirmed("a")).is_err());
+    }
+
+    #[test]
+    fn a_plan_stored_before_edited_and_removed_existed_loads_with_neither() {
+        let dir = TempDir::new().unwrap();
+        let state = State::at(dir.path());
+        state.save(&plan(), "x").unwrap();
+        let json = std::fs::read_to_string(state.json_path()).unwrap();
+        assert!(!json.contains("\"removed\""), "{json}");
+        assert!(json.contains("\"edited\": false,"), "{json}");
+        std::fs::write(state.json_path(), json.replace("\"edited\": false,", "")).unwrap();
+        let loaded = state.load().unwrap().plan;
+        assert_eq!(loaded, plan());
+        assert!(loaded.removed.is_empty());
     }
 
     #[test]

@@ -197,6 +197,12 @@ enum Run {
 struct Harness {
     dir: TempDir,
     config: Config,
+    now: fn() -> DateTime<Utc>,
+}
+
+/// The clock of every run: 09:00 UTC on [`today`].
+fn nine_am() -> DateTime<Utc> {
+    "2026-10-08T09:00:00Z".parse().unwrap()
 }
 
 impl Harness {
@@ -204,6 +210,7 @@ impl Harness {
         Self {
             dir: TempDir::new().unwrap(),
             config: crate::config::parse(CONFIG).unwrap(),
+            now: nine_am,
         }
     }
 
@@ -240,6 +247,7 @@ impl Harness {
             state: &state,
             zone: &Utc,
             today: today(),
+            now: self.now,
         };
         let planning = Planning { model, is_meeting };
         let mut io = Recorder::default();
@@ -651,6 +659,157 @@ async fn a_plan_without_edits_is_shown_again_without_a_request() {
     assert_eq!(io.out, vec![md]);
 }
 
+/// Monday's entries with the meeting as Chrono has it now.
+fn monday_entries_with_meeting(hours: f64) -> Vec<Value> {
+    vec![
+        entry(1, monday(), 9, INVENIAM, "Weekly sync", hours),
+        entry(2, monday(), 11, AI, "Draft the cost model", 1.5),
+    ]
+}
+
+/// The meeting is pinned by the context, not by Yurii: a replan takes its hours from Chrono
+/// as it is now. Б2 shortened to 6.5 beside the corrected 1.5 h meeting is the whole day, so
+/// the stale 1.0 would leave a gap the model is not there to fill.
+#[tokio::test]
+async fn a_meeting_corrected_in_chrono_reaches_the_replanned_day() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    h.write_md(&h.md().replace("1.5 → **7.0**", "1.5 → 6.5"));
+
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries_with_meeting(1.5))]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    assert!(model.calls().is_empty());
+    let day = &h.state().load().unwrap().plan.days[0];
+    let lines: Vec<(LineKind, Quarters, bool)> = day
+        .lines
+        .iter()
+        .map(|l| (l.kind, l.quarters, l.edited))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![(LineKind::Meeting, 6, false), (LineKind::Work, 26, true)]
+    );
+}
+
+/// The meeting row Yurii edited to 0.75 stays at 0.75 two rounds on, after Chrono moved the
+/// meeting to 1.5 h and another row was edited.
+#[tokio::test]
+async fn a_meeting_yurii_edited_keeps_his_hours_across_a_replan() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    let md = h.md();
+    assert_eq!(md.matches("| 1.0 |").count(), 1, "{md}");
+    h.write_md(&md.replace("| 1.0 |", "| 0.75 |"));
+
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.25))]);
+    let (first, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+    assert_eq!(first.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+
+    h.write_md(
+        &h.md()
+            .replace("AI cost model draft", "AI cost model outline"),
+    );
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries_with_meeting(1.5))]);
+    let model = FakePlanModel::new(vec![]);
+    let (second, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    assert_eq!(second.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    assert!(model.calls().is_empty());
+    assert_eq!(
+        summary(&h.state().load().unwrap().plan.days[0]),
+        vec![
+            (1, LineKind::Meeting, "Weekly sync", 3, true),
+            (2, LineKind::Work, "AI cost model outline", 29, true),
+        ]
+    );
+}
+
+/// A removed Chrono row stays removed when a later round replans its day for another edit:
+/// the plan keeps the removal, not only the round that made it.
+#[tokio::test]
+async fn a_removed_chrono_row_stays_removed_in_later_rounds() {
+    let h = Harness::new();
+    let mut entries = monday_entries();
+    entries.push(entry(3, monday(), 14, AI, "Review the pipeline", 1.0));
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view(), assigned()]);
+    let chrono_stub = StubServer::start(vec![chrono(&entries)]);
+    let two_lines = json!({"days": [{"date": "2026-10-05", "lines": [
+        {"key": "c1", "title": "AI cost model draft", "hours": 3.5, "needs_detail": false},
+        {"key": "c2", "title": "Pipeline review", "hours": 3.5, "needs_detail": false}
+    ], "extra": []}]});
+    let model = FakePlanModel::new(vec![Ok(two_lines)]);
+    let (planned, io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+    assert_eq!(planned.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+
+    let md = h.md();
+    let removed: Vec<&str> = md
+        .lines()
+        .filter(|line| !line.contains("Review the pipeline"))
+        .collect();
+    assert_eq!(removed.len() + 1, md.lines().count(), "{md}");
+    h.write_md(&(removed.join("\n") + "\n"));
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&entries)]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.0))]);
+    let (first, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+    assert_eq!(first.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+
+    h.write_md(
+        &h.md()
+            .replace("AI cost model draft", "AI cost model outline"),
+    );
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&entries)]);
+    let model = FakePlanModel::new(vec![]);
+    let (second, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    assert_eq!(second.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    assert!(model.calls().is_empty());
+    let plan = h.state().load().unwrap().plan;
+    assert_eq!(
+        summary(&plan.days[0]),
+        vec![
+            (1, LineKind::Meeting, "Weekly sync", 4, true),
+            (2, LineKind::Work, "AI cost model outline", 28, true),
+        ]
+    );
+    let kept: Vec<&str> = plan.removed[&monday()]
+        .iter()
+        .map(|key| key.description.as_str())
+        .collect();
+    assert_eq!(kept, vec!["Review the pipeline"]);
+}
+
 // -- apply ------------------------------------------------------------------
 
 #[tokio::test]
@@ -863,7 +1022,7 @@ async fn a_timed_out_write_that_landed_counts_as_written() {
 }
 
 #[tokio::test]
-async fn a_timed_out_write_that_did_not_land_is_not_sent_again() {
+async fn a_timed_out_write_that_did_not_land_is_not_sent_again_and_is_recorded() {
     let h = Harness::new();
     h.planned_monday().await;
     let portal = StubServer::start(vec![
@@ -898,7 +1057,223 @@ async fn a_timed_out_write_that_did_not_land_is_not_sent_again() {
         "{}",
         io.err_text()
     );
+    assert!(
+        io.err_text().contains("The next settle checks for it"),
+        "{}",
+        io.err_text()
+    );
     assert!(!h.state().md_path().exists());
+    // The plan is dropped; the write that may still land is not.
+    assert_eq!(
+        h.state().unconfirmed().unwrap(),
+        vec![unconfirmed_on(monday(), 0)]
+    );
+}
+
+// -- writes that timed out --------------------------------------------------
+
+/// The Б2 write of [`planned_monday`] as the ledger keeps it after a timeout, sent
+/// `minutes_ago` before [`nine_am`].
+fn unconfirmed_on(date: NaiveDate, minutes_ago: i64) -> UnconfirmedWrite {
+    UnconfirmedWrite {
+        date,
+        project_id: "id-ai".to_string(),
+        devpro_project: "AI Practices".to_string(),
+        title: "AI cost model draft".to_string(),
+        quarters: 28,
+        before_ids: Vec::new(),
+        written_at: nine_am() - TimeDelta::minutes(minutes_ago),
+    }
+}
+
+fn ten_am() -> DateTime<Utc> {
+    nine_am() + TimeDelta::hours(1)
+}
+
+/// Monday after the rollback, with the timed-out Б2 write landed late as w7.
+fn monday_with_the_late_write() -> String {
+    view(&[(
+        monday(),
+        vec![worklog("w7", "AI cost model draft", "AI Practices", 7.0)],
+    )])
+}
+
+#[tokio::test]
+async fn a_late_landing_write_is_named_by_the_next_settle_and_its_day_is_not_planned() {
+    let h = Harness::new();
+    let tuesday = date(2026, 10, 6);
+    let ledger = vec![unconfirmed_on(monday(), 60), unconfirmed_on(tuesday, 60)];
+    h.state().save_unconfirmed(&ledger).unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), monday_with_the_late_write()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+
+    let (result, io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    let requests = portal.requests();
+    assert_eq!(requests.len(), 3, "the held day asks for no assignments");
+    assert!(requests.iter().all(|r| r.method == "GET"));
+    assert!(model.calls().is_empty());
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.days.is_empty());
+    let message = &plan.errors[0].message;
+    assert_eq!(plan.errors[0].date, monday());
+    assert!(
+        message.contains("`tt-devpro api delete-worklog w7`"),
+        "{message}"
+    );
+    assert!(
+        message.contains("«AI cost model draft» (7.0 ч, AI Practices)"),
+        "{message}"
+    );
+    let shown = io.out_text();
+    assert!(shown.contains("не спланирован"), "{shown}");
+    assert!(shown.contains("delete-worklog w7"), "{shown}");
+    // Monday stays held until w7 is gone; Tuesday was not planned, so it waits its turn.
+    assert_eq!(h.state().unconfirmed().unwrap(), ledger);
+}
+
+#[tokio::test]
+async fn an_unconfirmed_write_within_its_window_holds_the_day() {
+    let h = Harness::new();
+    h.state()
+        .record_unconfirmed(unconfirmed_on(monday(), 5))
+        .unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+
+    let (result, io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    assert!(model.calls().is_empty());
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.days.is_empty());
+    let message = &plan.errors[0].message;
+    assert!(message.contains("ещё может дойти"), "{message}");
+    assert!(message.contains("после 09:10"), "{message}");
+    assert_eq!(h.state().unconfirmed().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn an_expired_unconfirmed_write_is_dropped_and_the_day_planned() {
+    let h = Harness::new();
+    let ledger = vec![
+        unconfirmed_on(monday(), 16),
+        // Older than any scan reaches: nothing will check it again.
+        unconfirmed_on(date(2026, 8, 1), 60),
+    ];
+    h.state().save_unconfirmed(&ledger).unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view(), assigned()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.0))]);
+
+    let (result, io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+    assert_eq!(plan.days[0].total_quarters(), DAY_QUARTERS);
+    assert!(!h.state().unconfirmed_path().exists());
+}
+
+/// Yurii kept the late worklog and closed the day around it in the portal: nothing is left to
+/// plan there, so the entry has done its work.
+#[tokio::test]
+async fn an_unconfirmed_write_on_a_day_devpro_holds_at_eight_hours_is_dropped() {
+    let h = Harness::new();
+    h.state()
+        .record_unconfirmed(unconfirmed_on(monday(), 60))
+        .unwrap();
+    let full = view(&[(
+        monday(),
+        vec![
+            worklog("w7", "AI cost model draft", "AI Practices", 7.0),
+            worklog("w8", "Weekly sync", "Inveniam SOW #5", 1.0),
+        ],
+    )]);
+    let portal = StubServer::start(vec![user(), empty_view(), full, assigned()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+
+    let (result, io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+    assert_eq!(plan.closed, vec![monday()]);
+    assert!(!h.state().unconfirmed_path().exists());
+}
+
+/// A day held by the ledger is a day error, so `--replan` checks it again; once the worklog
+/// is gone and the window has passed, the day is planned.
+#[tokio::test]
+async fn a_held_day_is_planned_by_the_replan_once_the_write_cannot_land() {
+    let mut h = Harness::new();
+    h.state()
+        .record_unconfirmed(unconfirmed_on(monday(), 5))
+        .unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+    let (held, _) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+    assert_eq!(held.unwrap(), Outcome::Ok);
+    portal.requests();
+    assert_eq!(h.state().load().unwrap().plan.errors.len(), 1);
+
+    h.now = ten_am;
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.0))]);
+    let (result, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    portal.requests();
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.errors.is_empty(), "{:?}", plan.errors);
+    assert_eq!(plan.days[0].total_quarters(), DAY_QUARTERS);
+    assert!(!h.state().unconfirmed_path().exists());
 }
 
 #[tokio::test]
@@ -966,6 +1341,7 @@ async fn apply_with_only_errors_left_writes_nothing() {
             message: "unmapped".to_string(),
         }],
         closed: Vec::new(),
+        removed: BTreeMap::new(),
     };
     state.save(&plan, &render(&plan)).unwrap();
 
@@ -1066,6 +1442,7 @@ async fn the_period_block_follows_a_plan_with_every_day_closed() {
         days: Vec::new(),
         errors: Vec::new(),
         closed: Vec::new(),
+        removed: BTreeMap::new(),
     };
     h.state().save(&plan, &render(&plan)).unwrap();
 

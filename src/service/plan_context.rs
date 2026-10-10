@@ -176,6 +176,7 @@ impl ChronoLine {
             billability: self.billability,
             quarters,
             pinned: false,
+            edited: false,
             worklog_id: None,
             candidate_id: None,
         }
@@ -263,7 +264,7 @@ pub struct Context {
 pub struct DayPins {
     /// Chrono lines with a fixed title and hours: edited now or in an earlier round.
     pub chrono: HashMap<ChronoKey, PlanLine>,
-    /// Chrono lines Yurii removed from the plan.
+    /// Chrono lines Yurii removed from the plan, now or in an earlier round.
     pub removed: HashSet<ChronoKey>,
     /// Lines with no Chrono line behind them that stay as they are: added rows, and main,
     /// filler or borrowed lines Yurii edited.
@@ -433,6 +434,7 @@ fn plan_day<Tz: TimeZone, M: Fn(&DayProjectAggregate) -> bool>(
                 billability: aggregate.billability.clone(),
                 quarters: nearest_quarters(aggregate.total_hours),
                 pinned: true,
+                edited: false,
                 worklog_id: None,
                 candidate_id: None,
             });
@@ -532,6 +534,7 @@ fn recorded_lines(portal: Option<&PortalDay>) -> Result<Vec<PlanLine>, String> {
                 billability: worklog.billability.clone(),
                 quarters,
                 pinned: true,
+                edited: false,
                 worklog_id: Some(worklog.unique_id.clone()),
                 candidate_id: None,
             })

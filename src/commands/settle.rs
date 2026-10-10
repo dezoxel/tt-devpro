@@ -19,10 +19,10 @@
 //! The window rules — which days are final, what the scan offers, what an explicit range
 //! means — live in [`super::settle_window`] and are unchanged by the plan.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Result, anyhow, bail};
-use chrono::{Datelike, Days, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeDelta, TimeZone, Utc};
 use clap::Args;
 
 use crate::api::chrono::ChronoClient;
@@ -40,10 +40,10 @@ use crate::model::{
 };
 use crate::plan::parse::{self, DayEdits, Row};
 use crate::plan::render::{day_label, hours, render};
-use crate::plan::state::State;
+use crate::plan::state::{State, UnconfirmedWrite};
 use crate::plan::{
-    BILLABLE, DAY_QUARTERS, DayError, DayPlan, LineKind, NON_BILLABLE, Plan, PlanLine, Quarters,
-    hours_to_quarters, quarters_to_hours,
+    BILLABLE, ChronoKey, DAY_QUARTERS, DayError, DayPlan, LineKind, NON_BILLABLE, Plan, PlanLine,
+    Quarters, hours_to_quarters, quarters_to_hours,
 };
 use crate::service::aggregator::{self, FallbackId, resolve_project_ids};
 use crate::service::normalizer::TimeNormalizer;
@@ -194,6 +194,7 @@ async fn dispatch(
         state: &state,
         zone: &Local,
         today,
+        now: Utc::now,
     };
     if args.apply {
         return settle.apply(io).await;
@@ -212,8 +213,8 @@ async fn dispatch(
 // The three runs
 // ---------------------------------------------------------------------------
 
-/// What every run reads from. The zone is a field so a test can fix it; production passes
-/// `Local`, the zone the Chrono entries are re-dated into.
+/// What every run reads from. The zone and the clock are fields so a test can fix them;
+/// production passes `Local`, the zone the Chrono entries are re-dated into, and `Utc::now`.
 struct Settle<'a, Tz: TimeZone> {
     config: &'a Config,
     chrono: &'a ChronoClient,
@@ -221,6 +222,7 @@ struct Settle<'a, Tz: TimeZone> {
     state: &'a State,
     zone: &'a Tz,
     today: NaiveDate,
+    now: fn() -> DateTime<Utc>,
 }
 
 /// What planning needs beyond the clients: the model, and the vault's meeting probe.
@@ -298,9 +300,10 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         } else {
             self.scan(&entries, &portal, start, args.include_today, io)?
         };
+        let (days, held) = self.hold_unconfirmed(&days, &portal)?;
         let assigned = self.assigned(&user.unique_id, &days).await?;
 
-        let planned = self
+        let mut planned = self
             .plan_days(
                 planning,
                 DaysToPlan {
@@ -314,6 +317,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                 io,
             )
             .await?;
+        planned.errors.extend(held);
 
         let plan = Plan {
             prefix: args.prefix.clone().unwrap_or_default(),
@@ -321,6 +325,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             days: planned.days,
             errors: planned.errors,
             closed: planned.closed,
+            removed: BTreeMap::new(),
         };
         if plan.is_empty() && !held_back.is_empty() {
             // "All days are closed" on stdout while stderr reports today held back would be
@@ -366,18 +371,25 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
 
         let mut pins: HashMap<NaiveDate, DayPins> = HashMap::new();
         for day in plan.days.iter().filter(|day| rebuild.contains(&day.date)) {
-            let day_pins = self.day_pins(day, edits.get(&day.date), &assigned[&day.date], io)?;
+            let day_pins = self.day_pins(
+                day,
+                plan.removed.get(&day.date),
+                edits.get(&day.date),
+                &assigned[&day.date],
+                io,
+            )?;
             pins.insert(day.date, day_pins);
         }
 
         let (first, last) = (days[0], days[days.len() - 1]);
         let entries = self.chrono_entries(first, last).await?;
         let portal = self.read_portal(recent_titles_start(first)?, last).await?;
-        let planned = self
+        let (to_plan, held) = self.hold_unconfirmed(&days, &portal)?;
+        let mut planned = self
             .plan_days(
                 planning,
                 DaysToPlan {
-                    days: &days,
+                    days: &to_plan,
                     // Every day here was in the plan on purpose, so a day whose Chrono
                     // entries have gone says so rather than vanishing from the table.
                     explicit: true,
@@ -389,6 +401,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                 io,
             )
             .await?;
+        planned.errors.extend(held);
 
         // A day with edits that cannot be planned around them stops the replan before
         // anything is stored. Saving it as a day error would drop the edits — the error
@@ -409,6 +422,14 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             );
         }
 
+        for (date, day_pins) in pins {
+            if day_pins.removed.is_empty() {
+                plan.removed.remove(&date);
+            } else {
+                plan.removed
+                    .insert(date, day_pins.removed.into_iter().collect());
+            }
+        }
         plan.days.retain(|day| !rebuild.contains(&day.date));
         plan.days.extend(planned.days);
         plan.errors = planned.errors;
@@ -556,6 +577,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             let rest = Plan {
                 days: Vec::new(),
                 closed: Vec::new(),
+                removed: BTreeMap::new(),
                 ..plan
             };
             let text = render(&rest);
@@ -641,20 +663,23 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
 
     // -- replanning ---------------------------------------------------------
 
-    /// What a replan keeps fixed on one day: every line pinned before, plus this round's
-    /// edits. Recorded lines are not carried; they come back from DevPro itself.
+    /// What a replan keeps fixed on one day: the lines Yurii edited or added in earlier
+    /// rounds, the Chrono lines he removed, plus this round's edits.
+    ///
+    /// Lines pinned by the context alone — meetings, capped overrides, recorded worklogs — are
+    /// not carried: they come back from Chrono and DevPro as they are now. Carrying them kept
+    /// a meeting's old hours after it was corrected in Chrono.
     fn day_pins(
         &self,
         day: &DayPlan,
+        removed: Option<&BTreeSet<ChronoKey>>,
         edits: Option<&DayEdits>,
         assigned: &[Project],
         io: &mut dyn Console,
     ) -> Result<DayPins> {
         let mut pins = DayPins::default();
-        for line in day.lines.iter().filter(|line| line.pinned) {
-            if line.kind == LineKind::Recorded {
-                continue;
-            }
+        pins.removed.extend(removed.into_iter().flatten().cloned());
+        for line in day.lines.iter().filter(|line| line.edited) {
             match &line.chrono {
                 Some(key) => {
                     pins.chrono.insert(key.clone(), line.clone());
@@ -703,6 +728,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                 billability,
                 quarters: row.quarters,
                 pinned: true,
+                edited: true,
                 worklog_id: None,
                 candidate_id: None,
             });
@@ -710,8 +736,8 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         Ok(pins)
     }
 
-    /// A shown line as the edited row now has it, pinned. A rewritten title drops ❓ even if
-    /// the mark was left in place: the rewrite is the answer to it.
+    /// A shown line as the edited row now has it, pinned and marked edited. A rewritten title
+    /// drops ❓ even if the mark was left in place: the rewrite is the answer to it.
     fn edited_line(
         &self,
         line: &PlanLine,
@@ -736,6 +762,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             billability,
             quarters: row.quarters,
             pinned: true,
+            edited: true,
             ..line.clone()
         })
     }
@@ -863,16 +890,19 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                     ));
                 }
                 Err(error) if is_timeout(&error) => {
-                    let landed = self
-                        .landed(day.date, line, &before_ids, &written)
-                        .await
-                        .map_err(|error| stop(format!("{error:#}")))?;
-                    if !landed {
-                        return Err(stop(
-                            "the write timed out and the line is not in DevPro; it is not \
-                             sent again, because it may still land"
-                                .to_string(),
-                        ));
+                    let unconfirmed = match self.landed(day.date, line, &before_ids, &written).await
+                    {
+                        Ok(true) => None,
+                        Ok(false) => {
+                            Some("the write timed out and the line is not in DevPro".to_string())
+                        }
+                        Err(error) => Some(format!(
+                            "the write timed out and DevPro could not be read to check it \
+                             ({error:#})"
+                        )),
+                    };
+                    if let Some(what) = unconfirmed {
+                        return Err(stop(self.unconfirmed(day.date, line, &before_ids, &what)));
                     }
                     io.err(&format!(
                         "\u{2139} {prefix}{}: the write timed out, but the line is in DevPro",
@@ -884,6 +914,65 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
             written.push(line);
         }
         Ok(written.len())
+    }
+
+    /// Records a timed-out write that is not known to be in DevPro, and says so. It is never
+    /// sent again: it may still land, after the rollback has read the day, and the ledger is
+    /// how the next `settle` finds it if it does.
+    fn unconfirmed(
+        &self,
+        date: NaiveDate,
+        line: &PlanLine,
+        before_ids: &HashSet<&str>,
+        what: &str,
+    ) -> String {
+        let mut before_ids: Vec<String> = before_ids.iter().map(|id| id.to_string()).collect();
+        before_ids.sort();
+        let recorded = self.state.record_unconfirmed(UnconfirmedWrite {
+            date,
+            project_id: line.project_id.clone(),
+            devpro_project: line.devpro_project.clone(),
+            title: line.title.clone(),
+            quarters: line.quarters,
+            before_ids,
+            written_at: (self.now)(),
+        });
+        match recorded {
+            Ok(()) => format!(
+                "{what}; it is not sent again, because it may still land. The next settle \
+                 checks for it and holds the day if it did"
+            ),
+            Err(error) => format!(
+                "{what}; it is not sent again, because it may still land, and it could not be \
+                 recorded for the next settle ({error:#}). Check {date} in DevPro by hand \
+                 before planning it again"
+            ),
+        }
+    }
+
+    /// The days of `days` the ledger of unconfirmed writes lets through, and a day error for
+    /// each one it holds. Reads only `portal`, already fetched; stores the ledger only if the
+    /// check dropped an entry.
+    fn hold_unconfirmed(
+        &self,
+        days: &[NaiveDate],
+        portal: &[PortalDay],
+    ) -> Result<(Vec<NaiveDate>, Vec<DayError>)> {
+        let ledger = self.state.unconfirmed()?;
+        if ledger.is_empty() {
+            return Ok((days.to_vec(), Vec::new()));
+        }
+        let (kept, held) =
+            check_unconfirmed(&ledger, days, portal, (self.now)(), self.today, self.zone);
+        if kept.len() != ledger.len() {
+            self.state.save_unconfirmed(&kept)?;
+        }
+        let to_plan = days
+            .iter()
+            .copied()
+            .filter(|day| !held.iter().any(|error| error.date == *day))
+            .collect();
+        Ok((to_plan, held))
     }
 
     /// Whether `line` reached DevPro after a timeout: a worklog that was not there before
@@ -1071,6 +1160,100 @@ fn recent_titles_start(first: NaiveDate) -> Result<NaiveDate> {
     first
         .checked_sub_days(Days::new(RECENT_TITLE_DAYS))
         .ok_or_else(|| anyhow!("date underflow: {RECENT_TITLE_DAYS} days before {first}"))
+}
+
+/// How long a timed-out write is waited for before it is taken as lost. A request the client
+/// gave up on can still be committed by the portal moments later; a quarter of an hour covers
+/// that with room and holds a day back no longer than a coffee break.
+const LATE_WRITE_WINDOW: TimeDelta = TimeDelta::minutes(15);
+
+/// The ledger of unconfirmed writes against what DevPro holds: the entries still worth keeping,
+/// and a day error for every day of `days` that may not be planned yet.
+///
+/// - an entry older than any scan reaches, or on a day DevPro already holds at 8.0 h, is
+///   dropped: no plan will be built on that day, whether the late worklog is part of it or not;
+/// - an entry on a day not being planned now is kept for the run that plans it;
+/// - a new worklog matching the entry holds the day and names the delete that releases it;
+/// - no match within [`LATE_WRITE_WINDOW`] holds the day until the window ends;
+/// - no match after it drops the entry, and the day is planned.
+fn check_unconfirmed<Tz: TimeZone>(
+    ledger: &[UnconfirmedWrite],
+    days: &[NaiveDate],
+    portal: &[PortalDay],
+    now: DateTime<Utc>,
+    today: NaiveDate,
+    zone: &Tz,
+) -> (Vec<UnconfirmedWrite>, Vec<DayError>) {
+    let oldest = today.checked_sub_days(Days::new(SCAN_DAYS));
+    let mut kept: Vec<UnconfirmedWrite> = Vec::new();
+    let mut reasons: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
+    for write in ledger {
+        let in_devpro = portal.iter().find(|day| day.date == write.date);
+        let too_old = oldest.is_some_and(|oldest| write.date < oldest);
+        let full = in_devpro.is_some_and(|day| portal_quarters(day) >= Some(DAY_QUARTERS));
+        if too_old || full {
+            continue;
+        }
+        if !days.contains(&write.date) {
+            kept.push(write.clone());
+            continue;
+        }
+        let landed: Vec<&str> = in_devpro
+            .map(|day| {
+                day.worklogs
+                    .iter()
+                    .filter(|w| is_late_write(w, write))
+                    .map(|w| w.unique_id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let line = format!(
+            "«{}» ({} ч, {})",
+            write.title,
+            hours(quarters_to_hours(write.quarters)),
+            write.devpro_project
+        );
+        let reason = if !landed.is_empty() {
+            let deletes: Vec<String> = landed
+                .iter()
+                .map(|id| format!("`tt-devpro api delete-worklog {id}`"))
+                .collect();
+            format!(
+                "запись {line}, которую --apply не дождался, дошла до DevPro после отката дня \
+                 (id {}): рядом с ней день посчитается дважды. Удалить: {}, затем tt-devpro \
+                 settle --replan",
+                landed.join(", "),
+                deletes.join(", ")
+            )
+        } else if now < write.written_at + LATE_WRITE_WINDOW {
+            let until = (write.written_at + LATE_WRITE_WINDOW).with_timezone(zone);
+            format!(
+                "запись {line}, которую --apply не дождался, ещё может дойти до DevPro; день \
+                 планируется снова после {}",
+                until.naive_local().format("%H:%M")
+            )
+        } else {
+            continue;
+        };
+        kept.push(write.clone());
+        reasons.entry(write.date).or_default().push(reason);
+    }
+    let held = reasons
+        .into_iter()
+        .map(|(date, reasons)| DayError {
+            date,
+            message: reasons.join("; "),
+        })
+        .collect();
+    (kept, held)
+}
+
+/// A worklog that was not on its day before the run and is the write the entry describes.
+fn is_late_write(worklog: &WorklogDetail, write: &UnconfirmedWrite) -> bool {
+    !write.before_ids.contains(&worklog.unique_id)
+        && worklog.project_unique_id == write.project_id
+        && worklog.task_title == write.title
+        && hours_to_quarters(worklog.logged_hours) == Some(write.quarters)
 }
 
 /// Printed once per project for the run: a configured id stood in for one the portal did
