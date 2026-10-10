@@ -1408,6 +1408,11 @@ fn unknown_outcome(error: &anyhow::Error) -> Option<String> {
             .chain()
             .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
     };
+    // Before the timeout test: a connect-phase timeout carries both flags, and nothing of
+    // the request was sent.
+    if transport().is_some_and(|transport| transport.is_connect() || transport.is_builder()) {
+        return None;
+    }
     if transport().is_some_and(reqwest::Error::is_timeout) {
         return Some("the write timed out".to_string());
     }
@@ -1416,9 +1421,7 @@ fn unknown_outcome(error: &anyhow::Error) -> Option<String> {
             .contains(&api.status_code)
             .then(|| format!("DevPro answered {} to the write", api.status_code));
     }
-    transport()
-        .filter(|transport| !transport.is_connect() && !transport.is_builder())
-        .map(|_| format!("the connection failed after the write was sent ({error:#})"))
+    transport().map(|_| format!("the connection failed after the write was sent ({error:#})"))
 }
 
 fn failure_text(error: &anyhow::Error) -> String {

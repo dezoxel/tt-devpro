@@ -950,6 +950,10 @@ async fn a_failed_write_undoes_its_day_stops_the_run_and_drops_the_plan() {
     assert!(err.contains("Writing stopped"), "{err}");
     assert!(!err.contains("Weekly sync"), "{err}");
     assert!(!h.state().md_path().exists());
+    assert!(
+        h.state().unconfirmed().unwrap().is_empty(),
+        "a 4xx is a refusal"
+    );
 }
 
 #[tokio::test]
@@ -1115,6 +1119,20 @@ async fn a_write_answered_by_a_5xx_a_lost_connection_or_no_200_is_recorded_like_
             h.state().unconfirmed().unwrap(),
             vec![unconfirmed_on(monday(), 0)]
         );
+    }
+}
+
+/// A connection that never opened sent nothing, so there is nothing that could land later:
+/// a refused connection and a connect-phase timeout are plain failures, not unknown outcomes.
+#[tokio::test]
+async fn a_write_whose_connection_never_opened_has_a_known_outcome() {
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_millis(200))
+        .build()
+        .unwrap();
+    for target in [NOWHERE, "http://10.255.255.1:81"] {
+        let error = anyhow::Error::from(client.post(target).send().await.unwrap_err());
+        assert_eq!(unknown_outcome(&error), None, "{target}: {error:#}");
     }
 }
 
