@@ -1311,6 +1311,49 @@ async fn a_held_day_is_planned_by_the_replan_once_the_write_cannot_land() {
     assert!(!h.state().unconfirmed_path().exists());
 }
 
+/// A replan run while the write may still land holds the day again, rather than letting it
+/// drop out of the plan between the two runs.
+#[tokio::test]
+async fn a_replan_within_the_window_still_holds_the_day() {
+    let h = Harness::new();
+    h.state()
+        .record_unconfirmed(unconfirmed_on(monday(), 5))
+        .unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+    let (held, _) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+    assert_eq!(held.unwrap(), Outcome::Ok);
+    portal.requests();
+
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let (result, io) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok, "{}", io.err_text());
+    assert!(portal.requests().iter().all(|r| r.method == "GET"));
+    assert!(model.calls().is_empty());
+    let plan = h.state().load().unwrap().plan;
+    assert!(plan.days.is_empty());
+    assert_eq!(plan.errors.len(), 1, "{:?}", plan.errors);
+    assert_eq!(plan.errors[0].date, monday());
+    assert!(
+        plan.errors[0].message.contains("ещё может дойти до DevPro"),
+        "{}",
+        plan.errors[0].message
+    );
+    assert!(h.state().unconfirmed_path().exists());
+}
+
 #[tokio::test]
 async fn days_in_error_are_not_written_and_stay_for_the_next_replan() {
     let h = Harness::new();
