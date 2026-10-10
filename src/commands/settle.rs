@@ -1170,9 +1170,10 @@ const LATE_WRITE_WINDOW: TimeDelta = TimeDelta::minutes(15);
 /// The ledger of unconfirmed writes against what DevPro holds: the entries still worth keeping,
 /// and a day error for every day of `days` that may not be planned yet.
 ///
-/// - an entry older than any scan reaches, or on a day DevPro already holds at 8.0 h, is
-///   dropped: no plan will be built on that day, whether the late worklog is part of it or not;
-/// - an entry on a day not being planned now is kept for the run that plans it;
+/// - an entry on a day DevPro already holds at 8.0 h is dropped: no plan will be built on that
+///   day, whether the late worklog is part of it or not;
+/// - an entry on a day not being planned now is kept for the run that plans it, unless it is
+///   older than any scan reaches; an explicit range that plans such a day still checks it;
 /// - a new worklog matching the entry holds the day and names the delete that releases it;
 /// - no match within [`LATE_WRITE_WINDOW`] holds the day until the window ends;
 /// - no match after it drops the entry, and the day is planned.
@@ -1191,11 +1192,13 @@ fn check_unconfirmed<Tz: TimeZone>(
         let in_devpro = portal.iter().find(|day| day.date == write.date);
         let too_old = oldest.is_some_and(|oldest| write.date < oldest);
         let full = in_devpro.is_some_and(|day| portal_quarters(day) >= Some(DAY_QUARTERS));
-        if too_old || full {
+        if full {
             continue;
         }
         if !days.contains(&write.date) {
-            kept.push(write.clone());
+            if !too_old {
+                kept.push(write.clone());
+            }
             continue;
         }
         let landed: Vec<&str> = in_devpro

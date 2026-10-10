@@ -1201,6 +1201,41 @@ async fn an_expired_unconfirmed_write_is_dropped_and_the_day_planned() {
     assert!(!h.state().unconfirmed_path().exists());
 }
 
+/// An explicit range reaches further back than the scan, and `--apply` writes whatever range
+/// it was shown: a write that timed out on such a day and landed holds the day like any other.
+#[test]
+fn an_unconfirmed_write_older_than_the_scan_is_still_checked_on_a_day_being_planned() {
+    let old = date(2026, 8, 3);
+    let late: WorklogDetail =
+        serde_json::from_value(worklog("w9", "AI cost model draft", "AI Practices", 7.0)).unwrap();
+    let portal = vec![PortalDay {
+        date: old,
+        logged_hours: 7.0,
+        worklogs: vec![late],
+    }];
+    let ledger = vec![unconfirmed_on(old, 2)];
+
+    let (kept, held) = check_unconfirmed(
+        &ledger,
+        &[old],
+        &portal,
+        nine_am(),
+        nine_am().date_naive(),
+        &Utc,
+    );
+
+    assert_eq!(kept, ledger);
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].date, old);
+    assert!(
+        held[0]
+            .message
+            .contains("`tt-devpro api delete-worklog w9`"),
+        "{}",
+        held[0].message
+    );
+}
+
 /// Yurii kept the late worklog and closed the day around it in the portal: nothing is left to
 /// plan there, so the entry has done its work.
 #[tokio::test]
