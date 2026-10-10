@@ -1207,6 +1207,31 @@ async fn a_late_landing_write_is_named_by_the_next_settle_and_its_day_is_not_pla
     assert_eq!(h.state().unconfirmed().unwrap(), ledger);
 }
 
+/// An empty ledger is what lets the double count through, so one that cannot be read stops the
+/// run rather than reading as empty.
+#[tokio::test]
+async fn a_ledger_that_cannot_be_read_stops_settle_with_its_path() {
+    let h = Harness::new();
+    std::fs::write(h.state().unconfirmed_path(), "{not json").unwrap();
+    let portal = StubServer::start(vec![user(), empty_view(), empty_view(), assigned()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![Ok(answer(7.0))]);
+
+    let (result, _io) = h
+        .run(
+            Run::Plan(monday_args()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    let error = format!("{:#}", result.unwrap_err());
+    assert!(error.contains("unconfirmed.json"), "{error}");
+    assert!(model.calls().is_empty());
+    assert!(!h.state().md_path().exists());
+}
+
 #[tokio::test]
 async fn an_unconfirmed_write_within_its_window_holds_the_day() {
     let h = Harness::new();
