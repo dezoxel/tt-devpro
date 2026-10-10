@@ -401,25 +401,46 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                 io,
             )
             .await?;
+        let held_dates: BTreeSet<NaiveDate> = held.iter().map(|error| error.date).collect();
         planned.errors.extend(held);
 
         // A day with edits that cannot be planned around them stops the replan before
         // anything is stored. Saving it as a day error would drop the edits — the error
         // keeps no pins — and the next --replan would build the day from scratch while the
         // message still names edits that are gone. plan.md stays as it is, to be corrected.
-        let refused: Vec<String> = planned
+        // A day the ledger holds is refused the same way, but its edits are not at fault:
+        // the reason already says what unblocks the day, so it is not told to correct them.
+        let (held_refused, refused): (Vec<&DayError>, Vec<&DayError>) = planned
             .errors
             .iter()
             .filter(|error| edits.contains_key(&error.date))
-            .map(|error| format!("{}: {}", day_label(error.date), error.message))
-            .collect();
+            .partition(|error| held_dates.contains(&error.date));
+        let listed = |errors: &[&DayError]| {
+            errors
+                .iter()
+                .map(|error| format!("{}: {}", day_label(error.date), error.message))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut paragraphs = Vec::new();
         if !refused.is_empty() {
-            bail!(
+            paragraphs.push(format!(
                 "the edits in {} cannot be planned; correct them there and run --replan \
                  again:\n{}",
                 self.state.md_path().display(),
-                refused.join("\n")
-            );
+                listed(&refused)
+            ));
+        }
+        if !held_refused.is_empty() {
+            paragraphs.push(format!(
+                "Правки в {} исправлять не нужно, они сохранены. Запустить --replan снова \
+                 в срок или после шага, названного ниже:\n{}",
+                self.state.md_path().display(),
+                listed(&held_refused)
+            ));
+        }
+        if !paragraphs.is_empty() {
+            bail!("{}", paragraphs.join("\n\n"));
         }
 
         for (date, day_pins) in pins {

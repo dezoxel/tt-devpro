@@ -1449,6 +1449,34 @@ async fn a_held_day_is_planned_by_the_replan_once_the_write_cannot_land() {
     assert!(!h.state().unconfirmed_path().exists());
 }
 
+/// Yurii edits a day the ledger holds. The replan refuses, since the day is not planned, but
+/// the edits are not at fault: the message gives the ledger's reason and keeps the file.
+#[tokio::test]
+async fn an_edit_on_a_held_day_is_refused_without_telling_yurii_to_correct_it() {
+    let h = Harness::new();
+    h.planned_monday().await;
+    h.state()
+        .record_unconfirmed(unconfirmed_on(monday(), 5))
+        .unwrap();
+    let edited = h.md().replace("1.5 → **7.0**", "1.5 → 6.5");
+    h.write_md(&edited);
+
+    let portal = StubServer::start(vec![user(), assigned(), empty_view(), empty_view()]);
+    let chrono_stub = StubServer::start(vec![chrono(&monday_entries())]);
+    let model = FakePlanModel::new(vec![]);
+    let (result, _) = h
+        .run(Run::Replan, &portal.base_url, &chrono_stub.base_url, &model)
+        .await;
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(!message.contains("correct them"), "{message}");
+    assert!(message.contains("исправлять не нужно"), "{message}");
+    assert!(message.contains("ещё может дойти до DevPro"), "{message}");
+    portal.requests();
+    assert!(model.calls().is_empty());
+    assert_eq!(h.md(), edited);
+}
+
 /// A replan run while the write may still land holds the day again, rather than letting it
 /// drop out of the plan between the two runs.
 #[tokio::test]
