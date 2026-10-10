@@ -38,6 +38,7 @@ use std::collections::HashMap;
 use chrono::{Datelike, NaiveDate, Weekday};
 
 use crate::commands::holidays::is_us_federal_holiday;
+use crate::plan::render::{ALL_CLOSED, day_label};
 
 /// The last date `settle` may propose. Yesterday by default; `include_today`
 /// moves it to today for the rare deliberate case (closing the books early
@@ -88,52 +89,69 @@ pub fn split_by_finality(
     }
 }
 
-/// Renders a not-final day, marking today so the reason is obvious.
-///
-/// Ports `SettleWindow.kt:56-57`. The bare date comes from `LocalDate.toString()`,
-/// which is ISO-8601 with zero-padded month and day — `NaiveDate`'s `Display` is
-/// the same.
-pub fn describe_not_final(day: NaiveDate, today: NaiveDate) -> String {
-    if day == today {
-        format!("{day} (today)")
-    } else {
-        format!("{day}")
-    }
-}
+/// The sign in front of every "not yet" note `settle` prints: a day not final, a range
+/// past the cutoff, a write or a model call that is late. U+23F3 is an emoji by default,
+/// so it renders as a picture with no U+FE0F after it. U+2139, the sign these notes
+/// carried before, renders as a lowercase «i» in a terminal font and made «i Skipped»
+/// read as a typo.
+pub const NOT_YET: &str = "\u{23F3}";
 
-/// Names the days held back, suggesting `--include-today` only when today is
-/// actually among them. Offering the flag for a day that no flag can unlock —
+/// Names the days held back, today first, suggesting `--include-today` only when today
+/// is actually among them. Offering the flag for a day that no flag can unlock —
 /// tomorrow, under `--include-today` — is advice that cannot be followed.
 ///
-/// Ports `SettleWindow.kt:64-71`. The dash in the second arm is U+2014 and the
-/// apostrophe is ASCII; both are copied out of the Kotlin source by bytes.
+/// Days are named as the plan names them («Пт 9 октября»), because the note is read
+/// right under the plan. Empty when nothing was held back.
 pub fn describe_not_final_days(not_final: &[NaiveDate], today: NaiveDate) -> String {
-    let listed = not_final
-        .iter()
-        .map(|day| describe_not_final(*day, today))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut sentences = Vec::new();
     if not_final.contains(&today) {
-        format!("{listed}. Use --include-today to settle today anyway.")
-    } else {
-        format!("{listed} — those days haven't happened yet.")
+        sentences.push(format!(
+            "Сегодня, {}, не планировался: часы ещё не итоговые. \
+             Спланировать и его: `--include-today`.",
+            day_label(today)
+        ));
     }
+    let future: Vec<String> = not_final
+        .iter()
+        .filter(|day| **day != today)
+        .map(|day| day_label(*day))
+        .collect();
+    match future.len() {
+        0 => {}
+        1 => sentences.push(format!(
+            "{} не планировался: день ещё не наступил.",
+            future[0]
+        )),
+        _ => sentences.push(format!(
+            "{} не планировались: дни ещё не наступили.",
+            future.join(", ")
+        )),
+    }
+    sentences.join(" ")
 }
 
-/// The empty-scan message. "All days are settled" is only true when nothing was
-/// held back — saying it while the skip notice reports a dropped day gives two
-/// contradictory answers to the same question on two different streams.
+/// The empty-scan message. «Все дни закрыты» is only true when nothing was held back —
+/// saying it while the note on stderr reports a held-back day gives two contradictory
+/// answers to the same question on two different streams.
 ///
-/// Ports `SettleWindow.kt:78-83`. The `≥` is U+2265 with no space before the `8`.
+/// Ports `SettleWindow.kt:78-83`.
 pub fn nothing_to_settle_message(not_final: &[NaiveDate], today: NaiveDate) -> String {
     if not_final.is_empty() {
-        "All days are settled (≥8h logged).".to_string()
+        ALL_CLOSED.to_string()
     } else {
         format!(
-            "Nothing to settle yet. Held back: {}",
+            "Планировать пока нечего. {}",
             describe_not_final_days(not_final, today)
         )
     }
+}
+
+/// A day `settle` would ever plan: not a weekend and not a US federal holiday. A day
+/// that is not one is never planned, final or not, so it is neither offered nor
+/// reported as held back — a note about a Saturday advising `--include-today` was
+/// advice the flag could not follow.
+pub fn is_workday(day: NaiveDate) -> bool {
+    !matches!(day.weekday(), Weekday::Sat | Weekday::Sun) && !is_us_federal_holiday(day)
 }
 
 /// `SettleCommand.kt:197` — `today.minusDays(45)`. Named here because the number
@@ -176,8 +194,10 @@ pub fn resolve_range(
     };
     let note = if range.to > cutoff {
         Some(format!(
-            "\u{2139} Range ends {}, past the last completed day ({cutoff}) \u{2014} those days' hours aren't final.",
-            range.to
+            "{NOT_YET} Диапазон идёт до {}, дальше последнего завершённого дня ({}): \
+             часы этих дней ещё не итоговые.",
+            day_label(range.to),
+            day_label(cutoff)
         ))
     } else {
         None
@@ -202,8 +222,7 @@ pub fn unfilled_days(
         .copied()
         .filter(|day| {
             let hours = devpro_hours_by_day.get(day).copied().unwrap_or(0.0);
-            let weekend = matches!(day.weekday(), Weekday::Sat | Weekday::Sun);
-            hours < FULL_DAY_HOURS && !weekend && !is_us_federal_holiday(*day)
+            hours < FULL_DAY_HOURS && is_workday(*day)
         })
         .collect()
 }
@@ -302,7 +321,7 @@ mod tests {
     #[test]
     fn the_include_today_hint_appears_only_when_today_was_held_back() {
         let with_today = describe_not_final_days(&[today()], today());
-        assert!(with_today.contains("2026-08-13 (today)"));
+        assert!(with_today.contains("Сегодня, Чт 13 августа"));
         assert!(
             with_today.contains("--include-today"),
             "the flag can actually unlock today"
@@ -315,7 +334,7 @@ mod tests {
     #[test]
     fn a_future_only_holdback_does_not_suggest_a_flag_that_cannot_help() {
         let future_only = describe_not_final_days(&[tomorrow()], today());
-        assert!(future_only.contains("2026-08-14"));
+        assert!(future_only.contains("Пт 14 августа"));
         assert!(
             !future_only.contains("--include-today"),
             "no flag makes a future day settleable"
@@ -325,22 +344,19 @@ mod tests {
     /// C23. `SettleWindowTest.kt:93`.
     #[test]
     fn an_empty_scan_claims_everything_is_settled_only_when_nothing_was_held_back() {
-        assert_eq!(
-            "All days are settled (≥8h logged).",
-            nothing_to_settle_message(&[], today())
-        );
+        assert_eq!(ALL_CLOSED, nothing_to_settle_message(&[], today()));
     }
 
     /// C23. `SettleWindowTest.kt:101`. The contradiction this guards against:
-    /// stdout saying "all settled" while stderr says a day was skipped.
+    /// stdout saying every day is closed while stderr says a day was held back.
     #[test]
     fn an_empty_scan_that_held_today_back_does_not_claim_everything_is_settled() {
         let message = nothing_to_settle_message(&[today()], today());
         assert!(
-            !message.contains("All days are settled"),
+            !message.contains(ALL_CLOSED),
             "nothing was settled — today was held back"
         );
-        assert!(message.contains("2026-08-13 (today)"));
+        assert!(message.contains("Чт 13 августа"));
         assert!(message.contains("--include-today"));
     }
 
@@ -602,162 +618,99 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // C23 — the exact strings, not just the substrings the Kotlin asserted.
+    // C23 — the exact strings, not just the substrings above.
     // -----------------------------------------------------------------------
 
-    /// C23, `SettleWindow.kt:56-57`. Today carries the ` (today)` marker.
+    /// The whole sentence for today: the day named as the plan names it, the reason,
+    /// and the flag in backticks, since the note is pasted into a markdown chat.
     #[test]
-    fn describe_not_final_marks_today() {
-        assert_eq!("2026-08-13 (today)", describe_not_final(today(), today()));
-    }
-
-    /// C23, `SettleWindow.kt:57`. Any other day renders bare, with no marker —
-    /// including a past one, which the caller never produces but the function
-    /// accepts.
-    #[test]
-    fn describe_not_final_renders_any_other_day_bare() {
-        assert_eq!("2026-08-14", describe_not_final(tomorrow(), today()));
-        assert_eq!("2026-08-12", describe_not_final(yesterday(), today()));
-    }
-
-    /// C23. The date is ISO-8601 with zero-padded month and day, because that is
-    /// what `LocalDate.toString()` emits and the skip notice is compared against
-    /// the incumbent's stderr byte for byte.
-    #[test]
-    fn describe_not_final_pads_single_digit_months_and_days() {
-        assert_eq!("2026-01-05", describe_not_final(d("2026-01-05"), today()));
-    }
-
-    /// C23, `SettleWindow.kt:67`. The whole sentence, not a substring: a port
-    /// that dropped the trailing period or reworded the hint would pass the
-    /// ported `contains` case above.
-    #[test]
-    fn the_holdback_sentence_with_today_reads_exactly_as_the_incumbent_prints_it() {
+    fn the_holdback_sentence_with_today_reads_in_full() {
         assert_eq!(
-            "2026-08-13 (today). Use --include-today to settle today anyway.",
+            "Сегодня, Чт 13 августа, не планировался: часы ещё не итоговые. \
+             Спланировать и его: `--include-today`.",
             describe_not_final_days(&[today()], today())
         );
     }
 
-    /// C23, `SettleWindow.kt:69`. The future-only arm, in full. The dash is
-    /// U+2014 and the apostrophe is ASCII; both are copied out of the Kotlin
-    /// source by bytes.
+    /// The future-only arm, one day, in full.
     #[test]
-    fn the_holdback_sentence_without_today_reads_exactly_as_the_incumbent_prints_it() {
+    fn the_holdback_sentence_for_one_future_day_reads_in_full() {
         assert_eq!(
-            "2026-08-14 — those days haven't happened yet.",
+            "Пт 14 августа не планировался: день ещё не наступил.",
             describe_not_final_days(&[tomorrow()], today())
         );
     }
 
-    /// C23, `SettleWindow.kt:69`. The em dash is U+2014, not a hyphen and not an
-    /// en dash, and the apostrophe is U+0027, not U+2019. Both are invisible in
-    /// an editor and both would break a byte diff against the incumbent's
-    /// stderr.
+    /// Several future days take the plural and are joined in input order.
     #[test]
-    fn the_future_only_arm_uses_an_em_dash_and_an_ascii_apostrophe() {
-        let sentence = describe_not_final_days(&[tomorrow()], today());
-        assert!(sentence.contains('\u{2014}'), "em dash U+2014 is missing");
-        assert!(!sentence.contains('\u{2013}'), "en dash U+2013 crept in");
-        assert!(sentence.contains("haven't"), "ASCII apostrophe is missing");
-        assert!(!sentence.contains('\u{2019}'), "curly apostrophe crept in");
-    }
-
-    /// C23, `SettleWindow.kt:65`. Several held-back days are joined with `", "`
-    /// in input order, and the today marker applies per day.
-    #[test]
-    fn several_held_back_days_are_joined_with_a_comma_and_a_space() {
+    fn several_future_days_take_the_plural() {
         assert_eq!(
-            "2026-08-13 (today), 2026-08-14. Use --include-today to settle today anyway.",
-            describe_not_final_days(&[today(), tomorrow()], today())
-        );
-    }
-
-    /// C23, `SettleWindow.kt:66`. The hint is decided by `notFinal.contains(today)`,
-    /// not by today being first — an implementation keying off the head of the
-    /// list would drop the hint here.
-    #[test]
-    fn the_hint_fires_when_today_is_not_the_first_held_back_day() {
-        assert_eq!(
-            "2026-08-14, 2026-08-13 (today). Use --include-today to settle today anyway.",
-            describe_not_final_days(&[tomorrow(), today()], today())
-        );
-    }
-
-    /// C23. A holdback list of nothing but future days, plural, takes the second
-    /// arm and names them all.
-    #[test]
-    fn several_future_days_take_the_no_flag_can_help_arm() {
-        assert_eq!(
-            "2026-08-14, 2026-08-15 — those days haven't happened yet.",
+            "Пт 14 августа, Сб 15 августа не планировались: дни ещё не наступили.",
             describe_not_final_days(&[tomorrow(), d("2026-08-15")], today())
         );
     }
 
-    /// C23, `SettleWindow.kt:64-71`. **A finding, pinned rather than fixed.** An
-    /// empty `notFinal` takes the `else` arm and renders a sentence with an empty
-    /// subject and a leading space. Unreachable from either live call site —
-    /// `SettleCommand.kt:249` guards on `isNotEmpty()` and
-    /// `nothingToSettleMessage` checks `isEmpty()` first — but it is the
-    /// incumbent's behaviour for this input and parity is the bar.
+    /// Today and a future day: today's sentence comes first, whatever the input order,
+    /// and the hint is decided by today being in the list, not by it being first.
     #[test]
-    fn an_empty_holdback_list_renders_the_incumbents_subjectless_sentence() {
+    fn today_is_named_first_even_when_it_is_not_first_in_the_list() {
+        let expected = "Сегодня, Чт 13 августа, не планировался: часы ещё не итоговые. \
+                        Спланировать и его: `--include-today`. \
+                        Пт 14 августа не планировался: день ещё не наступил.";
         assert_eq!(
-            " — those days haven't happened yet.",
-            describe_not_final_days(&[], today())
+            expected,
+            describe_not_final_days(&[today(), tomorrow()], today())
+        );
+        assert_eq!(
+            expected,
+            describe_not_final_days(&[tomorrow(), today()], today())
         );
     }
 
-    /// C23, `SettleWindow.kt:80`. The settled message in full, including the
-    /// closing period.
+    /// Nothing held back says nothing. The incumbent rendered a sentence with no
+    /// subject here; no caller reaches it, and an empty string is what it means.
     #[test]
-    fn the_settled_message_reads_exactly_as_the_incumbent_prints_it() {
-        assert_eq!(
-            "All days are settled (≥8h logged).",
-            nothing_to_settle_message(&[], today())
-        );
+    fn an_empty_holdback_list_says_nothing() {
+        assert_eq!("", describe_not_final_days(&[], today()));
     }
 
-    /// C23, `SettleWindow.kt:80`. The glyph is U+2265, not the ASCII `>=` a
-    /// retyped port would produce, and there is no space between it and the `8`.
+    /// C23, `SettleWindow.kt:82`. The holdback message in full: the prefix, then the
+    /// sentence `describe_not_final_days` built.
     #[test]
-    fn the_settled_message_uses_the_greater_or_equal_glyph_with_no_space_after_it() {
-        let message = nothing_to_settle_message(&[], today());
-        assert!(message.contains('\u{2265}'), "U+2265 is missing");
-        assert!(!message.contains(">="), "ASCII >= crept in");
-        assert!(
-            message.contains("\u{2265}8h"),
-            "a space crept in after U+2265"
-        );
-    }
-
-    /// C23, `SettleWindow.kt:82`. The holdback message in full: the prefix, then
-    /// the sentence `describeNotFinalDays` built.
-    #[test]
-    fn the_holdback_message_prefixes_the_sentence_with_nothing_to_settle_yet() {
+    fn the_holdback_message_prefixes_the_sentence_with_nothing_to_plan_yet() {
         assert_eq!(
-            "Nothing to settle yet. Held back: 2026-08-13 (today). Use --include-today to settle today anyway.",
+            "Планировать пока нечего. Сегодня, Чт 13 августа, не планировался: часы ещё не \
+             итоговые. Спланировать и его: `--include-today`.",
             nothing_to_settle_message(&[today()], today())
         );
     }
 
-    /// C23. The same, for the arm no flag can unlock.
-    #[test]
-    fn the_holdback_message_carries_the_future_only_arm_unchanged() {
-        assert_eq!(
-            "Nothing to settle yet. Held back: 2026-08-14 — those days haven't happened yet.",
-            nothing_to_settle_message(&[tomorrow()], today())
-        );
-    }
-
-    /// C23. "All days are settled" is keyed on the holdback list being empty, not
-    /// on today being absent from it: a future-only holdback must not claim
-    /// everything is settled either.
+    /// C23. "Every day is closed" is keyed on the holdback list being empty, not on
+    /// today being absent from it: a future-only holdback must not claim it either.
     #[test]
     fn a_future_only_holdback_still_refuses_to_claim_everything_is_settled() {
         let message = nothing_to_settle_message(&[tomorrow()], today());
-        assert!(!message.contains("All days are settled"));
+        assert_eq!(
+            "Планировать пока нечего. Пт 14 августа не планировался: день ещё не наступил.",
+            message
+        );
         assert!(!message.contains("--include-today"));
+    }
+
+    /// U+23F3 is an emoji by default and needs no U+FE0F; U+2139, the sign before
+    /// it, rendered as a lowercase «i» in the terminal font.
+    #[test]
+    fn the_not_yet_sign_is_the_hourglass() {
+        assert_eq!(NOT_YET, "\u{23F3}");
+    }
+
+    /// A weekend or a holiday is never planned, so it is never reported as held back.
+    #[test]
+    fn a_workday_is_a_weekday_that_is_not_a_holiday() {
+        assert!(is_workday(today()), "Thursday");
+        assert!(!is_workday(d("2026-08-15")), "Saturday");
+        assert!(!is_workday(d("2026-08-16")), "Sunday");
+        assert!(!is_workday(d("2026-09-07")), "Labor Day");
     }
 
     // -----------------------------------------------------------------------
@@ -772,13 +725,13 @@ mod tests {
         let window = split_by_finality(&[yesterday(), today()], today(), false);
         assert_eq!(vec![yesterday()], window.settleable);
         assert_eq!(
-            "2026-08-13 (today). Use --include-today to settle today anyway.",
-            describe_not_final_days(&window.not_final, today())
-        );
-        assert_eq!(
-            "Nothing to settle yet. Held back: 2026-08-13 (today). Use --include-today to settle today anyway.",
+            format!(
+                "Планировать пока нечего. {}",
+                describe_not_final_days(&window.not_final, today())
+            ),
             nothing_to_settle_message(&window.not_final, today())
         );
+        assert!(describe_not_final_days(&window.not_final, today()).starts_with("Сегодня, Чт 13"));
     }
 
     /// C1 + C23. The same morning with `--include-today`: today becomes
@@ -791,7 +744,7 @@ mod tests {
         assert_eq!(vec![yesterday(), today()], window.settleable);
         assert!(window.not_final.is_empty());
         assert_eq!(
-            "All days are settled (≥8h logged).",
+            ALL_CLOSED,
             nothing_to_settle_message(&window.not_final, today())
         );
     }
@@ -804,7 +757,10 @@ mod tests {
         let window = split_by_finality(&[today(), tomorrow()], today(), true);
         assert_eq!(vec![today()], window.settleable);
         let notice = describe_not_final_days(&window.not_final, today());
-        assert_eq!("2026-08-14 — those days haven't happened yet.", notice);
+        assert_eq!(
+            "Пт 14 августа не планировался: день ещё не наступил.",
+            notice
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -861,7 +817,8 @@ mod tests {
         assert_eq!(
             note.as_deref(),
             Some(
-                "\u{2139} Range ends 2026-09-30, past the last completed day (2026-09-21) \u{2014} those days' hours aren't final."
+                "\u{23F3} Диапазон идёт до Ср 30 сентября, дальше последнего завершённого дня \
+                 (Пн 21 сентября): часы этих дней ещё не итоговые."
             )
         );
     }

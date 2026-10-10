@@ -12,6 +12,7 @@ use super::*;
 use crate::api::stub::{STALL, StubServer, json_200, response};
 use crate::llm::fake::FakePlanModel;
 use crate::plan::fixtures::date;
+use crate::plan::render::ALL_CLOSED;
 
 const INVENIAM: &str = "Inveniam - DevPro - Work";
 const AI: &str = "AI Practices - DevPro - Work";
@@ -197,6 +198,7 @@ enum Run {
 struct Harness {
     dir: TempDir,
     config: Config,
+    today: NaiveDate,
     now: fn() -> DateTime<Utc>,
 }
 
@@ -210,7 +212,16 @@ impl Harness {
         Self {
             dir: TempDir::new().unwrap(),
             config: crate::config::parse(CONFIG).unwrap(),
+            today: today(),
             now: nine_am,
+        }
+    }
+
+    /// The same harness on another day. Only `today` moves; the clock stays [`nine_am`].
+    fn on(today: NaiveDate) -> Self {
+        Self {
+            today,
+            ..Self::new()
         }
     }
 
@@ -246,7 +257,7 @@ impl Harness {
             portal: &portal,
             state: &state,
             zone: &Utc,
-            today: today(),
+            today: self.today,
             now: self.now,
         };
         let planning = Planning { model, is_meeting };
@@ -444,7 +455,7 @@ async fn the_scan_offers_final_unfilled_working_days_and_says_what_it_held_back(
     );
     assert!(
         io.err_text()
-            .contains("Skipped (hours not final yet): 2026-10-08 (today)"),
+            .contains("\u{23F3} Сегодня, Чт 8 октября, не планировался: часы ещё не итоговые."),
         "{}",
         io.err_text()
     );
@@ -482,11 +493,42 @@ async fn an_empty_scan_that_held_today_back_does_not_claim_every_day_is_closed()
     assert_eq!(
         io.out,
         vec![
-            "Nothing to settle yet. Held back: 2026-10-08 (today). Use --include-today to settle \
-             today anyway."
+            "Планировать пока нечего. Сегодня, Чт 8 октября, не планировался: часы ещё не \
+             итоговые. Спланировать и его: `--include-today`."
         ]
     );
     assert!(h.state().load().unwrap().md_unchanged());
+}
+
+/// A Saturday is never planned, so the Saturday's own Chrono work is not "held back":
+/// the note used to name it and advise `--include-today`, which plans no Saturday.
+#[tokio::test]
+async fn a_weekend_today_is_not_reported_as_held_back() {
+    let saturday = date(2026, 10, 10);
+    let h = Harness::on(saturday);
+    let portal = StubServer::start(vec![
+        user(),
+        empty_view(),
+        empty_view(),
+        empty_view(),
+        empty_view(),
+    ]);
+    let chrono_stub = StubServer::start(vec![chrono(&[entry(1, saturday, 9, AI, "Notes", 1.0)])]);
+    let model = FakePlanModel::new(vec![]);
+
+    let (result, io) = h
+        .run(
+            Run::Plan(SettleArgs::default()),
+            &portal.base_url,
+            &chrono_stub.base_url,
+            &model,
+        )
+        .await;
+
+    assert_eq!(result.unwrap(), Outcome::Ok);
+    portal.requests();
+    assert_eq!(io.err_text(), "");
+    assert_eq!(io.out, vec![ALL_CLOSED]);
 }
 
 #[tokio::test]
@@ -1014,7 +1056,7 @@ async fn a_timed_out_write_that_landed_counts_as_written() {
     assert_eq!(posts(&portal.requests()).len(), 2);
     assert!(
         io.err_text()
-            .contains("timed out, but the line is in DevPro"),
+            .contains("DevPro не подтвердил запись, но строка уже в DevPro"),
         "{}",
         io.err_text()
     );

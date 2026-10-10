@@ -287,7 +287,7 @@ impl PlanModel for ClaudeCliModel {
                 Ok(value) => return Ok(value),
                 Err(error) if error.kind.is_retryable() && attempt < MAX_ATTEMPTS => {
                     eprintln!(
-                        "\u{2139} The plan model failed ({:?}), trying again in {}s",
+                        "\u{23F3} Модель плана ответила ошибкой ({:?}), повтор через {} с",
                         error.kind,
                         backoff.as_secs()
                     );

@@ -29,8 +29,8 @@ use crate::api::chrono::ChronoClient;
 use crate::api::portal::{ApiError, TtApiClient};
 use crate::commands::settle_period;
 use crate::commands::settle_window::{
-    SCAN_DAYS, describe_not_final_days, last_settleable_day, nothing_to_settle_message,
-    resolve_range, split_by_finality, unfilled_days,
+    NOT_YET, SCAN_DAYS, describe_not_final_days, is_workday, last_settleable_day,
+    nothing_to_settle_message, resolve_range, split_by_finality, unfilled_days,
 };
 use crate::commands::{Console, Outcome, parse_iso_date, usage_error, usage_line};
 use crate::config::Config;
@@ -639,17 +639,22 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         }
         days.sort();
         let window = split_by_finality(&days, self.today, include_today);
-        if !window.not_final.is_empty() {
+        let not_final: Vec<NaiveDate> = window
+            .not_final
+            .into_iter()
+            .filter(|day| is_workday(*day))
+            .collect();
+        if !not_final.is_empty() {
             io.err(&format!(
-                "\u{2139} Skipped (hours not final yet): {}",
-                describe_not_final_days(&window.not_final, self.today)
+                "{NOT_YET} {}",
+                describe_not_final_days(&not_final, self.today)
             ));
         }
         let logged: HashMap<NaiveDate, f64> = portal
             .iter()
             .map(|day| (day.date, day.logged_hours))
             .collect();
-        Ok((unfilled_days(&window.settleable, &logged), window.not_final))
+        Ok((unfilled_days(&window.settleable, &logged), not_final))
     }
 
     /// Numbers, renders, stores and prints a plan.
@@ -904,8 +909,10 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                     if let Some(what) = unconfirmed {
                         return Err(stop(self.unconfirmed(day.date, line, &before_ids, &what)));
                     }
+                    // One wording for every cause: the line landed, so which of them it was
+                    // changes nothing Yurii does next. The cause stays in the stop texts above.
                     io.err(&format!(
-                        "\u{2139} {prefix}{}: {cause}, but the line is in DevPro",
+                        "{NOT_YET} {prefix}{}: DevPro не подтвердил запись, но строка уже в DevPro",
                         line.addr
                     ));
                 }
@@ -1263,7 +1270,7 @@ fn is_late_write(worklog: &WorklogDetail, write: &UnconfirmedWrite) -> bool {
 fn warn_fallbacks(fallbacks: &[FallbackId], io: &mut dyn Console) {
     for fallback in fallbacks {
         io.err(&format!(
-            "\u{26A0} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.config/tt-devpro/config.yaml. Check it still points at the right project.",
+            "\u{26A0}\u{FE0F} '{}' is not in your assigned projects \u{2014} using id {} from project_ids in ~/.config/tt-devpro/config.yaml. Check it still points at the right project.",
             fallback.name, fallback.id
         ));
     }
