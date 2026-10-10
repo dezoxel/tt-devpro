@@ -885,14 +885,13 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                 .await
             {
                 Ok(true) => {}
-                Ok(false) => {
-                    return Err(stop(
-                        "DevPro did not confirm the write (no 200)".to_string(),
-                    ));
-                }
-                Err(error) => {
-                    let Some(cause) = unknown_outcome(&error) else {
-                        return Err(stop(failure_text(&error)));
+                outcome => {
+                    let cause = match outcome {
+                        Ok(_) => "DevPro answered the write without a 200".to_string(),
+                        Err(error) => match unknown_outcome(&error) {
+                            Some(cause) => cause,
+                            None => return Err(stop(failure_text(&error))),
+                        },
                     };
                     let unconfirmed = match self.landed(day.date, line, &before_ids, &written).await
                     {
@@ -963,8 +962,7 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
         if ledger.is_empty() {
             return Ok((days.to_vec(), Vec::new()));
         }
-        let (kept, held) =
-            check_unconfirmed(&ledger, days, portal, (self.now)(), self.today, self.zone);
+        let (kept, held) = check_unconfirmed(&ledger, days, portal, (self.now)(), self.zone);
         if kept.len() != ledger.len() {
             self.state.save_unconfirmed(&kept)?;
         }
@@ -1173,8 +1171,9 @@ const LATE_WRITE_WINDOW: TimeDelta = TimeDelta::minutes(15);
 ///
 /// - an entry on a day DevPro already holds at 8.0 h is dropped: no plan will be built on that
 ///   day, whether the late worklog is part of it or not;
-/// - an entry on a day not being planned now is kept for the run that plans it, unless it is
-///   older than any scan reaches; an explicit range that plans such a day still checks it;
+/// - an entry on a day not being planned now is kept for the run that plans it, until the
+///   write itself is older than the scan: a plain scan after a stopped `--apply` on an old
+///   explicit range must not delete what the next run of that range has to check;
 /// - a new worklog matching the entry holds the day and names the delete that releases it;
 /// - no match within [`LATE_WRITE_WINDOW`] holds the day until the window ends;
 /// - no match after it drops the entry, and the day is planned.
@@ -1183,15 +1182,14 @@ fn check_unconfirmed<Tz: TimeZone>(
     days: &[NaiveDate],
     portal: &[PortalDay],
     now: DateTime<Utc>,
-    today: NaiveDate,
     zone: &Tz,
 ) -> (Vec<UnconfirmedWrite>, Vec<DayError>) {
-    let oldest = today.checked_sub_days(Days::new(SCAN_DAYS));
+    let lifetime = TimeDelta::days(i64::try_from(SCAN_DAYS).unwrap_or(i64::MAX));
     let mut kept: Vec<UnconfirmedWrite> = Vec::new();
     let mut reasons: BTreeMap<NaiveDate, Vec<String>> = BTreeMap::new();
     for write in ledger {
         let in_devpro = portal.iter().find(|day| day.date == write.date);
-        let too_old = oldest.is_some_and(|oldest| write.date < oldest);
+        let too_old = now - write.written_at > lifetime;
         let full = in_devpro.is_some_and(|day| portal_quarters(day) >= Some(DAY_QUARTERS));
         if full {
             continue;

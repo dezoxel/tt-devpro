@@ -1070,16 +1070,21 @@ async fn a_timed_out_write_that_did_not_land_is_not_sent_again_and_is_recorded()
     );
 }
 
-/// A gateway's 504, or a connection lost after the request went out, says no more than a
-/// timeout does about whether the portal kept the write: it is checked and recorded the same way.
+/// A gateway's 504, a connection lost after the request went out, or a 2xx other than 200 says
+/// no more than a timeout does about whether the portal kept the write: it is checked and
+/// recorded the same way.
 #[tokio::test]
-async fn a_write_answered_by_a_5xx_or_a_lost_connection_is_recorded_like_a_timeout() {
+async fn a_write_answered_by_a_5xx_a_lost_connection_or_no_200_is_recorded_like_a_timeout() {
     let gateway = response(504, "Gateway Timeout", "text/plain", "upstream timed out");
     for (failure, cause) in [
         (gateway, "DevPro answered 504 to the write"),
         (
             String::new(),
             "the connection failed after the write was sent",
+        ),
+        (
+            response(202, "Accepted", "application/json", "{}"),
+            "DevPro answered the write without a 200",
         ),
     ] {
         let h = Harness::new();
@@ -1219,8 +1224,8 @@ async fn an_expired_unconfirmed_write_is_dropped_and_the_day_planned() {
     let h = Harness::new();
     let ledger = vec![
         unconfirmed_on(monday(), 16),
-        // Older than any scan reaches: nothing will check it again.
-        unconfirmed_on(date(2026, 8, 1), 60),
+        // Written longer ago than any scan reaches: nothing will check it again.
+        unconfirmed_on(date(2026, 8, 1), 46 * 24 * 60),
     ];
     h.state().save_unconfirmed(&ledger).unwrap();
     let portal = StubServer::start(vec![user(), empty_view(), empty_view(), assigned()]);
@@ -1258,14 +1263,7 @@ fn an_unconfirmed_write_older_than_the_scan_is_still_checked_on_a_day_being_plan
     }];
     let ledger = vec![unconfirmed_on(old, 2)];
 
-    let (kept, held) = check_unconfirmed(
-        &ledger,
-        &[old],
-        &portal,
-        nine_am(),
-        nine_am().date_naive(),
-        &Utc,
-    );
+    let (kept, held) = check_unconfirmed(&ledger, &[old], &portal, nine_am(), &Utc);
 
     assert_eq!(kept, ledger);
     assert_eq!(held.len(), 1);
@@ -1277,6 +1275,18 @@ fn an_unconfirmed_write_older_than_the_scan_is_still_checked_on_a_day_being_plan
         "{}",
         held[0].message
     );
+}
+
+/// A plain scan after a stopped `--apply` on an old explicit range does not plan that day: the
+/// entry waits for the run that does, however old its date.
+#[test]
+fn an_unconfirmed_write_on_an_old_day_outlives_a_scan_that_does_not_plan_it() {
+    let ledger = vec![unconfirmed_on(date(2026, 8, 3), 2)];
+
+    let (kept, held) = check_unconfirmed(&ledger, &[monday()], &[], nine_am(), &Utc);
+
+    assert_eq!(kept, ledger);
+    assert!(held.is_empty());
 }
 
 /// Yurii kept the late worklog and closed the day around it in the portal: nothing is left to
