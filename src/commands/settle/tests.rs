@@ -931,7 +931,7 @@ async fn a_failed_write_undoes_its_day_stops_the_run_and_drops_the_plan() {
         assigned(),
         empty_view(),
         json_200("{}"),
-        response(500, "Internal Server Error", "text/plain", "boom"),
+        response(400, "Bad Request", "text/plain", "boom"),
         half_written_monday(),
         json_200("{}"),
         empty_view(),
@@ -961,7 +961,7 @@ async fn an_undo_that_fails_names_each_line_left_and_its_command() {
         assigned(),
         empty_view(),
         json_200("{}"),
-        response(500, "Internal Server Error", "text/plain", "boom"),
+        response(400, "Bad Request", "text/plain", "boom"),
         half_written_monday(),
         response(500, "Internal Server Error", "text/plain", "boom"),
         half_written_monday(),
@@ -1068,6 +1068,49 @@ async fn a_timed_out_write_that_did_not_land_is_not_sent_again_and_is_recorded()
         h.state().unconfirmed().unwrap(),
         vec![unconfirmed_on(monday(), 0)]
     );
+}
+
+/// A gateway's 504, or a connection lost after the request went out, says no more than a
+/// timeout does about whether the portal kept the write: it is checked and recorded the same way.
+#[tokio::test]
+async fn a_write_answered_by_a_5xx_or_a_lost_connection_is_recorded_like_a_timeout() {
+    let gateway = response(504, "Gateway Timeout", "text/plain", "upstream timed out");
+    for (failure, cause) in [
+        (gateway, "DevPro answered 504 to the write"),
+        (
+            String::new(),
+            "the connection failed after the write was sent",
+        ),
+    ] {
+        let h = Harness::new();
+        h.planned_monday().await;
+        let portal = StubServer::start(vec![
+            user(),
+            assigned(),
+            empty_view(),
+            json_200("{}"),
+            failure,
+            half_written_monday(),
+            half_written_monday(),
+            json_200("{}"),
+            empty_view(),
+        ]);
+
+        let model = FakePlanModel::new(vec![]);
+        let (result, io) = h.run(Run::Apply, &portal.base_url, NOWHERE, &model).await;
+
+        assert_eq!(result.unwrap(), Outcome::Failed);
+        let requests = portal.requests();
+        assert_eq!(posts(&requests).len(), 2, "{cause}");
+        assert_eq!(deletes(&requests), vec!["/worklog/w1"]);
+        let err = io.err_text();
+        assert!(err.contains(cause), "{err}");
+        assert!(err.contains("The next settle checks for it"), "{err}");
+        assert_eq!(
+            h.state().unconfirmed().unwrap(),
+            vec![unconfirmed_on(monday(), 0)]
+        );
+    }
 }
 
 // -- writes that timed out --------------------------------------------------

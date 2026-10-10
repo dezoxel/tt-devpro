@@ -855,8 +855,9 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
     }
 
     /// Creates a day's new lines, one at a time. Returns how many were written, or where it
-    /// stopped. A timeout is not retried: the request may have landed, so DevPro is read
-    /// and the line counts as written only if it is there.
+    /// stopped. A write whose outcome is unknown (see [`unknown_outcome`]) is not retried: the
+    /// request may have landed, so DevPro is read and the line counts as written only if it is
+    /// there.
     async fn write_day(
         &self,
         day: &DayPlan,
@@ -889,34 +890,34 @@ impl<Tz: TimeZone> Settle<'_, Tz> {
                         "DevPro did not confirm the write (no 200)".to_string(),
                     ));
                 }
-                Err(error) if is_timeout(&error) => {
+                Err(error) => {
+                    let Some(cause) = unknown_outcome(&error) else {
+                        return Err(stop(failure_text(&error)));
+                    };
                     let unconfirmed = match self.landed(day.date, line, &before_ids, &written).await
                     {
                         Ok(true) => None,
-                        Ok(false) => {
-                            Some("the write timed out and the line is not in DevPro".to_string())
-                        }
+                        Ok(false) => Some(format!("{cause} and the line is not in DevPro")),
                         Err(error) => Some(format!(
-                            "the write timed out and DevPro could not be read to check it \
-                             ({error:#})"
+                            "{cause} and DevPro could not be read to check it ({error:#})"
                         )),
                     };
                     if let Some(what) = unconfirmed {
                         return Err(stop(self.unconfirmed(day.date, line, &before_ids, &what)));
                     }
                     io.err(&format!(
-                        "\u{2139} {prefix}{}: the write timed out, but the line is in DevPro",
+                        "\u{2139} {prefix}{}: {cause}, but the line is in DevPro",
                         line.addr
                     ));
                 }
-                Err(error) => return Err(stop(failure_text(&error))),
             }
             written.push(line);
         }
         Ok(written.len())
     }
 
-    /// Records a timed-out write that is not known to be in DevPro, and says so. It is never
+    /// Records a write whose outcome is unknown and that is not known to be in DevPro, and
+    /// says so. It is never
     /// sent again: it may still land, after the rollback has read the day, and the ledger is
     /// how the next `settle` finds it if it does.
     fn unconfirmed(
@@ -1399,12 +1400,27 @@ fn create_request(date: NaiveDate, line: &PlanLine) -> CreateWorklogRequest {
     }
 }
 
-fn is_timeout(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<reqwest::Error>()
-            .is_some_and(reqwest::Error::is_timeout)
-    })
+/// What happened to a write that failed without saying whether the portal kept it, or `None`
+/// when the failure says it did not. A timeout, a 5xx (a gateway gives up on an upstream that
+/// may still commit) and a connection lost after the request went out all leave the write
+/// possibly landed; a 4xx is a refusal, and a connection that never opened sent nothing.
+fn unknown_outcome(error: &anyhow::Error) -> Option<String> {
+    let transport = || {
+        error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
+    };
+    if transport().is_some_and(reqwest::Error::is_timeout) {
+        return Some("the write timed out".to_string());
+    }
+    if let Some(api) = error.downcast_ref::<ApiError>() {
+        return (500..=599)
+            .contains(&api.status_code)
+            .then(|| format!("DevPro answered {} to the write", api.status_code));
+    }
+    transport()
+        .filter(|transport| !transport.is_connect() && !transport.is_builder())
+        .map(|_| format!("the connection failed after the write was sent ({error:#})"))
 }
 
 fn failure_text(error: &anyhow::Error) -> String {

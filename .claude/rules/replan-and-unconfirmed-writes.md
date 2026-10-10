@@ -26,7 +26,7 @@ paths:
 
 ## `unconfirmed.json`
 
-- A write that timed out and was not found in DevPro (or DevPro could not be read to check) is never sent again. `Settle::unconfirmed` records it via `State::record_unconfirmed` with the day's `before_ids` and `written_at` from `Settle.now`, and `--apply` stops.
+- A write whose outcome is unknown — a timeout, a 5xx, or a connection lost after the request went out (`unknown_outcome`) — and that was not found in DevPro (or DevPro could not be read to check) is never sent again. A 4xx, or a connection that never opened, is a plain failure: rollback, no ledger. `Settle::unconfirmed` records it via `State::record_unconfirmed` with the day's `before_ids` and `written_at` from `Settle.now`, and `--apply` stops.
 - The ledger is not part of the plan: `State::clear` removes only `plan.md` and `plan.json`. Keep it that way — a stopped `--apply` drops the plan, and the ledger is the only record of the write.
 - `State::unconfirmed` returns an error for a file it cannot read or parse, never an empty list: an empty ledger is what lets a day be planned beside a worklog that landed late.
 - Both `plan` and `replan` call `hold_unconfirmed(&days, &portal)` after reading the portal and before `plan_days`, then add the held days to `planned.errors`. A new run that plans days does the same.
