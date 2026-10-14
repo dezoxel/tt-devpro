@@ -335,7 +335,12 @@ fn project_line(
     let mut line = format!("- {BILLABLE_MARK} {project} — ");
     match target {
         Some(target) => {
-            let used = logged / target.allocated;
+            // A portal period of 0 expected hours allocates nothing; 0/0 would print NaN.
+            let used = if target.allocated > 0.0 {
+                logged / target.allocated
+            } else {
+                0.0
+            };
             let due = target.due;
             line.push_str(&format!(
                 "{} из {} ч ({}%) {}",
