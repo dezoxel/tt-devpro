@@ -1,6 +1,7 @@
 ---
 paths:
   - src/commands/settle_period.rs
+  - src/config.rs
 ---
 
 # Billing-period block under the settle plan
@@ -36,6 +37,6 @@ paths:
 - `target` (`settle_period.rs`) counts the allocation by day: each local working day of the period weighs the `fte` in force on it (0 without one). Allocated = `expectedHours` × Σfte / N working days — at one fte throughout that is `fte × expectedHours`, the formula before entries had dates. The weights use the local predicate's days, so a holiday the portal observes and the predicate does not shifts them by one day, the same accepted drift as «Days gone».
 - Due = Σfte of the days up to `through` / Σfte of the period: the share of the target the days gone ask for. Do not go back to the share of time gone: on 9 Oct 2026, 28 h of 52 at 0.5 → 0.75 was exactly on plan and read `↗84%` against time.
 - No entry holds any day of the period → no target: the project is listed only if it has hours, with «плановой аллокации нет» and where to set it. An entry that ended before the period is not listed.
-- Used = hours / allocated. Pace `↗N%` = used / due, rounded, capped at `MAX_PACE` (999), shown only from `MIN_DAYS_FOR_PACE` (2) working days and when due > 0. The statusline's 1/33 guard counts minutes; with whole days it never fires, so one full day of eleven would read 200%.
+- Used = hours / allocated, and 0 when allocated is 0 (a portal period of 0 `expectedHours`): `fte > 0` is validated, `expectedHours` is not, and 0/0 printed NaN. Pace `↗N%` = used / due, rounded, capped at `MAX_PACE` (999), shown only from `MIN_DAYS_FOR_PACE` (2) working days and when due > 0. The statusline's 1/33 guard counts minutes; with whole days it never fires, so one full day of eleven would read 200%.
 - «X FTE из Y»: X = hours / (8 × days gone), Y = mean fte over the days gone. Before the first day an entry holds (due = 0) there is no Y, no `┃` and no pace.
 - The bar is `BAR_CELLS` (10) cells, `█` used / `░` rest, with `┃` between cells at due, clamped off both ends.
