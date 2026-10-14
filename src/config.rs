@@ -11,6 +11,7 @@
 //! real day with nothing pointing at the config.
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,7 +49,8 @@ pub struct Config {
     pub session_cookie: Option<String>,
     /// The planned billable allocation per DevPro project, in FTE. The portal frontend
     /// shows FTE only to an approver (`teamFte`), not to the person logging time, so the
-    /// period line in `settle` reads it from here.
+    /// period line in `settle` reads it from here. An entry holds `[from, to]`, and a
+    /// project may have several, so a mid-period change is counted day by day.
     /// Optional: without it the line shows the FTE so far and no pace.
     #[serde(default)]
     pub allocations: Vec<Allocation>,
@@ -72,12 +74,23 @@ pub struct Filler {
     pub max_hours: f64,
 }
 
-/// `fte` of 0.5 is half of a full-time week on that project.
+/// `fte` of 0.5 is half of a full-time week on that project, on every day from `from` to
+/// `to`, both included, as the allocation email states them. Both dates are required: an
+/// entry with no dates was planned at the new FTE for the whole period it changed in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allocation {
     pub devpro_project: String,
     pub fte: f64,
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+}
+
+impl Allocation {
+    /// Whether the entry is in force on `day`.
+    pub fn holds(&self, day: NaiveDate) -> bool {
+        self.from <= day && day <= self.to
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -167,8 +180,7 @@ pub fn parse(content: &str) -> Result<Config> {
             );
         }
     }
-    let mut allocated: Vec<&str> = Vec::new();
-    for allocation in &config.allocations {
+    for (index, allocation) in config.allocations.iter().enumerate() {
         if !(allocation.fte > 0.0 && allocation.fte <= 1.0) {
             bail!(
                 "allocations in ~/.config/tt-devpro/config.yaml: fte of {} must be above 0 and at \
@@ -177,13 +189,31 @@ pub fn parse(content: &str) -> Result<Config> {
                 allocation.fte
             );
         }
-        if allocated.contains(&allocation.devpro_project.as_str()) {
+        if allocation.from > allocation.to {
             bail!(
-                "allocations in ~/.config/tt-devpro/config.yaml: {} is listed twice",
-                allocation.devpro_project
+                "allocations in ~/.config/tt-devpro/config.yaml: {} runs from {} to {}, which \
+                 ends before it starts",
+                allocation.devpro_project,
+                allocation.from,
+                allocation.to
             );
         }
-        allocated.push(&allocation.devpro_project);
+        // Pairwise against every entry above, so the order they are listed in does not matter.
+        if let Some(other) = config.allocations[..index].iter().find(|other| {
+            other.devpro_project == allocation.devpro_project
+                && other.from <= allocation.to
+                && allocation.from <= other.to
+        }) {
+            bail!(
+                "allocations in ~/.config/tt-devpro/config.yaml: {} has two entries in force on \
+                 the same days, {}..{} and {}..{}",
+                allocation.devpro_project,
+                other.from,
+                other.to,
+                allocation.from,
+                allocation.to
+            );
+        }
     }
     Ok(config)
 }
@@ -362,23 +392,65 @@ max_synthetic_hours: 2.5
 
     const ALLOCATION: &str = "  - devpro_project: \"Inveniam SOW #5\"\n";
 
+    /// One entry: the project, its fte and the days it holds.
+    fn entry(project: &str, fte: &str, from: &str, to: &str) -> String {
+        format!(
+            "  - devpro_project: \"{project}\"\n    fte: {fte}\n    from: {from}\n    to: {to}\n"
+        )
+    }
+
+    fn allocations(entries: &[String]) -> String {
+        format!("{MINIMAL}allocations:\n{}", entries.concat())
+    }
+
+    fn day(month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, month, day).unwrap()
+    }
+
+    /// The allocation email of 2026-10-12, as it is written in the config.
     #[test]
-    fn allocations_read_a_project_and_its_fte() {
-        let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: 0.5\n");
+    fn allocations_read_a_project_its_fte_and_its_days() {
+        let yaml = allocations(&[
+            entry("Inveniam SOW #5", "0.5", "2026-08-28", "2026-10-11"),
+            entry("Inveniam SOW #5", "0.75", "2026-10-12", "2026-12-12"),
+        ]);
         assert_eq!(
             parse(&yaml).expect("parses").allocations,
-            vec![Allocation {
-                devpro_project: "Inveniam SOW #5".to_string(),
-                fte: 0.5,
-            }]
+            vec![
+                Allocation {
+                    devpro_project: "Inveniam SOW #5".to_string(),
+                    fte: 0.5,
+                    from: day(8, 28),
+                    to: day(10, 11),
+                },
+                Allocation {
+                    devpro_project: "Inveniam SOW #5".to_string(),
+                    fte: 0.75,
+                    from: day(10, 12),
+                    to: day(12, 12),
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn an_allocation_holds_both_of_its_dates() {
+        let allocation = Allocation {
+            devpro_project: "Inveniam SOW #5".to_string(),
+            fte: 0.5,
+            from: day(10, 12),
+            to: day(10, 15),
+        };
+        for (date, holds) in [(11, false), (12, true), (15, true), (16, false)] {
+            assert_eq!(allocation.holds(day(10, date)), holds, "{date}");
+        }
     }
 
     /// An fte of 0 would divide by zero in the pace; above 1 is a typo for a percentage.
     #[test]
     fn an_allocation_fte_outside_zero_to_one_is_refused() {
         for fte in ["0", "-0.5", "50", ".nan"] {
-            let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: {fte}\n");
+            let yaml = allocations(&[entry("Inveniam SOW #5", fte, "2026-10-01", "2026-10-15")]);
             let message = parse(&yaml).expect_err(fte).to_string();
             assert!(
                 message.contains("must be above 0 and at most 1"),
@@ -387,21 +459,58 @@ max_synthetic_hours: 2.5
         }
     }
 
-    /// Two entries for one project would leave the reader to guess which one counts.
+    /// An entry with no dates is what planned all of 1–15 October at the new fte.
     #[test]
-    fn a_project_allocated_twice_is_refused() {
-        let entry = format!("{ALLOCATION}    fte: 0.5\n");
-        let yaml = format!("{MINIMAL}allocations:\n{entry}{entry}");
-        let message = parse(&yaml).expect_err("duplicate").to_string();
+    fn an_allocation_without_its_dates_is_refused() {
+        for dates in ["", "    from: 2026-10-01\n", "    to: 2026-10-15\n"] {
+            let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: 0.5\n{dates}");
+            assert!(parse(&yaml).is_err(), "{dates:?}");
+        }
+    }
+
+    #[test]
+    fn an_allocation_ending_before_it_starts_is_refused() {
+        let yaml = allocations(&[entry("Inveniam SOW #5", "0.5", "2026-10-15", "2026-10-01")]);
+        let message = parse(&yaml).expect_err("reversed").to_string();
         assert!(
-            message.contains("Inveniam SOW #5 is listed twice"),
+            message.contains("runs from 2026-10-15 to 2026-10-01, which ends before it starts"),
             "{message}"
         );
     }
 
+    /// Two entries in force on one day would leave the reader to guess which one counts. The
+    /// later entry listed first is the same overlap.
+    #[test]
+    fn two_entries_of_one_project_on_the_same_days_are_refused() {
+        let early = entry("Inveniam SOW #5", "0.5", "2026-08-28", "2026-10-12");
+        let late = entry("Inveniam SOW #5", "0.75", "2026-10-12", "2026-12-12");
+        for entries in [[early.clone(), late.clone()], [late, early]] {
+            let message = parse(&allocations(&entries))
+                .expect_err("overlap")
+                .to_string();
+            assert!(
+                message.contains("Inveniam SOW #5 has two entries in force on the same days"),
+                "{message}"
+            );
+        }
+        let same = entry("Inveniam SOW #5", "0.5", "2026-10-01", "2026-10-15");
+        assert!(parse(&allocations(&[same.clone(), same])).is_err());
+    }
+
+    #[test]
+    fn adjacent_entries_and_other_projects_on_the_same_days_are_accepted() {
+        let yaml = allocations(&[
+            entry("Inveniam SOW #5", "0.75", "2026-10-12", "2026-12-12"),
+            entry("Inveniam SOW #5", "0.5", "2026-08-28", "2026-10-11"),
+            entry("Delivery Practices", "0.25", "2026-10-12", "2026-12-12"),
+        ]);
+        assert_eq!(parse(&yaml).expect("parses").allocations.len(), 3);
+    }
+
     #[test]
     fn an_unknown_key_inside_an_allocation_is_refused() {
-        let yaml = format!("{MINIMAL}allocations:\n{ALLOCATION}    fte: 0.5\n    hours: 4\n");
+        let mut yaml = allocations(&[entry("Inveniam SOW #5", "0.5", "2026-10-01", "2026-10-15")]);
+        yaml.push_str("    hours: 4\n");
         assert!(parse(&yaml).is_err());
     }
 

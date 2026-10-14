@@ -1638,6 +1638,8 @@ fn allocate_inveniam(h: &mut Harness) {
     h.config.allocations = vec![crate::config::Allocation {
         devpro_project: "Inveniam SOW #5".to_string(),
         fte: 0.5,
+        from: date(2026, 10, 1),
+        to: date(2026, 10, 31),
     }];
 }
 

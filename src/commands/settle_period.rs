@@ -7,8 +7,9 @@
 //! portal at all, so it comes from `allocations` in the config.
 //!
 //! The pace reads like the weekly limit in the Claude Code statusline: a bar filled by the
-//! share of the allocation used, a `┃` where the period's clock stands, and `↗N%`, the share
-//! of the allocation the period ends at if the rate holds.
+//! share of the allocation used, a `┃` at the share that is due by now, and `↗N%`, the share
+//! of the allocation the period ends at if the rate holds. The allocation is counted day by
+//! day, so an FTE that changes mid-period moves the target, the `┃` and the pace with it.
 //!
 //! The block is printed, not stored: `plan.md` is the edit surface `--apply` hashes, and a
 //! line that changes every day has no place in it.
@@ -139,12 +140,62 @@ pub fn choose(periods: &[PtrPeriod], date: NaiveDate) -> Result<Period> {
 /// high after it. 1–15 Sep 2026 (Labor Day, 80 h) and 1–15 Oct 2026 (Columbus Day worked,
 /// 88 h) agree with the portal.
 pub fn working_days(start: NaiveDate, end: NaiveDate) -> u32 {
+    workdays(start, end).count() as u32
+}
+
+fn workdays(start: NaiveDate, end: NaiveDate) -> impl Iterator<Item = NaiveDate> {
     start
         .iter_days()
-        .take_while(|day| *day <= end)
+        .take_while(move |day| *day <= end)
         .filter(|day| !matches!(day.weekday(), Weekday::Sat | Weekday::Sun))
         .filter(|day| !is_us_federal_holiday(*day))
-        .count() as u32
+}
+
+/// What the allocations ask of one project in a period, counted day by day.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Target {
+    /// Hours over the whole period.
+    pub allocated: f64,
+    /// The share of `allocated` that falls on the working days up to `through`.
+    pub due: f64,
+    /// The mean fte over the working days up to `through`; `None` before the first of them
+    /// an allocation holds.
+    pub fte: Option<f64>,
+}
+
+/// The project's target in the period, or `None` when no entry holds any of its working days.
+///
+/// The portal's `expectedHours` stays the total, and each working day weighs its fte: a
+/// period at one fte throughout is `fte × expectedHours`, as before entries had dates. The
+/// days are the local predicate's, like the days gone; where the portal observes a holiday
+/// the predicate does not, the weights are one day off, the same accepted drift.
+pub fn target(
+    allocations: &[Allocation],
+    project: &str,
+    period: &Period,
+    through: NaiveDate,
+) -> Option<Target> {
+    let fte_on = |day: NaiveDate| {
+        allocations
+            .iter()
+            .find(|a| a.devpro_project == project && a.holds(day))
+            .map_or(0.0, |a| a.fte)
+    };
+    let (mut days, mut total, mut gone_days, mut gone) = (0u32, 0.0, 0u32, 0.0);
+    for day in workdays(period.start, period.end) {
+        let fte = fte_on(day);
+        days += 1;
+        total += fte;
+        if day <= through {
+            gone_days += 1;
+            gone += fte;
+        }
+    }
+    (total > 0.0).then(|| Target {
+        allocated: period.expected_hours * total / f64::from(days),
+        due: gone / total,
+        fte: (gone > 0.0).then(|| gone / f64::from(gone_days)),
+    })
 }
 
 /// Billable hours of one project so far: in DevPro, and planned but not yet written.
@@ -240,23 +291,23 @@ pub fn block(
     ];
 
     let mut billable = billable_hours(portal, plan, period.start, through);
+    // An entry that holds none of the period's days has nothing to show in it.
     for allocation in allocations {
-        billable
-            .entry(allocation.devpro_project.clone())
-            .or_default();
+        if target(allocations, &allocation.devpro_project, period, through).is_some() {
+            billable
+                .entry(allocation.devpro_project.clone())
+                .or_default();
+        }
     }
     if billable.is_empty() {
         out.push(format!("- {BILLABLE_MARK} billable-часов в периоде нет"));
     }
     for (project, so_far) in &billable {
-        let allocation = allocations.iter().find(|a| &a.devpro_project == project);
         out.push(project_line(
             project,
             *so_far,
-            allocation,
-            period,
+            target(allocations, project, period, through),
             elapsed_days,
-            elapsed,
         ));
     }
 
@@ -276,39 +327,33 @@ pub fn block(
 fn project_line(
     project: &str,
     so_far: Billable,
-    allocation: Option<&Allocation>,
-    period: &Period,
+    target: Option<Target>,
     elapsed_days: u32,
-    elapsed: f64,
 ) -> String {
     let logged = so_far.total();
     let fte = (elapsed_days > 0).then(|| logged / (8.0 * f64::from(elapsed_days)));
     let mut line = format!("- {BILLABLE_MARK} {project} — ");
-    match allocation {
-        Some(allocation) => {
-            let allocated = allocation.fte * period.expected_hours;
-            let used = if allocated > 0.0 {
-                logged / allocated
-            } else {
-                0.0
-            };
+    match target {
+        Some(target) => {
+            let used = logged / target.allocated;
+            let due = target.due;
             line.push_str(&format!(
                 "{} из {} ч ({}%) {}",
                 hours(logged),
-                hours(allocated),
+                hours(target.allocated),
                 percent(used),
-                bar(used, elapsed_days > 0, elapsed)
+                bar(used, elapsed_days > 0 && due > 0.0, due)
             ));
-            if elapsed_days >= MIN_DAYS_FOR_PACE {
-                let pace = ((used / elapsed * 100.0).round() as u32).min(MAX_PACE);
+            if elapsed_days >= MIN_DAYS_FOR_PACE && due > 0.0 {
+                let pace = ((used / due * 100.0).round() as u32).min(MAX_PACE);
                 line.push_str(&format!(" ↗{pace}%"));
             }
-            if let Some(fte) = fte {
-                line.push_str(&format!(
-                    " · {} FTE из {}",
-                    hours(fte),
-                    hours(allocation.fte)
-                ));
+            match (fte, target.fte) {
+                (Some(fte), Some(planned)) => {
+                    line.push_str(&format!(" · {} FTE из {}", hours(fte), hours(planned)));
+                }
+                (Some(fte), None) => line.push_str(&format!(" · {} FTE", hours(fte))),
+                (None, _) => {}
             }
         }
         None => {
@@ -328,11 +373,11 @@ fn project_line(
 }
 
 /// The statusline's `win_bar`: `█` for the share used, `░` for the rest, and `┃` between
-/// cells where the clock stands, kept off both ends where it would separate nothing.
-fn bar(used: f64, started: bool, elapsed: f64) -> String {
+/// cells at the share due by now, kept off both ends where it would separate nothing.
+fn bar(used: f64, started: bool, due: f64) -> String {
     let filled = ((used * f64::from(BAR_CELLS)).floor() as u32).min(BAR_CELLS);
     let tick =
-        started.then(|| ((elapsed * f64::from(BAR_CELLS)).round() as u32).clamp(1, BAR_CELLS - 1));
+        started.then(|| ((due * f64::from(BAR_CELLS)).round() as u32).clamp(1, BAR_CELLS - 1));
     let mut out = String::new();
     for cell in 0..BAR_CELLS {
         if tick == Some(cell) {
@@ -447,11 +492,26 @@ mod tests {
         }
     }
 
-    fn inveniam(fte: f64) -> Vec<Allocation> {
-        vec![Allocation {
+    fn allocation(fte: f64, from: NaiveDate, to: NaiveDate) -> Allocation {
+        Allocation {
             devpro_project: "Inveniam SOW #5".to_string(),
             fte,
-        }]
+            from,
+            to,
+        }
+    }
+
+    /// One fte over all of October.
+    fn inveniam(fte: f64) -> Vec<Allocation> {
+        vec![allocation(fte, date(2026, 10, 1), date(2026, 10, 31))]
+    }
+
+    /// The allocation email of 2026-10-12: 0.5 up to 11 October, 0.75 from the 12th.
+    fn inveniam_raised_on_the_12th() -> Vec<Allocation> {
+        vec![
+            allocation(0.5, date(2026, 8, 28), date(2026, 10, 11)),
+            allocation(0.75, date(2026, 10, 12), date(2026, 12, 12)),
+        ]
     }
 
     // -- the period ----------------------------------------------------------
@@ -786,6 +846,147 @@ mod tests {
         assert_eq!(
             out.last().unwrap(),
             "- ⚠️ не спланировано 1 дн. в периоде — их плановые часы не учтены"
+        );
+    }
+
+    // -- the allocation by day -----------------------------------------------
+
+    /// 1–15 October 2026: 7 working days at 0.5 and 4 at 0.75 are 7 × 4 h + 4 × 6 h = 52 h,
+    /// not the 66 h of 0.75 over the whole period.
+    #[test]
+    fn an_fte_raised_mid_period_counts_each_day_at_its_own_fte() {
+        let target = target(
+            &inveniam_raised_on_the_12th(),
+            "Inveniam SOW #5",
+            &october_first_half(),
+            date(2026, 10, 13),
+        )
+        .unwrap();
+        assert_eq!(target.allocated, 52.0);
+        assert_eq!(target.due, 5.0 / 6.5);
+        assert_eq!(target.fte, Some(5.0 / 9.0));
+    }
+
+    /// One fte over the whole period is the old `fte × expectedHours`, and the tick stands
+    /// where the days gone put it.
+    #[test]
+    fn one_fte_over_the_period_is_fte_times_the_expected_hours() {
+        let target = target(
+            &inveniam(0.5),
+            "Inveniam SOW #5",
+            &october_first_half(),
+            date(2026, 10, 8),
+        )
+        .unwrap();
+        assert_eq!(target.allocated, 44.0);
+        assert!((target.due - 6.0 / 11.0).abs() < 1e-12, "{}", target.due);
+        assert_eq!(target.fte, Some(0.5));
+    }
+
+    /// Starting on the 12th with nothing before: only the four days from the 12th count.
+    #[test]
+    fn an_allocation_starting_mid_period_asks_only_for_its_own_days() {
+        let allocations = [allocation(0.75, date(2026, 10, 12), date(2026, 12, 12))];
+        let target = target(
+            &allocations,
+            "Inveniam SOW #5",
+            &october_first_half(),
+            date(2026, 10, 13),
+        )
+        .unwrap();
+        assert_eq!(target.allocated, 24.0);
+        assert_eq!(target.due, 0.5);
+        assert_eq!(target.fte, Some(1.5 / 9.0));
+    }
+
+    #[test]
+    fn an_allocation_outside_the_period_or_of_another_project_is_no_target() {
+        let period = october_first_half();
+        let ended = [allocation(0.5, date(2026, 8, 28), date(2026, 9, 30))];
+        assert_eq!(
+            target(&ended, "Inveniam SOW #5", &period, date(2026, 10, 8)),
+            None
+        );
+        assert_eq!(
+            target(&inveniam(0.5), "AI Practices", &period, date(2026, 10, 8)),
+            None
+        );
+    }
+
+    /// The morning of 14 October: 40 h of 52 is exactly what the days so far ask for, so the
+    /// tick stands at 77% and the pace is 100%, at 0.56 of a planned 0.56 FTE.
+    #[test]
+    fn the_block_paces_a_raised_fte_against_what_is_due_so_far() {
+        let portal = [portal_day(
+            date(2026, 10, 1),
+            vec![worklog("Inveniam SOW #5", "Billable", 40.0)],
+        )];
+        let out = block(
+            &october_first_half(),
+            date(2026, 10, 13),
+            &portal,
+            &plan(vec![], vec![]),
+            &inveniam_raised_on_the_12th(),
+        );
+        assert_eq!(
+            out[2],
+            "- 💵 Inveniam SOW #5 — 40.0 из 52.0 ч (77%) ███████░┃░░ ↗100% · 0.56 FTE из 0.56"
+        );
+    }
+
+    /// The entry starts after the last counted day: the target is known, nothing is due yet,
+    /// so there is no tick, no pace and no planned FTE to compare with.
+    #[test]
+    fn before_the_allocation_starts_nothing_is_due() {
+        let allocations = [allocation(0.75, date(2026, 10, 12), date(2026, 12, 12))];
+        let portal = [portal_day(
+            date(2026, 10, 1),
+            vec![worklog("Inveniam SOW #5", "Billable", 4.0)],
+        )];
+        let out = block(
+            &october_first_half(),
+            date(2026, 10, 8),
+            &portal,
+            &plan(vec![], vec![]),
+            &allocations,
+        );
+        assert_eq!(
+            out[2],
+            "- 💵 Inveniam SOW #5 — 4.0 из 24.0 ч (17%) █░░░░░░░░░ · 0.08 FTE"
+        );
+    }
+
+    /// An entry that ended before the period is not listed; hours on the project are, with no
+    /// allocation.
+    #[test]
+    fn an_ended_allocation_is_not_listed_in_a_later_period() {
+        let ended = [allocation(0.5, date(2026, 8, 28), date(2026, 9, 30))];
+        let empty = block(
+            &october_first_half(),
+            date(2026, 10, 8),
+            &[],
+            &plan(vec![], vec![]),
+            &ended,
+        );
+        assert_eq!(empty[2], "- 💵 billable-часов в периоде нет");
+        let portal = [portal_day(
+            date(2026, 10, 1),
+            vec![worklog("Inveniam SOW #5", "Billable", 12.0)],
+        )];
+        let out = block(
+            &october_first_half(),
+            date(2026, 10, 8),
+            &portal,
+            &plan(vec![], vec![]),
+            &ended,
+        );
+        assert!(
+            out[2].ends_with(
+                "плановой аллокации нет: allocations в \
+                                  ~/.config/tt-devpro/config.yaml"
+            ),
+            "{}",
+            out[2]
         );
     }
 
